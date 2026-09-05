@@ -242,19 +242,21 @@ impl SymbolInfo {
         }
     }
 
-    /// Dzień potrójnego swapu w konwencji SILNIKA: **0 = poniedziałek**.
-    ///
-    /// Istnieje wyłącznie po to, żeby nikt nie musiał tej zamiany robić sam.
-    /// MT5 liczy dni od NIEDZIELI (`swap_rollover3days = 3` to środa),
-    /// a `conduit_core::weekday_of` od PONIEDZIAŁKU (środa = 2). Obie liczby
-    /// opisują ten sam dzień i właśnie dlatego są groźne: przepisanie
-    /// trójki z MT5 wprost do pola silnika daje CZWARTEK, a swap potroi się
-    /// o dobę za późno. Błąd nie rzuca wyjątku i nie widać go w wynikach
-    /// inaczej niż jako lekko przesunięty koszt.
+    /// Dzień UTRZYMANIA pozycji w numeracji 0 = poniedziałek.
+    /// To pole nie jest dobą WEJŚCIA po północy używaną przez SimBroker.
+    /// MT5 Wednesday=3 daje tutaj Wednesday=2; obciążenie następuje na
+    /// przejściu Wednesday→Thursday, czyli w dobie wejścia Thursday=3.
     #[inline]
     pub fn swap_rollover_weekday_mon0(&self) -> u32 {
         // niedziela 0 → poniedziałek 0: przesunięcie o 6 modulo 7
         ((self.swap_rollover3days + 6).rem_euclid(7)) as u32
+    }
+
+    /// Doba wejścia przy naliczeniu swapu, zgodna z Settings/SimBroker.
+    /// Nieprawidłowej odpowiedzi serwera nie zamieniamy w domyślny dzień.
+    pub fn swap_rollover_entry_weekday_mon0(&self) -> Option<u32> {
+        (0..=6).contains(&self.swap_rollover3days)
+            .then(|| (self.swap_rollover_weekday_mon0() + 1) % 7)
     }
 
     /// Dosuwa wolumen do siatki brokera (min / max / krok).
@@ -1025,7 +1027,12 @@ mod tests {
                 silnik,
                 "MT5 {mt5} (0=niedziela) ma dać {silnik} (0=poniedziałek)"
             );
+            assert_eq!(si.swap_rollover_entry_weekday_mon0(), Some((silnik + 1) % 7));
         }
+        si.swap_rollover3days = -1;
+        assert_eq!(si.swap_rollover_entry_weekday_mon0(), None);
+        si.swap_rollover3days = 7;
+        assert_eq!(si.swap_rollover_entry_weekday_mon0(), None);
     }
 
     #[test]

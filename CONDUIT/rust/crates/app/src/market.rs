@@ -183,6 +183,7 @@ impl MarketSource for Mt5Market {
             swap_mode: si.swap_mode,
             swap_rollover3days: si.swap_rollover3days,
             swap_rollover_weekday_mon0: si.swap_rollover_weekday_mon0(),
+            swap_rollover_entry_weekday_mon0: si.swap_rollover_entry_weekday_mon0(),
             swap_long_usd_per_lot_day: si.swap_usd_per_lot_day(true),
             swap_short_usd_per_lot_day: si.swap_usd_per_lot_day(false),
             usd_per_point: si.usd_per_point(),

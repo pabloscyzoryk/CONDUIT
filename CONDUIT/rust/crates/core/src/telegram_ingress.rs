@@ -29,6 +29,7 @@ struct ContentState {
     /// An EDIT may be delivered before its NEW during reconnect/backlog.
     /// Seeing the orphan edit must not make the later canonical NEW vanish.
     saw_new: bool,
+    saw_edit: bool,
 }
 
 impl Default for ContentMemory {
@@ -53,7 +54,7 @@ impl ContentMemory {
         }
     }
 
-    /// `true` means this delivery changes no text and LIVE will not forward it
+    /// `true` means this delivery adds no executable revision and LIVE will not forward it
     /// to the engine.  Unknown ids always pass, including an orphan edit after
     /// process restart, because there is no evidence it is a duplicate.
     pub fn duplikat_tresci(&mut self, message: &IncomingMessage) -> bool {
@@ -61,6 +62,12 @@ impl ContentMemory {
         match self.map.get_mut(&key) {
             Some(previous) => {
                 let incoming_is_new = message.edit_of.is_none();
+                // A replayed publication carries its original timestamp, not
+                // evidence of a newer revision. Once NEW + EDIT were seen, a
+                // late NEW must never restore the pre-edit geometry or stop.
+                if incoming_is_new && previous.saw_new && previous.saw_edit {
+                    return true;
+                }
                 let changed_text = previous.text != message.text;
                 let changed_parent = previous.reply_to != message.reply_to;
                 let missing_canonical_new = incoming_is_new && !previous.saw_new;
@@ -68,6 +75,7 @@ impl ContentMemory {
                     previous.text = message.text.clone();
                     previous.reply_to = message.reply_to;
                     previous.saw_new |= incoming_is_new;
+                    previous.saw_edit |= !incoming_is_new;
                     false
                 } else {
                     true
@@ -86,6 +94,7 @@ impl ContentMemory {
                         text: message.text.clone(),
                         reply_to: message.reply_to,
                         saw_new: message.edit_of.is_none(),
+                        saw_edit: message.edit_of.is_some(),
                     },
                 );
                 false
@@ -180,6 +189,19 @@ mod tests {
         let mut corrected = message(source, 8, Some(8), "TP1 HIT");
         corrected.reply_to = Some(42);
         assert!(!memory.duplikat_tresci(&corrected));
+    }
+
+    #[test]
+    fn delayed_new_cannot_roll_back_a_text_edit_or_poison_next_dedup() {
+        let source = SourceKey::new(-1001, None);
+        let mut memory = ContentMemory::new();
+        let original = message(source.clone(), 10, None, "MOVE SL TO 2090");
+        let corrected = message(source.clone(), 10, Some(10), "MOVE SL TO 2094");
+        assert!(!memory.duplikat_tresci(&original));
+        assert!(!memory.duplikat_tresci(&corrected));
+        assert!(memory.duplikat_tresci(&original), "late NEW rolled back latest EDIT");
+        assert!(memory.duplikat_tresci(&corrected), "late NEW poisoned content memory");
+        assert!(!memory.duplikat_tresci(&message(source, 10, Some(10), "MOVE SL TO 2096")));
     }
 
     #[test]

@@ -11,7 +11,7 @@ impl EntryEditOutcome {
     }
 }
 
-fn same_source(a:&EntrySignal,b:&EntrySignal)->bool {
+pub(super) fn same_source(a:&EntrySignal,b:&EntrySignal)->bool {
     a.side==b.side && a.is_limit==b.is_limit && a.is_stop==b.is_stop
         && a.lo==b.lo && a.hi==b.hi && a.sl==b.sl && a.tps==b.tps
         && a.tp_open==b.tp_open && a.warstwy_offset==b.warstwy_offset
@@ -45,16 +45,17 @@ impl Engine {
     pub(super) fn entry_edit_blocks(&self,id:Option<u32>)->bool {
         id.and_then(|id|self.basket(id)).is_some_and(|bk| {
             // A rollback toggle cannot erase an already persisted uncertainty.
-            bk.entry_edit_state.as_ref().is_some_and(|s|s.review.is_some())
+            self.pending_source_cancelled(bk.id)
+                || bk.entry_edit_state.as_ref().is_some_and(|s|s.review.is_some())
                 || (self.cfg.entry_edit_geometry_v2 && bk.entry_edit_state.as_ref()
                     .is_none_or(|s|s.schema_version!=1||s.source.is_none()))
         })
     }
 
-    fn edit_review(&mut self,id:u32,e:&EntrySignal,ts:Ts,reason:&str)->EntryEditOutcome {
+    pub(super) fn edit_review(&mut self,id:u32,e:&EntrySignal,ts:Ts,reason:&str)->EntryEditOutcome {
         if let Some(bk)=self.basket_mut(id) {
             let state=bk.entry_edit_state.get_or_insert_with(||Box::new(EntryEditState {
-                schema_version:1,revision:0,source:None,applied_ts:0,review:None,
+                schema_version:1,revision:0,source:None,applied_ts:0,cancelled_by_source_ts:None,review:None,
             }));
             state.review=Some(EntryEditReview{desired_source:e.clone(),received_ts:ts,reason:reason.into()});
         }

@@ -934,6 +934,11 @@ impl KodAkcji {
 /// egzekutor ([`EaRdzen::wykonaj_akcje`]) — dzięki temu obsługa odmowy,
 /// `stops_level` i księgowość są w JEDNYM miejscu i nie da się ich pominąć
 /// przez zapomnienie.
+fn source_allows_action(basket: &Basket, action: &AkcjaEa) -> bool {
+    !basket.entry_edit_state.as_ref().is_some_and(|s| s.cancelled_by_source_ts.is_some())
+        || !matches!(action, AkcjaEa::DolozPozycje { .. } | AkcjaEa::WejdzPonownie { .. })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AkcjaEa {
     /// nic nie rób — i to jest decyzja, nie brak decyzji
@@ -2462,7 +2467,10 @@ impl EaRdzen {
             }
 
             // ---- TAKTYKA ----
-            let r = self.rozstrzygnij(k, &syt);
+            let mut r = self.rozstrzygnij(k, &syt);
+            if !source_allows_action(bk, &r.akcja) {
+                r = Rozstrzygniecie::trzymaj(PowodAkcji::Brak);
+            }
             let (bilety, zlecenia) = match r.akcja {
                 AkcjaEa::Trzymaj => (Vec::new(), Vec::new()),
                 AkcjaEa::AnulujOczekujace => (Vec::new(), bk.pendings.clone()),
@@ -4423,6 +4431,28 @@ mod testy {
             bilety: vec![], zlecenia: vec![] };
         let q = b.q;
         EaRdzen::default().wykonaj_akcje(&konfig(WariantBety::Z), c, b, &q, 0.20, &d)
+    }
+
+    #[test]
+    fn publisher_withdrawal_blocks_ea_addons_but_keeps_existing_position_management() {
+        let bk = koszyk_testowy(&|bk| {
+            bk.entry_edit_state = Some(Box::new(crate::types::EntryEditState {
+                schema_version:1, revision:1, source:None, applied_ts:1,
+                cancelled_by_source_ts:Some(2), review:None,
+            }));
+        });
+        let add = AkcjaEa::DolozPozycje { side:Side::Buy, volume:0.01,
+            limit:None, sl:None, tp:None, level:0 };
+        let reenter = AkcjaEa::WejdzPonownie { side:Side::Buy, volume:0.01,
+            limit:None, sl:None, tp:None };
+        assert!(!source_allows_action(&bk, &add));
+        assert!(!source_allows_action(&bk, &reenter));
+        assert!(source_allows_action(&bk, &AkcjaEa::PrzesunStop(4000.0)));
+        assert!(source_allows_action(&bk, &AkcjaEa::ZamknijCzesc(0.5)));
+        assert!(source_allows_action(&bk, &AkcjaEa::AnulujOczekujace));
+        let fresh = koszyk_testowy(&|_| {});
+        assert!(source_allows_action(&fresh, &add));
+        assert!(source_allows_action(&fresh, &reenter));
     }
 
     #[test]

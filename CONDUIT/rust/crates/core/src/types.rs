@@ -436,6 +436,9 @@ pub struct EntryEditState {
     pub revision: u64,
     pub source: Option<crate::parser::EntrySignal>,
     pub applied_ts: Ts,
+    /// Explicit publisher withdrawal; cannot be undone by cosmetic/source edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_by_source_ts: Option<Ts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<EntryEditReview>,
 }

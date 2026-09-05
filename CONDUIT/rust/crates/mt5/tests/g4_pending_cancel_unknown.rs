@@ -252,7 +252,7 @@ fn run(side:Side,receipt_on:bool,fault:bool){
     assert_eq!(serde_json::to_value(unchanged).unwrap(),serde_json::to_value(&foreign).unwrap(),
         "other engine position must be unchanged by the first engine's edit");
     let mut protective_proof=Value::Null;
-    if fault && receipt_on {
+    if fault {
         f.bridge.refresh_quote().unwrap();
         tick(&mut e,&mut f,&mut waiting); // Reconcile actual late fill; the entry hold must not stop protection.
         let own_stop=if side==Side::Buy{3991.0}else{4014.0};
@@ -279,8 +279,12 @@ fn run(side:Side,receipt_on:bool,fault:bool){
             other.on_message(&mut b,&protect_other);}
         assert_eq!(f.bridge.positions().iter().find(|p|p.ticket==FOREIGN_TICKET).unwrap().sl,Some(other_stop),
             "the other owner must retain its own protective authority");
-        assert_eq!(f.bridge.receipt_barrier(),ReceiptBarrier::RequiresReview);
-        assert!(f.bridge.close_receipt_issue().is_some(),"refresh and SL must not erase unknown cancel");
+        assert_eq!(f.bridge.receipt_barrier(),if receipt_on {ReceiptBarrier::RequiresReview}else{ReceiptBarrier::Clear});
+        if receipt_on {
+            assert!(f.bridge.close_receipt_issue().is_some(),"refresh and SL must not erase unknown cancel");
+        }
+        assert!(e.baskets[0].entry_edit_state.as_ref().unwrap().review.is_some(),
+            "local edit review remains sticky even when the optional receipt pipeline is off");
         protective_proof=json!({"public_engine_own_stop":own_stop,"public_engine_other_stop":other_stop,
             "other_owner_authorized_only_after_original_edit":true,"sticky_review":true});
     }
@@ -303,14 +307,15 @@ fn run(side:Side,receipt_on:bool,fault:bool){
     assert_eq!(final_wire["history_reads"],0,"the current bridge has no typed pending evidence RPC");
     if fault {
         assert_eq!(f.bridge.unknown_sends,1,"test must exercise actual Transport timeout");
+        assert_eq!(new_placements,0,
+            "unknown cancellation must not send replacement with either receipt mode");
+        assert_eq!(final_wire["placed"],before["placed"],"later tick/protection must not replay replacement");
+        assert!(e.baskets[0].entry_edit_state.as_ref().unwrap().review.is_some());
         if receipt_on {
-            assert_eq!(new_placements,0,
-                "G4_CANCEL_UNKNOWN_UNSAFE: a cancel outcome is unknown, but replacement was sent before final order/fill proof");
             assert_eq!(immediate_barrier,"RequiresReview");
             assert_eq!(final_wire["placed"],before["placed"],"later tick/protection must not replay replacement");
         } else {
-            assert_eq!(new_placements,7,"UNSAFE compatibility only: OFF must preserve the old output");
-            assert_eq!(immediate_barrier,"Clear");
+            assert_eq!(immediate_barrier,"Clear","OFF leaves the optional global receipt pipeline off; local basket review supplies the hold");
         }
     }else{
         assert_eq!(after["cancels"].as_u64().unwrap() as usize,old);
@@ -325,8 +330,8 @@ fn run(side:Side,receipt_on:bool,fault:bool){
 #[test]fn g4_sell_edit_no_fault_control(){run(Side::Sell,true,false);}
 #[test]fn g4_buy_cancel_timeout_receipt_on_must_not_replace(){run(Side::Buy,true,true);}
 #[test]fn g4_sell_cancel_timeout_receipt_on_must_not_replace(){run(Side::Sell,true,true);}
-#[test]fn g4_buy_cancel_timeout_legacy_unsafe_compatibility(){run(Side::Buy,false,true);}
-#[test]fn g4_sell_cancel_timeout_legacy_unsafe_compatibility(){run(Side::Sell,false,true);}
+#[test]fn g4_buy_cancel_timeout_receipt_off_requires_basket_review(){run(Side::Buy,false,true);}
+#[test]fn g4_sell_cancel_timeout_receipt_off_requires_basket_review(){run(Side::Sell,false,true);}
 
 #[test]
 fn g4_cancel_disconnect_after_send_requires_explicit_sticky_review(){

@@ -300,6 +300,9 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "pending_ttl_h") {
         c.pending_ttl_h = v;
     }
+    if let Some(v) = b(doc, "explicit_pending_until_cancel") {
+        c.explicit_pending_until_cancel = v;
+    }
     if let Some(v) = b(doc, "pending_ttl_from_basket") {
         c.pending_ttl_from_basket = v;
     }
@@ -1474,6 +1477,12 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "day_trail_arm_pct") {
         c.day_trail_arm_pct = v;
     }
+    if let Some(v) = s(doc, "day_trail_basis") {
+        c.day_trail_basis = match v.as_str() {
+            "profit_peak" | "ProfitPeak" => DayTrailBasis::ProfitPeak,
+            _ => DayTrailBasis::EquityPeak,
+        };
+    }
 
     // ---------- budżet transakcji i jakość sygnału ----------
     if let Some(v) = u(doc, "daily_signal_budget") {
@@ -2276,6 +2285,7 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "entry_touch_tp",
         "entry_touch_levels",
         "pending_ttl_h",
+        "explicit_pending_until_cancel",
         "pending_never_cancel",
         "valid_till_tp2",
         "sl_min_dist",
@@ -2805,6 +2815,7 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "day_target_pct",
         "day_trail_stop_pct",
         "day_trail_arm_pct",
+        "day_trail_basis",
         // --- budżet transakcji ---
         "daily_signal_budget",
         "signal_min_rr",
@@ -3201,6 +3212,11 @@ pub fn preset_to_ui(preset: &Value) -> Value {
             "Daily" => Some("daily"),
             _ => None,
         });
+        przetlumacz("day_trail_basis", &|v| match v {
+            "EquityPeak" => Some("equity_peak"),
+            "ProfitPeak" => Some("profit_peak"),
+            _ => None,
+        });
         przetlumacz("risk_free_runner_target", &|v| match v {
             "KeepTp" => Some("keep"),
             "NextTp" => Some("next"),
@@ -3358,6 +3374,37 @@ pub fn merge_patch(doc: &mut Value, patch: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_pending_validity_is_a_real_ui_control_and_roundtrips() {
+        assert!(!core_from_ui(&serde_json::json!({})).explicit_pending_until_cancel);
+        for enabled in [false, true] {
+            let ui=serde_json::json!({"explicit_pending_until_cancel":enabled});
+            assert!(unmapped_keys(&ui).is_empty());
+            let mapped=core_from_ui(&ui);
+            assert_eq!(mapped.explicit_pending_until_cancel,enabled);
+            let doc=preset_to_ui(&serde_json::to_value(&mapped).unwrap());
+            assert_eq!(doc["explicit_pending_until_cancel"],enabled);
+            assert_eq!(core_from_ui(&doc).explicit_pending_until_cancel,enabled);
+        }
+    }
+
+    #[test]
+    fn day_trail_basis_roundtrips_both_ui_and_core_names() {
+        for (basis, ui_name, core_name) in [
+            (DayTrailBasis::EquityPeak, "equity_peak", "EquityPeak"),
+            (DayTrailBasis::ProfitPeak, "profit_peak", "ProfitPeak"),
+        ] {
+            for name in [ui_name, core_name] {
+                let typed = core_from_ui(&serde_json::json!({"day_trail_basis": name}));
+                assert_eq!(typed.day_trail_basis, basis);
+                let ui = preset_to_ui(&serde_json::to_value(&typed).unwrap());
+                assert_eq!(ui["day_trail_basis"], ui_name);
+                assert_eq!(core_from_ui(&ui).day_trail_basis, basis);
+            }
+        }
+        assert_eq!(core_from_ui(&serde_json::json!({})).day_trail_basis, DayTrailBasis::EquityPeak);
+    }
     use serde_json::json;
 
     #[test]

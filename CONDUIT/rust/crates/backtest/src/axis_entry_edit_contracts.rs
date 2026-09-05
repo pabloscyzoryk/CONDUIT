@@ -90,13 +90,63 @@ fn review(e:&Engine)->&str{&e.baskets[0].entry_edit_state.as_ref().unwrap().revi
 fn near(a:f64,b:f64){assert!((a-b).abs()<1e-8,"{a} != {b}");}
 
 #[test]
-fn source_snapshot_is_optional_off_and_versioned_on(){
-    let mut c=cfg();c.entry_edit_geometry_v2=false;let(e,_)=rig(c,BUY,4012.0);
-    let j=serde_json::to_string(&e.baskets).unwrap();assert!(!j.contains("entry_edit_state"));
-    let old:Vec<Basket>=serde_json::from_str(&j).unwrap();assert!(old[0].entry_edit_state.is_none());
-    let(e,_)=rig(cfg(),BUY,4012.0);let state=e.baskets[0].entry_edit_state.as_ref().unwrap();
-    assert_eq!((state.schema_version,state.revision),(1,1));assert!(state.source.is_some());
+fn source_snapshot_is_versioned_for_both_paths_and_legacy_files_remain_readable(){
+    for enabled in [false, true] {
+        let mut c=cfg(); c.entry_edit_geometry_v2=enabled;
+        let(e,_)=rig(c,BUY,4012.0);
+        let j=serde_json::to_string(&e.baskets).unwrap();
+        let saved:Vec<Basket>=serde_json::from_str(&j).unwrap();
+        let state=saved[0].entry_edit_state.as_ref().unwrap();
+        assert_eq!((state.schema_version,state.revision),(1,1));
+        assert!(state.source.is_some(), "cosmetic no-op needs source in both modes");
+        let mut legacy:serde_json::Value=serde_json::from_str(&j).unwrap();
+        for basket in legacy.as_array_mut().unwrap() {
+            basket.as_object_mut().unwrap().remove("entry_edit_state");
+        }
+        let old:Vec<Basket>=serde_json::from_value(legacy).unwrap();
+        assert!(old[0].entry_edit_state.is_none(), "old disk snapshots remain supported");
+    }
 }
+#[test]
+fn legacy_cancel_failure_requires_review_without_rebuilding_or_committing_source() {
+    for geometry in [false,true] {
+        for fault in ["rejected", "ack-retained", "filled-during-cancel", "barrier"] {
+            let mut c=cfg(); c.entry_edit_geometry_v2=false;
+            let(mut e,mut b)=rig(c,BUY,4012.0);
+            let original=e.baskets[0].clone();
+            let before_opens=b.opens;
+            match fault {
+                "rejected"=>b.reject_cancel=Some(b.cancels+1),
+                "ack-retained"=>b.ack_keep=true,
+                "filled-during-cancel"=>b.fill_cancel=true,
+                "barrier"=>b.barrier=true,
+                _=>unreachable!(),
+            }
+            let changed=if geometry {BUY.replace("4005/4000","4006/4000")}
+                else {BUY.replace("TP 4030","TP 4031")};
+            edit(&mut e,&mut b,&changed);
+            assert_eq!(b.opens,before_opens,"{fault} geometry={geometry}: unconfirmed cancellation must not open a replacement");
+            let state=e.baskets[0].entry_edit_state.as_ref().unwrap();
+            assert!(state.review.is_some(),"{fault} geometry={geometry}: failed execution needs visible review");
+            assert_eq!(state.source,original.entry_edit_state.as_ref().unwrap().source,
+                "a failed revision must not replace the last committed source");
+            assert_eq!(state.revision,1);
+            assert_eq!(e.baskets[0].zone_lo,original.zone_lo);
+            assert_eq!(e.baskets[0].zone_hi,original.zone_hi);
+            let opens=b.opens;
+            edit(&mut e,&mut b,&changed);
+            assert_eq!(b.opens,opens,"redelivery cannot bypass the persisted review");
+            let saved=serde_json::to_vec(&e.baskets).unwrap();
+            let mut restarted=Engine::new(e.cfg.clone(),b.account().balance);
+            restarted.adopt_baskets(serde_json::from_slice(&saved).unwrap());
+            b.barrier=false; b.ack_keep=false; b.reject_cancel=None; b.fill_cancel=false;
+            edit(&mut restarted,&mut b,&changed);
+            assert_eq!(b.opens,opens,"restart cannot clear an unconfirmed legacy revision");
+            assert!(restarted.baskets[0].entry_edit_state.as_ref().unwrap().review.is_some());
+        }
+    }
+}
+
 #[test]
 fn tp_only_edit_confirms_broker_targets_inplace(){
     let mut c=cfg();c.tp_schedule=TpSchedule::AllAtTp1;c.assign_tp_per_position=true;
@@ -301,11 +351,11 @@ fn geometry_edit_cannot_erase_unfilled_plan_progress_or_reenter_after_tp(){
 }
 
 #[test]
-fn real_b41_identical_edit_is_noop_and_material_sl_tp_delta_applies_once(){
+fn synthetic_ladder_identical_edit_is_noop_and_material_sl_tp_delta_applies_once(){
     const INITIAL:&str="BUY LIMITS GOLD @ 4100/4094 AREA\nTP 4103\nTP 4107\nTP 4112\nTP OPEN\nSL 4093";
     const MATERIAL:&str="BUY LIMITS GOLD @ 4100/4094 AREA\nTP 4103\nTP 4107\nTP 4120\nTP OPEN\nSL 4090";
     let mut c=cfg();c.entry_units=7;c.lot_fixed=0.01;c.dedup_edited_signals=true;
-    let(mut e,mut b)=rig(c,INITIAL,4381.64);
+    let(mut e,mut b)=rig(c,INITIAL,4105.64);
     assert_eq!(b.pendings().len(),7);assert!(b.positions().is_empty());
 
     let initial_wire=serde_json::to_vec(b.pendings()).unwrap();
@@ -315,14 +365,14 @@ fn real_b41_identical_edit_is_noop_and_material_sl_tp_delta_applies_once(){
     assert_eq!(initial_calls,(b.opens,b.mods,b.cancels),"identical replay must be a semantic no-op");
 
     edit(&mut e,&mut b,MATERIAL);
-    assert_eq!(e.baskets[0].sl,Some(4364.0));assert_eq!(e.baskets[0].tps[2],4394.0);
+    assert_eq!(e.baskets[0].sl,Some(4090.0));assert_eq!(e.baskets[0].tps[2],4120.0);
     assert_eq!(b.pendings().len(),7,"material edit must update, never duplicate, the grid");
     assert!(b.positions().is_empty(),"an edit must not re-enter at market");
-    assert!(b.pendings().iter().all(|p|p.sl==Some(4364.0)));
+    assert!(b.pendings().iter().all(|p|p.sl==Some(4090.0)));
 
     let material_wire=serde_json::to_vec(b.pendings()).unwrap();
     let material_calls=(b.opens,b.mods,b.cancels);
-    edit(&mut e,&mut b,&format!("{MATERIAL}\nFIRST ENTRY CAN BE AT ANY LEVEL OF 4374"));
+    edit(&mut e,&mut b,&format!("{MATERIAL}\nFIRST ENTRY CAN BE AT ANY LEVEL OF 4100"));
     assert_eq!(material_wire,serde_json::to_vec(b.pendings()).unwrap());
     assert_eq!(material_calls,(b.opens,b.mods,b.cancels),"cosmetic follow-up must not replay the delta");
 }

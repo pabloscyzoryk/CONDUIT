@@ -1,7 +1,10 @@
 
 use anyhow::Result;
-use conduit_backtest::data::load_messages;
+use conduit_backtest::data::{load_messages, ReplayMessage};
+use conduit_core::engine::IncomingMessage;
 use conduit_core::parser::{self, EntrySignal, Signal};
+use conduit_core::telegram_ingress::{opens_basket, stale_entry_age_minutes, ContentMemory};
+use conduit_core::types::SourceKey;
 use std::io::Write;
 
 /// Wersja rekordu AKCJI w pliku mostu. Otoczka `M|...|akcja` zostaje ta
@@ -127,6 +130,34 @@ fn n(v: Option<f64>) -> String {
     }
 }
 
+/// Exactly the runner's pre-engine LIVE gate, before Info records are removed.
+/// The memory key namespace is arbitrary for this single-source bridge; all
+/// messages use the same namespace, as the single-preset replay runner does.
+fn pass_live_ingress(m: &ReplayMessage, memory: &mut ContentMemory) -> bool {
+    if m.kanal == "__CONDUIT_CONTROL__"
+        && m.text == "__CONDUIT_LIVEBACKTEST_INGRESS_RESTART__"
+    {
+        *memory = ContentMemory::new();
+        return false;
+    }
+    let incoming = IncomingMessage {
+        ts: m.ts,
+        source: SourceKey::new(0, None),
+        source_name: m.kanal.clone(),
+        msg_id: m.msg_id,
+        reply_to: m.reply_to,
+        edit_of: m.edit_of,
+        text: m.text.clone(),
+    };
+    if memory.duplikat_tresci(&incoming) {
+        return false;
+    }
+    !m.telegram_published_ts.is_some_and(|published| {
+        stale_entry_age_minutes(m.ts, published, 5.0).is_some()
+            && opens_basket(&m.text, m.edit_of)
+    })
+}
+
 fn main() -> Result<()> {
     let mut signals = String::from("data/signals.json");
     let mut out = String::from("most_ea.csv");
@@ -140,6 +171,8 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut preset = String::new();
+    let mut live_telegram_ingress = false;
+    let mut exec_latency_ms = conduit_core::settings::Settings::default().exec_latency_ms;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -155,6 +188,7 @@ fn main() -> Result<()> {
             "--offset-ms" => offset_ms = next().parse()?,
             "--kanal" => tylko_kanal = next(),
             "--preset" => preset = next(),
+            "--live-telegram-ingress" => live_telegram_ingress = true,
             "--schema" => wire_schema = WireSchema::parse(&next())?,
             _ => anyhow::bail!("nieznany argument {a}"),
         }
@@ -169,6 +203,7 @@ fn main() -> Result<()> {
         let p: conduit_core::settings::Preset =
             serde_json::from_str(&std::fs::read_to_string(&preset)?)?;
         let c = &p.settings;
+        exec_latency_ms = c.exec_latency_ms;
         dedup_value_aware = c.dedup_klucz_z_wartoscia;
         profit_update_telemetry_only = c.profit_update_telemetry_only;
         eprintln!(
@@ -196,9 +231,10 @@ fn main() -> Result<()> {
     )?;
     writeln!(
         f,
-        "# CONTRACT schema={} dedup_value={}",
+        "# CONTRACT schema={} dedup_value={} live_telegram_ingress={}",
         wire_schema.number(),
-        if dedup_value_aware { 1 } else { 0 }
+        if dedup_value_aware { 1 } else { 0 },
+        if live_telegram_ingress { 1 } else { 0 }
     )?;
     writeln!(f, "# zrodlo={signals}")?;
     writeln!(
@@ -228,10 +264,19 @@ fn main() -> Result<()> {
     let (mut n_msg, mut n_act, mut n_entry) = (0u64, 0u64, 0u64);
     let mut per_kanal: std::collections::BTreeMap<String, u64> = Default::default();
     let mut n_odsianych = 0u64;
+    let mut ingress = ContentMemory::new();
+    let mut ingress_dropped = 0u64;
 
     for m in &msgs {
         let ts = m.ts + offset_ms;
-        if ts < from || ts >= to {
+        // XT adds execution latency when dispatching this row. Include the
+        // same effective window as btp, including arrivals around midnight.
+        let effective_ts = ts.saturating_add(exec_latency_ms);
+        if effective_ts < from || effective_ts >= to {
+            continue;
+        }
+        if live_telegram_ingress && !pass_live_ingress(m, &mut ingress) {
+            ingress_dropped += 1;
             continue;
         }
         if !tylko_kanal.is_empty() && m.kanal != tylko_kanal {
@@ -327,6 +372,9 @@ fn main() -> Result<()> {
 
     eprintln!("wiadomosci ze zdarzeniem : {n_msg}");
     eprintln!("polecen razem            : {n_act}  (w tym wejsc: {n_entry})");
+    if live_telegram_ingress {
+        eprintln!("live ingress pominieto    : {ingress_dropped}");
+    }
     let rozbicie: Vec<String> = per_kanal.iter().map(|(k, v)| format!("{k}={v}")).collect();
     eprintln!("kanaly                   : {}", rozbicie.join("  "));
     if !tylko_kanal.is_empty() {
@@ -339,6 +387,42 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_bridge_filters_before_parser_and_preserves_orphan_new() {
+        let mut memory = ContentMemory::new();
+        let mut m = ReplayMessage {
+            ts: 10_000, msg_id: 42, edit_of: Some(42),
+            text: "TP1 HIT".into(), kanal: "Synergy".into(),
+            ..Default::default()
+        };
+        assert!(pass_live_ingress(&m, &mut memory));
+        assert!(!pass_live_ingress(&m, &mut memory));
+        m.edit_of = None;
+        assert!(pass_live_ingress(&m, &mut memory));
+        let restart = ReplayMessage {
+            kanal: "__CONDUIT_CONTROL__".into(),
+            text: "__CONDUIT_LIVEBACKTEST_INGRESS_RESTART__".into(),
+            ..Default::default()
+        };
+        assert!(!pass_live_ingress(&restart, &mut memory));
+        assert!(pass_live_ingress(&m, &mut memory));
+    }
+
+    #[test]
+    fn live_bridge_rejects_stale_market_open_but_keeps_management_edit() {
+        let mut memory = ContentMemory::new();
+        let mut m = ReplayMessage {
+            ts: 600_001, telegram_published_ts: Some(1), msg_id: 101,
+            text: "GOLD BUY NOW".into(), kanal: "Synergy".into(),
+            ..Default::default()
+        };
+        assert!(opens_basket(&m.text, None));
+        assert!(!pass_live_ingress(&m, &mut memory));
+        m.edit_of = Some(101);
+        m.text = "MOVE SL TO 2088".into();
+        assert!(pass_live_ingress(&m, &mut memory));
+    }
 
     fn parsed_entry(text: &str) -> EntrySignal {
         parser::parse(text)

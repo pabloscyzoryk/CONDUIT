@@ -226,15 +226,14 @@ pub struct CostsDoc {
     pub swap_mode: i32,
     /// Dzień potrójnego swapu **w konwencji MT5: 0 = niedziela**, więc 3 = środa.
     pub swap_rollover3days: i32,
-    /// Ten sam dzień **w konwencji silnika: 0 = poniedziałek**, więc 2 = środa.
-    ///
-    /// Dwa pola na jedną informację, bo pomyłka między tymi konwencjami jest
-    /// niewidoczna: przepisanie trójki z MT5 do pola `swap_rollover_weekday`
-    /// (którego `conduit_core::weekday_of` liczy od poniedziałku) daje
-    /// CZWARTEK i swap potraja się o dobę za późno. Nic nie rzuca błędu,
-    /// a w wynikach widać tylko lekko przesunięty koszt.
-    /// Do `Settings` silnika bierzcie **to** pole, nie tamto.
+    /// Dzień UTRZYMANIA w numeracji 0 = poniedziałek; 2 = środa.
+    /// Zachowane dla kompatybilności prezentacji. Nie przenosić do
+    /// Settings.swap_rollover_weekday, które oznacza dobę WEJŚCIA.
     pub swap_rollover_weekday_mon0: u32,
+    /// Doba WEJŚCIA po rolowaniu, właściwa dla Settings/SimBroker.
+    /// Dla MT5 Wednesday=3 obciążenie następuje na wejściu w Thursday=3.
+    #[serde(default)]
+    pub swap_rollover_entry_weekday_mon0: Option<u32>,
     /// swap przeliczony na WALUTĘ RACHUNKU, za jednego lota za dobę.
     /// `null`, gdy tryb swapu jest taki, że przeliczyć się nie da —
     /// zgadywana liczba w tym miejscu jest gorsza niż jej brak.

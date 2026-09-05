@@ -24,6 +24,7 @@ def compact(name: str, metrics: dict) -> dict:
                 'total_profit', 'start_balance', 'end_equity', 'market_days',
                 'positive_market_days', 'negative_market_days', 'flat_market_days',
                 'positive_market_days_pct', 'worst_market_day', 'worst_market_day_date',
+                'win_days_pct', 'win_days', 'trading_days',
                 'baskets', 'trades', 'max_dd_pct', 'max_daily_dd', 'min_equity',
                 'blown', 'stop_outs', 'profit_factor')},
             'filled_baskets': baskets.get('z_pozycjami'),

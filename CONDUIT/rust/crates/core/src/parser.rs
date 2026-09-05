@@ -202,10 +202,9 @@ re!(
     r"(?i)\bOUT\b[\s.,:;!—–-]{1,4}\bAT\s+(?:ENTRY|BE)\b"
 );
 re!(RE_CLOSE, r"(?i)\bCLOSE\s+(?:ALL|EVERYTHING|THE\s+REST)\b");
-re!(RE_CANCEL, r"(?i)\bCANCEL\b|\bDELETE\b.*\bLIMIT");
+re!(RE_CANCEL, r"(?i)\bCANCEL(?:L?ED)?\b|\bDELETE\b.*\bLIMIT");
 re!(RE_INVALID_ONLY, r"(?im)^\W*INVALID\W*$");
 re!(RE_NO_LONGER_VALID, r"(?i)\bNO\s+LONGER\s+VALID\b");
-re!(RE_WAIT_NEXT, r"(?i)\bWAIT\s+FOR\s+THE\s+NEXT\s+TRADE\b");
 re!(
     RE_NLV_PODMIOT,
     concat!(
@@ -792,7 +791,7 @@ fn hr_linia_loty(text: &str) -> bool {
 fn is_invalidated(text: &str) -> bool {
     RE_INVALID_ONLY.is_match(text)
         || RE_INVALID_LINIA.is_match(text)
-        || (RE_NO_LONGER_VALID.is_match(text) && RE_WAIT_NEXT.is_match(text))
+        || RE_NO_LONGER_VALID.is_match(text)
         || RE_ZONE_FAILED.is_match(text)
 }
 
@@ -1235,6 +1234,10 @@ pub fn odczyt_geometryczny(text: &str) -> Option<OdczytGeo> {
         niezmienniki: niezm,
     })
 }
+
+#[cfg(test)]
+#[path = "parser_synthetic_regression.rs"]
+mod synthetic_regression;
 
 #[cfg(test)]
 mod public_synthetic_tests {

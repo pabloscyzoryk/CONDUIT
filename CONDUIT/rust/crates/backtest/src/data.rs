@@ -486,6 +486,13 @@ pub fn load_messages_with_time_offset(
                 offset_ms
             )
         })?;
+        // Both timestamps describe the same clock. Moving only arrival
+        // fabricates latency and can reject a fresh signal as hours old.
+        if let Some(published) = m.telegram_published_ts {
+            m.telegram_published_ts = Some(published.checked_add(offset_ms).ok_or_else(|| {
+                anyhow::anyhow!("publication timestamp overflows after explicit clock shift")
+            })?);
+        }
     }
     // Dodajemy jedną stałą, więc kolejność pozostaje niezmieniona.
     Ok(messages)
@@ -498,7 +505,9 @@ fn load_raw_messages(f: RawMessageFile) -> Vec<ReplayMessage> {
         .messages
         .into_iter()
         .enumerate()
-        .filter(|(_, m)| !m.text.trim().is_empty())
+        // An empty edit is still a revision: live uses it to withdraw a
+        // deferred entry. Dropping it makes replay open the obsolete signal.
+        .filter(|(_, m)| m.edit_of.is_some() || !m.text.trim().is_empty())
         .map(|(source_order, m)| {
             (
                 source_order,
@@ -991,6 +1000,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(10000), Some(19500), None]
         );
+    }
+
+    #[test]
+    fn raw_empty_edit_is_not_lost_before_deferred_entry_management() {
+        let p = zapisz(r#"{"messages":[
+            {"ts":1000,"msg_id":101,"text":"BUY GOLD @ 3100/3098 SL 3090 TP 3110"},
+            {"ts":1100,"msg_id":101,"edit_of":101,"text":""},
+            {"ts":1200,"msg_id":102,"text":"   "}
+        ]}"#);
+        let messages = load_messages(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].edit_of, Some(101));
+        assert_eq!(messages[1].ts, 1100);
+        assert!(messages[1].text.is_empty());
+    }
+
+    #[test]
+    fn raw_explicit_clock_shift_preserves_receipt_age() {
+        let p = zapisz(r#"{"messages":[
+            {"ts":11000,"telegram_published_ts":10000,"msg_id":101,"text":"A"},
+            {"ts":22000,"latency_ms":2500,"msg_id":102,"text":"B"},
+            {"ts":33000,"msg_id":103,"text":"C"}
+        ]}"#);
+        for offset in [-180, 180] {
+            let messages = load_messages_with_time_offset(&p, offset).unwrap();
+            assert_eq!(messages[0].ts - messages[0].telegram_published_ts.unwrap(), 1000);
+            assert_eq!(messages[1].ts - messages[1].telegram_published_ts.unwrap(), 2500);
+            assert_eq!(messages[2].telegram_published_ts, None);
+        }
+        let _ = std::fs::remove_file(&p);
     }
 
     /// REGRESJA: wiadomość niosąca DWA polecenia zapisuje się jako dwa

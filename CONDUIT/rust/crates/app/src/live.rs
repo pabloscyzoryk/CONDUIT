@@ -2067,7 +2067,7 @@ pub fn start(
                     tracing::debug!(
                         msg_id = m.msg_id,
                         zrodlo = %m.source_name,
-                        "edycja bez zmiany treści — nie idzie do silnika"
+                        "powtórna dostawa bez nowej wykonywalnej rewizji — nie idzie do silnika"
                     );
                 }
 
@@ -2324,6 +2324,7 @@ struct Trwale {
     /// nie od ostatniego rekonektu.
     raport: ZegarRaportu,
     konto: String,
+    risk_scope_magic: Option<i64>,
     /// A failed account snapshot cannot be escaped by switching to another account.
     follow_persist_failed: bool,
 }
@@ -2334,6 +2335,10 @@ struct TrwalySilnik {
     halted: Option<String>,
     risk_override: bool,
     closed_today: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stopped_trading_day: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_sources: Vec<conduit_core::engine::PendingSourceRecord>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     continuation: Option<EngineContinuationV1>,
 }
@@ -2411,6 +2416,13 @@ fn read_follow_memory(st: &StateHandle, toz: &conduit_mt5::proto::AccountIdent, 
     Ok(Some(m))
 }
 
+fn sygnatura_ryzyka(silniki: &routing::Silniki) -> String {
+    serde_json::to_string(&silniki.lista.iter().map(|s| (
+        &s.format, &s.engine.halted, s.engine.risk_override,
+        s.engine.stopped_trading_day(), s.engine.pending_source_memory_revision(),
+    )).collect::<Vec<_>>()).expect("risk signature contains only JSON-safe scalars")
+}
+
 fn save_follow_memory(st: &StateHandle, silniki: &routing::Silniki, toz: &conduit_mt5::proto::AccountIdent,
     magic: i64, symbol: &str, peak_equity: f64, diagnosis: &str) -> anyhow::Result<()> {
     let memory=silniki.lista.iter().map(|s| {
@@ -2422,6 +2434,8 @@ fn save_follow_memory(st: &StateHandle, silniki: &routing::Silniki, toz: &condui
         });
         (s.format.clone(),TrwalySilnik{stats:Some(s.engine.stats.clone()),halted,
             risk_override:s.engine.risk_override,closed_today:s.engine.closed_today.clone(),
+            stopped_trading_day:s.engine.stopped_trading_day(),
+            pending_sources:s.engine.export_pending_source_memory(),
             continuation:s.engine.export_strategy_continuation()})
     }).collect();
     let (mut ui_stats,risk_override)=st.read(|s|(s.stats.clone(),s.risk_override.clone()));
@@ -2440,6 +2454,24 @@ fn apply_follow_memory(st: &StateHandle, trwale: &mut Trwale, memory: FollowAcco
         s.risk_override=memory.risk_override;
         s.halt.ustaw(ui::KlasaHaltu::Ryzyko,memory.risk_halt);
     });
+}
+
+/// Bind durable risk for both fixed-login and terminal-follow connections.
+/// Identity validation happens before discarding the previous in-memory account.
+fn bind_account_risk(st: &StateHandle, trwale: &mut Trwale,
+    toz: &conduit_mt5::proto::AccountIdent, magic: i64, symbol: &str) -> anyhow::Result<bool> {
+    let key = follow_account_key(toz, symbol);
+    anyhow::ensure!(follow_switch_allowed(trwale, &key),
+        "Poprzedni rachunek ma niezapisany stan ochrony; napraw zapis przed zmianą konta.");
+    anyhow::ensure!(!trwale.follow_persist_failed || trwale.risk_scope_magic == Some(magic),
+        "Poprzedni zakres magic ma niezapisany stan ochrony; napraw zapis przed zmianą zakresu.");
+    if trwale.konto == key && trwale.risk_scope_magic == Some(magic) { return Ok(false); }
+    let memory = read_follow_memory(st, toz, magic, symbol)?;
+    *trwale = Trwale::default();
+    trwale.konto = key;
+    trwale.risk_scope_magic = Some(magic);
+    if let Some(memory) = memory { apply_follow_memory(st, trwale, memory); }
+    Ok(true)
 }
 
 /// Clear rendered broker state independently of restored account PnL/risk anchors.
@@ -2535,25 +2567,26 @@ fn handel(
         clear_follow_transients(st);
         conduit_server::journal::provenance::new_run_id("mt5-account")
     } else { String::new() };
-    if broker.inner.transport().config().follow_terminal_account {
+    let was_account_bound = !trwale.konto.is_empty();
+    let account_changed = match bind_account_risk(st, trwale, broker.inner.ident(),
+        broker.inner.transport().config().magic, symbol) {
+        Ok(changed) => changed,
+        Err(e) => {
+            let reason = format!("Niedostępna pamięć ryzyka rachunku: {e}. Nie resetuję ochrony; napraw risk_state.json przed wznowieniem.");
+            st.update(Sections::one(Section::Halt), |s|
+                s.halt.ustaw(ui::KlasaHaltu::Diagnoza, reason.clone()));
+            return reason;
+        }
+    };
+    if !follow && account_changed {
+        if was_account_bound {
+            skrzynka.clear();
+            while rx.try_recv().is_ok() {}
+        }
+        reset_follow_ui(st, &trwale.konto, broker.account().balance);
+    }
+    if follow {
         let key = follow_account_key(broker.inner.ident(), symbol);
-        if !follow_switch_allowed(trwale,&key) {
-            return "Poprzedni rachunek ma niezapisany stan ochrony. Wróć do niego i napraw zapis przed zmianą konta; nie resetuję DD.".to_string();
-        }
-        if trwale.konto != key {
-            let magic=broker.inner.transport().config().magic;
-            let memory=match read_follow_memory(st,broker.inner.ident(),magic,symbol) {
-                Ok(m)=>m,
-                Err(e)=> {
-                    let reason=format!("Uszkodzona/niedostępna pamięć ryzyka tego rachunku: {e}. Nie resetuję DD; napraw risk_state.json przed wznowieniem.");
-                    st.update(Sections::one(Section::Halt),|s| s.halt.ustaw(ui::KlasaHaltu::Diagnoza,reason.clone()));
-                    return reason;
-                }
-            };
-            *trwale=Trwale::default();
-            trwale.konto=key.clone();
-            if let Some(memory)=memory { apply_follow_memory(st,trwale,memory); }
-        }
         // Messages/commands received before account binding cannot safely name a new account.
         let mut dropped = skrzynka.len() + trwale.czekajace.len();
         skrzynka.clear();
@@ -2609,44 +2642,7 @@ fn handel(
         s.engine.stats.credit = kredyt_brokera;
     }
 
-    // ---------- KOTWICE I PAMIĘĆ NALEŻĄ DO RACHUNKU ----------
-    //
-    // Świadomie BEZ pamięci per konto: powrót na poprzedni rachunek TEŻ
-    // zaczyna od zera. Mapa kotwic per konto to struktura, której nikt nie
-    // sprząta, i „dzień wznowiony" po tygodniu przerwy — uczciwe „liczę od
-    // teraz" jest mniejszym złem. (Zrzut koszyków z dysku ma własną bramkę:
-    // `wznowienie::odtworz` odrzuca zrzut z innego loginu.)
-    {
-        let t = broker.inner.ident();
-        let follow = broker.inner.transport().config().follow_terminal_account;
-        let klucz_konta = if follow {
-            follow_account_key(t, symbol)
-        } else {
-            format!("{}@{}", t.login, t.server)
-        };
-        if !trwale.konto.is_empty() && trwale.konto != klucz_konta {
-            let stary = trwale.konto.clone();
-            if follow {
-                *trwale = Trwale::default();
-                skrzynka.clear();
-                while rx.try_recv().is_ok() {}
-            } else {
-                trwale.silniki.clear();
-                trwale.koszyki.clear();
-                trwale.next_basket_id = 0;
-                trwale.szczyt_equity = 0.0;
-            }
-            st.notify(
-                MailCategory::Lifecycle,
-                "Wykryto zmianę rachunku — liczniki wyzerowane",
-                &format!(
-                    "Poprzednio {stary}, teraz {klucz_konta}. Pamięć silników                      (wynik dnia, seria strat, szczyt equity) i kotwice PnL                      dnia/sesji wystartowały od zera — liczby liczone od kotwic                      CUDZEGO konta byłyby gorsze niż brak liczb."
-                ),
-            );
-        }
-        trwale.konto = klucz_konta;
-    }
-
+    // Durable risk was bound to this exact account before constructing engines.
     // PRZENIESIENIE PAMIĘCI Z POPRZEDNIEGO PODEJŚCIA — uzasadnienie przy
     // `struct Trwale`. Robimy to PRZED wznowieniem koszyków, żeby licznik
     // koszyków startował z właściwej wartości. TA SAMA funkcja, którą woła
@@ -2879,14 +2875,11 @@ fn handel(
         || st.read(|s| s.halt.diagnoza.contains(LIVE_SR_V2_HOLD));
     let mut czekajace = std::mem::take(&mut trwale.czekajace);
 
-    let mut follow_risk_signature = String::new();
-    let mut initial_risk_error = if broker.inner.transport().config().follow_terminal_account {
-        save_follow_memory(st,&silniki,&toz,broker.inner.transport().config().magic,symbol,szczyt_equity,&diagnoza_petli)
-            .err().map(|e| format!("Nie można zapisać pamięci ryzyka rachunku — handel wstrzymany: {e}"))
-    } else { None };
-    if broker.inner.transport().config().follow_terminal_account {
-        trwale.follow_persist_failed=initial_risk_error.is_some();
-    }
+    let mut risk_state_signature = String::new();
+    let mut initial_risk_error = save_follow_memory(st, &silniki, &toz,
+        broker.inner.transport().config().magic, symbol, szczyt_equity, &diagnoza_petli)
+        .err().map(|e| format!("Nie można zapisać pamięci ryzyka rachunku — handel wstrzymany: {e}"));
+    trwale.follow_persist_failed = initial_risk_error.is_some();
 
     // JEDNO WYJŚCIE Z PĘTLI. Świadomie `break` zamiast `return`: dzięki temu
     // zapamiętanie stanu w `Trwale` i ostatni zrzut na dysk są na ścieżce,
@@ -3333,19 +3326,20 @@ fn handel(
         let exit_signature = sygnatura_pending_exit(silniki.lista.iter()
             .flat_map(|s| s.engine.baskets.iter().map(|b| (b.id, &b.pending_exit))));
         let follow=broker.inner.transport().config().follow_terminal_account;
-        let risk_signature=if follow { serde_json::to_string(&silniki.lista.iter()
-            .map(|s| (&s.format,&s.engine.halted,s.engine.risk_override)).collect::<Vec<_>>()).unwrap_or_default()
-        } else { String::new() };
+        // Source revisions change on restore, alias or withdrawal. The complete
+        // ledger is serialized by zapisz_zrzut only when dirty or on its regular
+        // interval; unchanged history must not be copied on every live tick.
+        let risk_signature = sygnatura_ryzyka(&silniki);
         if zrzut_kiedy.elapsed() >= ZRZUT_CO || exit_signature != zrzut_exit_signature
-            || (follow && risk_signature != follow_risk_signature) {
+            || risk_signature != risk_state_signature {
             zrzut_kiedy = Instant::now();
-            if zapisz_zrzut(st, &silniki, &toz, symbol, &mut zrzut_ostatni, follow, szczyt_equity, &diagnoza_petli) {
+            if zapisz_zrzut(st, &silniki, &toz, symbol, &mut zrzut_ostatni, follow, broker.inner.transport().config().magic, szczyt_equity, &diagnoza_petli) {
                 zrzut_exit_signature = exit_signature;
-                follow_risk_signature = risk_signature;
-                if follow { trwale.follow_persist_failed=false; }
-            } else if follow {
+                risk_state_signature = risk_signature;
+                trwale.follow_persist_failed=false;
+            } else {
                 trwale.follow_persist_failed=true;
-                break "Nie zapisano stanu rachunku: zatrzymuję sesję, aby nie utracić ochrony przy zmianie konta.".to_string();
+                break "Nie zapisano stanu rachunku: zatrzymuję sesję, aby nie utracić ochrony po restarcie lub zmianie konta.".to_string();
             }
         }
 
@@ -3458,8 +3452,8 @@ fn handel(
     // OSTATNI ZRZUT. Bez tego utrata sidecara gubiłaby koszyki powstałe od
     // ostatniego zapisu — czyli dokładnie te, których wznowienie najbardziej
     // potrzebuje.
-    let saved=zapisz_zrzut(st, &silniki, &toz, symbol, &mut zrzut_ostatni, broker.inner.transport().config().follow_terminal_account, szczyt_equity, &diagnoza_petli);
-    if broker.inner.transport().config().follow_terminal_account { trwale.follow_persist_failed=!saved; }
+    let saved=zapisz_zrzut(st, &silniki, &toz, symbol, &mut zrzut_ostatni, broker.inner.transport().config().follow_terminal_account, broker.inner.transport().config().magic, szczyt_equity, &diagnoza_petli);
+    trwale.follow_persist_failed=!saved;
     if let Some(d) = dziennik.as_mut() {
         for s in silniki.lista.iter_mut() {
             let mut evs = s.engine.drain_journal();
@@ -3617,6 +3611,7 @@ fn przenies_pamiec(
         let Some(t) = trwale.silniki.get_mut(&s.format) else {
             continue;
         };
+        s.engine.restore_pending_source_memory(&t.pending_sources);
         let Some(stats) = t.stats.take() else {
             continue;
         };
@@ -3625,6 +3620,7 @@ fn przenies_pamiec(
         s.engine.stats.credit = credit;
         s.engine.closed_today = std::mem::take(&mut t.closed_today);
         s.engine.risk_override = t.risk_override;
+        s.engine.restore_stopped_trading_day(t.stopped_trading_day);
         if let Some(r) = t.halted.take() {
             blokady.push((s.format.clone(), r.clone()));
             s.engine.halted = Some(match s.engine.halted.take() {
@@ -4020,6 +4016,8 @@ fn zapamietaj_silniki(
                 halted,
                 risk_override: s.engine.risk_override,
                 closed_today: std::mem::take(&mut s.engine.closed_today),
+                stopped_trading_day: s.engine.stopped_trading_day(),
+                pending_sources: s.engine.export_pending_source_memory(),
                 continuation: s.engine.export_strategy_continuation(),
             },
         );
@@ -4424,15 +4422,13 @@ fn zapisz_zrzut(
     symbol: &str,
     ostatni: &mut String,
     follow: bool,
+    magic: i64,
     peak_equity: f64,
     diagnosis: &str,
 ) -> bool {
-    if follow {
-        let magic=st.read(|s|s.settings.get("mt5_magic").and_then(Value::as_f64)).unwrap_or(770077.0) as i64;
-        if let Err(e)=save_follow_memory(st,silniki,toz,magic,symbol,peak_equity,diagnosis) {
-            st.log("mt5","error","Nie zapisano pamięci ryzyka rachunku",format!("{e}; zapis zostanie ponowiony, nie przenoś teraz konta ani nie zamykaj procesu."));
-            return false;
-        }
+    if let Err(e)=save_follow_memory(st,silniki,toz,magic,symbol,peak_equity,diagnosis) {
+        st.log("mt5","error","Nie zapisano pamięci ryzyka rachunku",format!("{e}; zapis zostanie ponowiony, sesja wstrzymana do odzyskania trwałej ochrony."));
+        return false;
     }
     let koszyki = silniki.koszyki();
     let teraz = match serde_json::to_string(&koszyki) {
@@ -4442,9 +4438,6 @@ fn zapisz_zrzut(
     if teraz == *ostatni {
         return true;
     }
-    let magic = st
-        .read(|s| s.settings.get("mt5_magic").and_then(|v| v.as_f64()))
-        .unwrap_or(770_077.0) as i64;
     let zapis = if follow {
         wznowienie::zapisz_scoped(&st.workspace, &koszyki, silniki.next_basket_id(), toz.login,
             magic, symbol, conduit_server::now_ms(), &toz.server, toz.trade_mode as i32)
@@ -6525,6 +6518,7 @@ mod tests {
         ea.glowny_mut().engine.halted=Some("config diagnosis · DD reached".into());
         ea.glowny_mut().engine.stats.realized_today=-100.0;
         ea.glowny_mut().engine.closed_today=vec![-50.0,-50.0];
+        ea.glowny_mut().engine.restore_stopped_trading_day(Some(12345));
         st.update(Sections::all(),|s|s.stats.pnl_today=-100.0);
         save_follow_memory(&st,&ea,&a,77,"XAUUSD",900.0,"config diagnosis").unwrap();
         let mut eb=jeden(silnik());
@@ -6538,10 +6532,68 @@ mod tests {
         assert_eq!(new_a.glowny().engine.halted.as_deref(),Some("DD reached"));
         assert_eq!(new_a.glowny().engine.stats.realized_today,-100.0);
         assert_eq!(new_a.glowny().engine.closed_today,vec![-50.0,-50.0]);
+        assert_eq!(new_a.glowny().engine.stopped_trading_day(),Some(12345));
         assert_eq!(memory.szczyt_equity,900.0);
         assert!(memory.czekajace.is_empty());
         assert_eq!(st.read(|s|s.stats.pnl_today),-100.0);
-        assert!(read_follow_memory(&st,&b,77,"XAUUSD").unwrap().unwrap().risk_halt.is_empty());
+        let saved_b=read_follow_memory(&st,&b,77,"XAUUSD").unwrap().unwrap();
+        assert!(saved_b.risk_halt.is_empty());
+        assert!(saved_b.silniki.values().all(|s|s.stopped_trading_day.is_none()),
+            "account A's stop must never appear in account B's persisted memory");
+        let mut memory_b=Trwale::default();
+        apply_follow_memory(&st,&mut memory_b,saved_b);
+        let mut new_b=jeden(silnik());
+        przenies_pamiec(&mut new_b,&mut memory_b,500.0,0.0);
+        assert_eq!(new_b.glowny().engine.stopped_trading_day(),None);
+        sprzataj(&st);
+    }
+
+    #[test]
+    fn fixed_login_snapshot_binds_account_risk_after_process_restart() {
+        let st = stan("fixed-risk-restart");
+        let a = conduit_mt5::proto::AccountIdent {
+            login:42, server:"fixed-A".into(), trade_mode:0, ..Default::default()
+        };
+        let b = conduit_mt5::proto::AccountIdent { server:"fixed-B".into(), ..a.clone() };
+        let mut live = jeden(silnik());
+        live.glowny_mut().engine.restore_stopped_trading_day(Some(12345));
+        live.glowny_mut().engine.stats.realized_today = -12.0;
+        live.glowny_mut().engine.restore_pending_source_memory(&[
+            conduit_core::engine::PendingSourceRecord {
+                source: SourceKey::new(-990077, None), msg_id: 77, basket_id: 99,
+                aliases: vec![88], cancelled_ts: Some(12345),
+            }
+        ]);
+        st.update(Sections::all(), |s| s.settings["mt5_magic"] = serde_json::json!(88));
+        // This is the production fixed-login (follow=false) snapshot path.
+        assert!(zapisz_zrzut(&st, &live, &a, "XAUUSD", &mut String::new(),
+            false, 77, 600.0, ""));
+        let mut memory = Trwale::default(); // fresh process, no RAM carry-over
+        assert!(bind_account_risk(&st, &mut memory, &a, 77, "XAUUSD").unwrap());
+        let mut restarted = jeden(silnik());
+        przenies_pamiec(&mut restarted, &mut memory, 400.0, 0.0);
+        assert_eq!(restarted.glowny().engine.stopped_trading_day(), Some(12345));
+        assert_eq!(restarted.glowny().engine.stats.realized_today, -12.0);
+        assert_eq!(restarted.glowny().engine.export_pending_source_memory().len(), 1);
+        assert!(!bind_account_risk(&st, &mut memory, &a, 77, "XAUUSD").unwrap());
+        assert!(bind_account_risk(&st, &mut memory, &a, 88, "XAUUSD").unwrap());
+        assert!(memory.silniki.is_empty(), "a different magic scope cannot inherit day stop");
+        assert!(bind_account_risk(&st, &mut memory, &a, 77, "XAUUSD").unwrap());
+        assert!(memory.silniki.values().any(|s| s.stopped_trading_day == Some(12345)));
+        assert!(bind_account_risk(&st, &mut memory, &b, 77, "XAUUSD").unwrap());
+        let mut other = jeden(silnik());
+        przenies_pamiec(&mut other, &mut memory, 400.0, 0.0);
+        assert_eq!(other.glowny().engine.stopped_trading_day(), None);
+        assert!(other.glowny().engine.export_pending_source_memory().is_empty(),
+            "source withdrawal from account A cannot poison account B");
+        assert!(bind_account_risk(&st, &mut memory, &a, 77, "XAUUSD").unwrap());
+        let mut returned = jeden(silnik());
+        przenies_pamiec(&mut returned, &mut memory, 400.0, 0.0);
+        assert_eq!(returned.glowny().engine.stopped_trading_day(), Some(12345));
+        let sources = returned.glowny().engine.export_pending_source_memory();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].cancelled_ts, Some(12345));
+        assert_eq!(sources[0].aliases, vec![88]);
         sprzataj(&st);
     }
 

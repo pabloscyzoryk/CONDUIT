@@ -1708,8 +1708,10 @@ impl Broker for Mt5Bridge {
         &mut self.pendings
     }
 
-    fn open_market(&mut self, r: OrderReq) -> BResult<Ticket> {
+    fn open_market(&mut self, mut r: OrderReq) -> BResult<Ticket> {
         self.receipt_entry_gate()?;
+        r.sl = r.sl.map(|p| self.sym.round_price(p));
+        r.tp = r.tp.map(|p| self.sym.round_price(p));
         let vol = self.norm_volume(r.volume)?;
         self.precheck_stops(r.side, r.sl, r.tp)?;
         let cm = comment::encode(&self.tag, r.basket, r.level, r.is_toucher, &r.comment);
@@ -1791,8 +1793,13 @@ impl Broker for Mt5Bridge {
         Ok(ticket)
     }
 
-    fn place_pending(&mut self, r: PendingReq) -> BResult<Ticket> {
+    fn place_pending(&mut self, mut r: PendingReq) -> BResult<Ticket> {
         self.receipt_entry_gate()?;
+        // Validation, the wire request and the immediate cache must describe
+        // the same executable prices, including before the next state poll.
+        r.price = self.sym.round_price(r.price);
+        r.sl = r.sl.map(|p| self.sym.round_price(p));
+        r.tp = r.tp.map(|p| self.sym.round_price(p));
         let vol = self.norm_volume(r.volume)?;
         let side = r.kind.side();
 
@@ -1864,6 +1871,8 @@ impl Broker for Mt5Bridge {
     }
 
     fn modify_position(&mut self, t: Ticket, sl: Option<Px>, tp: Option<Px>) -> BResult<()> {
+        let sl = sl.map(|p| self.sym.round_price(p));
+        let tp = tp.map(|p| self.sym.round_price(p));
         let side = self
             .positions
             .iter()
@@ -1891,6 +1900,9 @@ impl Broker for Mt5Bridge {
         sl: Option<Px>,
         tp: Option<Px>,
     ) -> BResult<()> {
+        let price = self.sym.round_price(price);
+        let sl = sl.map(|p| self.sym.round_price(p));
+        let tp = tp.map(|p| self.sym.round_price(p));
         if !self.pendings.iter().any(|o| o.ticket == t) {
             return Err(BrokerError::NoSuchTicket);
         }

@@ -143,7 +143,7 @@ fn observed_text_offset_edit_is_not_applied_to_armed_grid() {
 }
 
 #[test]
-fn observed_tp_only_entry_edit_updates_basket_but_leaves_old_pending_targets() {
+fn tp_only_entry_edit_updates_basket_and_armed_pending_targets() {
     let mut c = cfg();
     c.tp_schedule = TpSchedule::AllAtTp1;
     c.assign_tp_per_position = true;
@@ -155,13 +155,15 @@ fn observed_tp_only_entry_edit_updates_basket_but_leaves_old_pending_targets() {
     edit.edit_of = Some(1);
     e.on_message(&mut b, &edit);
     assert_eq!(e.baskets[0].tps[0], 4031.0);
-    assert!(b.pendings().iter().all(|p| p.tp == Some(4030.0)),
-        "legacy defect: the broker still has the old target after a TP-only edit");
-    assert_eq!(original_tickets, b.pendings().iter().map(|p| p.ticket).collect::<Vec<_>>());
+    assert_eq!(b.pendings().len(), original_tickets.len());
+    assert!(b.pendings().iter().all(|p| p.tp == Some(4031.0)),
+        "every armed broker order must use the edited target");
+    assert_ne!(original_tickets, b.pendings().iter().map(|p| p.ticket).collect::<Vec<_>>(),
+        "legacy edit path must rebuild its broker plan once");
 }
 
 #[test]
-fn observed_generated_runner_targets_make_cosmetic_edit_replace_unchanged_grid() {
+fn generated_runner_targets_do_not_make_cosmetic_edit_replace_grid() {
     let mut c = cfg();
     c.runner_cele_n = 2;
     c.runner_cele_krok = 5.0;
@@ -175,12 +177,12 @@ fn observed_generated_runner_targets_make_cosmetic_edit_replace_unchanged_grid()
     assert_eq!(old_targets, e.baskets[0].tps);
     assert_eq!(old_prices, prices(&b));
     assert_eq!(b.pendings().len(), old_tickets.len());
-    assert_ne!(old_tickets, b.pendings().iter().map(|p| p.ticket).collect::<Vec<_>>(),
-        "legacy defect: comparing extended targets with raw targets causes needless cancel/replace");
+    assert_eq!(old_tickets, b.pendings().iter().map(|p| p.ticket).collect::<Vec<_>>(),
+        "unchanged source targets must preserve the exact broker order identities");
 }
 
 #[test]
-fn observed_cosmetic_entry_edit_can_remove_tighter_stop_from_working_position() {
+fn cosmetic_entry_edit_preserves_tighter_stop_on_working_position() {
     let mut c = cfg();
     c.entry_units = 1;
     c.auto_limit = false;
@@ -195,8 +197,8 @@ fn observed_cosmetic_entry_edit_can_remove_tighter_stop_from_working_position() 
     let mut edit = message(T0 + 2000, &format!("{BUY}\nUPDATED NOTE"));
     edit.edit_of = Some(1);
     e.on_message(&mut b, &edit);
-    assert_eq!(b.positions()[0].sl, Some(3990.0),
-        "legacy defect: unchanged original signal SL overwrites the current tighter broker stop");
+    assert_eq!(b.positions()[0].sl, Some(4006.0),
+        "cosmetic source changes must never overwrite the tighter broker stop");
     // be_never_loosen only guards the BE paths; it does not make arbitrary
     // set_basket_sl calls safe. A no-op edit needs its own semantic contract.
 }

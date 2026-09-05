@@ -12,6 +12,15 @@ pub enum RiskFreeMode {
     Ignore,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DayTrailBasis {
+    /// Legacy: allowable drawdown is a percentage of the entire equity peak.
+    #[default]
+    EquityPeak,
+    /// Allowable drawdown is a percentage of profit earned above day start.
+    ProfitPeak,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RiskFreeRunnerTarget {
     KeepTp,
@@ -379,6 +388,9 @@ pub struct Settings {
     pub toucher_tp_one_based: bool,
     pub toucher_bands: String,
     pub pending_lifetime: PendingLifetime,
+    /// Explicit source LIMIT/STOP stays valid until source cancellation; risk guards still apply.
+    #[serde(default)]
+    pub explicit_pending_until_cancel: bool,
     pub pending_drop_on_target: bool,
     pub pending_drop_arm: bool,
     pub pending_ttl_h: f64,
@@ -875,6 +887,8 @@ pub struct Settings {
     pub day_target_pct: f64,
     pub day_trail_stop_pct: f64,
     pub day_trail_arm_pct: f64,
+    #[serde(default)]
+    pub day_trail_basis: DayTrailBasis,
 
     pub daily_signal_budget: u32,
     pub signal_min_rr: f64,
@@ -1172,6 +1186,7 @@ impl Default for Settings {
             toucher_tp_one_based: false,
             toucher_bands: String::new(),
             pending_lifetime: PendingLifetime::UntilTp1,
+            explicit_pending_until_cancel: false,
             pending_drop_on_target: true,
             pending_drop_arm: false,
             pending_ttl_h: 0.0,
@@ -1528,6 +1543,7 @@ impl Default for Settings {
             day_target_pct: 0.0,
             day_trail_stop_pct: 0.0,
             day_trail_arm_pct: 0.0,
+            day_trail_basis: DayTrailBasis::EquityPeak,
 
             daily_signal_budget: 0,
             signal_min_rr: 0.0,
@@ -1710,6 +1726,25 @@ fn default_ea_stan_dnia_jednostki_mult() -> f64 {
 }
 
 impl Settings {
+    /// Armed trailing-day basis and cash giveback threshold. Uses only the
+    /// observed equity peak and opening equity; no forecast or future prices.
+    pub fn day_trail_threshold(&self, day_start: f64, day_peak: f64) -> Option<(f64, f64)> {
+        if self.day_trail_stop_pct <= 0.0
+            || ![day_start, day_peak, self.day_trail_stop_pct, self.day_trail_arm_pct]
+                .into_iter().all(f64::is_finite)
+        { return None; }
+        let profit_peak = day_peak - day_start;
+        let armed = self.day_trail_arm_pct <= 0.0
+            || profit_peak >= day_start.max(1.0) * self.day_trail_arm_pct / 100.0;
+        if !armed { return None; }
+        let basis = match self.day_trail_basis {
+            DayTrailBasis::EquityPeak => day_peak.max(1.0),
+            DayTrailBasis::ProfitPeak if profit_peak > 0.0 => profit_peak,
+            DayTrailBasis::ProfitPeak => return None,
+        };
+        Some((basis, basis * self.day_trail_stop_pct / 100.0))
+    }
+
     #[inline]
     pub fn kredyt_skuteczny_z(&self, kredyt_brokera: f64) -> f64 {
         if !self.odlicz_kredyt {
@@ -2033,6 +2068,47 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn day_profit_trail_protects_profit_instead_of_entire_equity() {
+        let mut c = Settings::default();
+        c.day_trail_stop_pct = 30.0;
+        c.day_trail_arm_pct = 12.0;
+        assert_eq!(c.day_trail_threshold(300.0, 336.0), Some((336.0, 100.8)));
+        c.day_trail_basis = DayTrailBasis::ProfitPeak;
+        assert_eq!(c.day_trail_threshold(300.0, 336.0), Some((36.0, 10.8)));
+        assert!(336.0 - c.day_trail_threshold(300.0, 336.0).unwrap().1 > 300.0);
+        assert!(c.day_trail_threshold(300.0, 335.0).is_none(), "arm threshold not reached");
+    }
+
+    #[test]
+    fn day_profit_trail_never_arms_without_positive_profit_and_off_is_off() {
+        let mut c = Settings::default();
+        c.day_trail_basis = DayTrailBasis::ProfitPeak;
+        c.day_trail_stop_pct = 30.0;
+        for peak in [280.0, 300.0, f64::NAN, f64::INFINITY] {
+            assert!(c.day_trail_threshold(300.0, peak).is_none());
+        }
+        c.day_trail_stop_pct = 0.0;
+        assert!(c.day_trail_threshold(300.0, 500.0).is_none());
+    }
+
+    #[test]
+    fn legacy_day_trail_math_and_missing_field_remain_compatible() {
+        let mut c: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.day_trail_basis, DayTrailBasis::EquityPeak);
+        for start in [0.0_f64, 300.0, 600.0] {
+            for peak in [300.0_f64, 336.0, 700.0] {
+                for arm in [0.0, 12.0, 30.0] {
+                    c.day_trail_stop_pct = 25.0;
+                    c.day_trail_arm_pct = arm;
+                    let armed = arm <= 0.0 || peak - start >= start.max(1.0) * arm / 100.0;
+                    let expected = armed.then_some((peak.max(1.0), peak.max(1.0) * 25.0 / 100.0));
+                    assert_eq!(c.day_trail_threshold(start, peak), expected);
+                }
+            }
+        }
+    }
 
     #[test]
     fn zaokraglanie_transzy_ma_trzy_rozne_odpowiedzi() {

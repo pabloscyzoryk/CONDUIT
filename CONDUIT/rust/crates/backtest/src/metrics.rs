@@ -54,6 +54,16 @@ pub struct Metrics {
     pub worst_day_date: String,
     pub win_days: u32,
     pub win_days_pct: f64,
+    /// Positive equity days divided by ALL observed market days. Unlike the
+    /// legacy closed-trade denominator, idle or floating-only days cannot
+    /// silently disappear from a daily consistency target.
+    pub market_days: u32,
+    pub positive_market_days: u32,
+    pub negative_market_days: u32,
+    pub flat_market_days: u32,
+    pub positive_market_days_pct: f64,
+    pub worst_market_day: f64,
+    pub worst_market_day_date: String,
     pub max_losing_streak_days: u32,
 
     // --- ryzyko ---
@@ -324,9 +334,20 @@ pub fn compute(
 
     // --- dni ---
     m.days = daily.len() as u32;
+    m.market_days = daily.len() as u32;
+    m.positive_market_days = daily.iter().filter(|d| d.profit > 0.0).count() as u32;
+    m.negative_market_days = daily.iter().filter(|d| d.profit < 0.0).count() as u32;
+    m.flat_market_days = daily.iter().filter(|d| d.profit == 0.0).count() as u32;
+    if m.market_days > 0 {
+        m.positive_market_days_pct = 100.0 * m.positive_market_days as f64 / m.market_days as f64;
+        if let Some(day) = daily.iter().min_by(|a,b| a.profit.total_cmp(&b.profit)) {
+            m.worst_market_day = day.profit;
+            m.worst_market_day_date = day.date.clone();
+        }
+    }
     let active: Vec<&DayStat> = daily.iter().filter(|d| d.trades > 0).collect();
     m.trading_days = active.len() as u32;
-    let mut profits: Vec<f64> = active.iter().map(|d| d.profit).collect();
+    let profits: Vec<f64> = active.iter().map(|d| d.profit).collect();
     if !profits.is_empty() {
         m.avg_per_day = profits.iter().sum::<f64>() / profits.len() as f64;
         m.best_day = profits.iter().cloned().fold(f64::MIN, f64::max);
@@ -594,5 +615,22 @@ mod testy_zgodnosci {
         assert_eq!(skonczona(f64::INFINITY), 0.0);
         assert_eq!(skonczona(f64::NEG_INFINITY), 0.0);
         assert_eq!(skonczona(12.5), 12.5);
+    }
+
+    #[test]
+    fn daily_consistency_cannot_hide_idle_or_floating_loss_days() {
+        let daily: Vec<DayStat> = [(12.0, 1), (-20.0, 0), (0.0, 0)]
+            .into_iter().enumerate().map(|(day, (profit, trades))| DayStat {
+                day: day as i64, date: format!("synthetic-day-{day}"),
+                start_equity: 300.0, end_equity: 300.0 + profit,
+                profit, max_dd: 0.0, trades, signals: 1,
+            }).collect();
+        let metrics = compute(300.0, &[], &daily, &[], 280.0, false, 0.0);
+        assert_eq!(metrics.win_days_pct, 100.0, "legacy metric is kept explicit");
+        assert_eq!(metrics.market_days, 3);
+        assert_eq!((metrics.positive_market_days, metrics.negative_market_days, metrics.flat_market_days), (1,1,1));
+        assert!((metrics.positive_market_days_pct - 100.0/3.0).abs() < 1e-10);
+        assert_eq!(metrics.worst_market_day, -20.0);
+        assert_eq!(metrics.worst_market_day_date, "synthetic-day-1");
     }
 }

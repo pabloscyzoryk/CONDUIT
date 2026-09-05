@@ -14,6 +14,9 @@ mod relot_reconcile;
 
 #[path = "entry_edit.rs"]
 mod entry_edit;
+#[path = "pending_validity.rs"]
+mod pending_validity;
+pub use pending_validity::PendingSourceRecord;
 pub use entry_edit::EntryEditOutcome;
 
 #[path = "strategy_continuation.rs"]
@@ -457,6 +460,8 @@ struct QueuedExit {
 
 pub struct Engine {
     pub cfg: Settings,
+    pending_sources: std::collections::BTreeMap<u32, PendingSourceRecord>,
+    pending_source_revision: u64,
 
     pub regime_hist: Vec<(Ts, bool)>,
 
@@ -525,6 +530,8 @@ impl Engine {
     pub fn new(cfg: Settings, start_balance: f64) -> Self {
         let jcfg = cfg.journal_config();
         Engine {
+            pending_sources: Default::default(),
+            pending_source_revision: pending_validity::next_source_revision(),
             journal: JournalBuf::new(jcfg, "eng"),
             cfg,
             regime_hist: Vec::new(),
@@ -1139,6 +1146,7 @@ impl Engine {
 
     pub fn adopt_baskets(&mut self, baskets: Vec<Basket>) {
         for bk in baskets {
+            self.remember_pending_source(&bk);
             self.next_basket_id = self.next_basket_id.max(bk.id.saturating_add(1));
             self.msg_to_basket
                 .insert((bk.source.clone(), bk.msg_id), bk.id);
@@ -1165,6 +1173,7 @@ impl Engine {
             }
         }
         self.rebuild_basket_slots();
+        self.sync_source_tombstones();
     }
 
     fn persist_done_action(&mut self, basket_id: u32, msg_id: i64, action: &str) {
@@ -1767,7 +1776,7 @@ impl Engine {
             } else if self.cfg.edycja_sieroty_nie_otwiera {
                 let ile_wejsc = signals
                     .iter()
-                    .filter(|s| matches!(s, Signal::Entry(_)))
+                    .filter(|s| matches!(s, Signal::Entry(_) | Signal::MarketOpen { .. }))
                     .count();
                 for _ in 0..ile_wejsc {
                     self.jreject(
@@ -1779,7 +1788,7 @@ impl Engine {
                     );
                 }
                 if ile_wejsc > 0 {
-                    signals.retain(|s| !matches!(s, Signal::Entry(_)));
+                    signals.retain(|s| !matches!(s, Signal::Entry(_) | Signal::MarketOpen { .. }));
                 }
             }
             if self.cfg.dedup_edited_signals {
@@ -2123,11 +2132,20 @@ impl Engine {
                 }
             }
             Signal::Cancel => {
-                if self.cfg.honor_cancel {
+                let explicit_target = self.target_basket(m).filter(|id| self.explicit_pending_source(*id));
+                let known_reply = m.reply_to.is_some_and(|r| self.msg_to_basket.contains_key(&(m.source.clone(), r)));
+                if explicit_target.is_some() && !known_reply {
+                    self.jignore(b, m, "cancel", explicit_target, RejectCode::NoTargetBasket,
+                        "AMBIGUOUS CANCEL: explicit pending withdrawal needs a reply to its known source message");
+                    return;
+                }
+                if self.cfg.honor_cancel || explicit_target.is_some() {
                     if let Some(id) = self.target_or_note(b, m, "cancel") {
                         self.obs
                             .na_komunikacie(id, m.ts, crate::obserwacje::Komunikat::Cancel);
-                        let n = self.cancel_pendings(b, id);
+                        let n = if self.explicit_pending_source(id) {
+                            self.withdraw_pending_source(b, id, m.ts)
+                        } else { self.cancel_pendings(b, id) };
                         self.basket_note(
                             id,
                             m.ts,
@@ -2480,6 +2498,7 @@ impl Engine {
                             bk.msg_aliases.push(m.msg_id);
                         }
                     }
+                    self.remember_pending_source_alias(id, m.msg_id);
                 }
                 Some(id)
             }
@@ -2542,6 +2561,25 @@ impl Engine {
     }
 
     fn handle_market_open<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage, side: Side) {
+        // A market command is an entry too. Its source identity survives the
+        // volatile action/content caches through the persisted basket map.
+        let source_id = m.edit_of.unwrap_or(m.msg_id);
+        if self.msg_to_basket.get(&(m.source.clone(), source_id))
+            .is_some_and(|id| self.pending_source_cancelled(*id)) {
+            self.jreject(b, m, "market", RejectCode::EntryGateBlocked,
+                "publisher cancelled this source; changing it to MARKET cannot reactivate it");
+            return;
+        }
+
+        if (self.cfg.entry_idempotencja || m.edit_of.is_some())
+            && self.msg_to_basket.contains_key(&(m.source.clone(), source_id))
+        {
+            self.jignore(b, m, &format!("mkt{side:?}"),
+                self.msg_to_basket.get(&(m.source.clone(), source_id)).copied(),
+                RejectCode::DuplicateEditedAction,
+                "market command already belongs to a basket; edit/re-delivery cannot open again");
+            return;
+        }
         self.slhit_miekki = self.slhit_hamuje(m.ts) && self.cfg.slhit_pause_lot_mult > 0.0;
         if self.wygaszanie {
             *self.odrzuty.entry("Wygaszanie".to_string()).or_insert(0) += 1;
@@ -2762,6 +2800,13 @@ impl Engine {
 
     fn handle_entry<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage, e: EntrySignal) {
         let ts = m.ts;
+        if self.msg_to_basket.get(&(m.source.clone(), m.edit_of.unwrap_or(m.msg_id)))
+            .is_some_and(|id| self.pending_source_cancelled(*id)) {
+            self.jreject(b, m, "entry", RejectCode::EntryGateBlocked,
+                "publisher cancelled this explicit pending source; re-delivery cannot reactivate it");
+            return;
+        }
+
 
         self.slhit_miekki = self.slhit_hamuje(ts) && self.cfg.slhit_pause_lot_mult > 0.0;
 
@@ -3248,15 +3293,17 @@ impl Engine {
         bk.tp_open = e.tp_open;
         bk.warstwy_offset = e.warstwy_offset;
         bk.is_stop = e.is_stop;
-        if self.cfg.entry_edit_geometry_v2 {
-            bk.entry_edit_state = Some(Box::new(EntryEditState {
+        // Retain the source even under the legacy editor: comparing an edit
+        // with the currently trailed stop mistakes unchanged text for new risk.
+        bk.entry_edit_state = Some(Box::new(EntryEditState {
                 schema_version: 1,
                 revision: 1,
                 source: Some(e.clone()),
                 applied_ts: ts,
+                cancelled_by_source_ts: None,
                 review: None,
             }));
-        }
+        self.remember_pending_source(&bk);
         bk.events.push(BasketEvent {
             ts,
             text: format!(
@@ -3333,11 +3380,32 @@ impl Engine {
         e: &EntrySignal,
         ts: Ts,
     ) -> EntryEditOutcome {
+        if self.pending_source_cancelled(id) {
+            self.basket_note(id, ts, "EDYCJA pominięta: źródło anulowało ten sygnał".into());
+            return EntryEditOutcome::Rejected;
+        }
+
         if self.cfg.entry_edit_geometry_v2 {
             return self.apply_entry_edit_v2(b, id, e, ts);
         }
+        if self.basket(id).and_then(|bk| bk.entry_edit_state.as_ref())
+            .is_some_and(|state| state.review.is_some())
+        {
+            self.basket_note(id, ts, "EDYCJA wstrzymana: poprzednia rewizja wymaga uzgodnienia".into());
+            return EntryEditOutcome::RequiresReview;
+        }
+        if self.basket(id).and_then(|bk| bk.entry_edit_state.as_ref())
+            .and_then(|state| state.source.as_ref())
+            .is_some_and(|source| entry_edit::same_source(source, e))
+        {
+            self.basket_note(id, ts, "EDYCJA bez zmiany źródłowego planu — postęp i zlecenia pozostają".into());
+            return EntryEditOutcome::NoOp;
+        }
         self.apply_entry_edit_legacy(b, id, e, ts);
-        EntryEditOutcome::LegacyHandled
+        if self.basket(id).and_then(|bk| bk.entry_edit_state.as_ref())
+            .is_some_and(|state| state.review.is_some()) {
+            EntryEditOutcome::RequiresReview
+        } else { EntryEditOutcome::LegacyHandled }
     }
 
     fn apply_entry_edit_legacy<B: Broker>(&mut self, b: &mut B, id: u32, e: &EntrySignal, ts: Ts) {
@@ -3351,11 +3419,12 @@ impl Engine {
         }
         let (zone_lo, zone_hi) = self.compute_zone(e);
         let sl = self.compute_sl(e, zone_lo, zone_hi, ts);
-        let (old_lo, old_hi, old_sl, mozna_przestawic) = match self.basket(id) {
+        let (old_lo, old_hi, old_sl, old_tps, mozna_przestawic) = match self.basket(id) {
             Some(bk) => (
                 bk.zone_lo,
                 bk.zone_hi,
                 bk.sl,
+                bk.tps.clone(),
                 bk.state == BasketState::Armed && bk.tickets.is_empty(),
             ),
             None => return,
@@ -3385,7 +3454,20 @@ impl Engine {
             );
             return;
         }
+        if mozna_przestawic && (b.close_receipts_pending()
+            || b.receipt_barrier() != crate::broker::ReceiptBarrier::Clear) {
+            self.edit_review(id, e, ts, "LegacyEditReceiptBarrier");
+            return;
+        }
+        let before_edit = self.basket(id).cloned().expect("legacy edit basket was validated");
+        let before_session = b.execution_session();
+        let position_signature = |broker: &B| -> Vec<(Ticket, f64, Px)> {
+            broker.positions().iter().filter(|p| p.basket == Some(id))
+                .map(|p| (p.ticket, p.volume, p.open_price)).collect()
+        };
+        let before_positions = position_signature(b);
         let cele_nowe = self.cele_z_runnerem_od(e.side, &e.tps, Some(b.quote().mid()));
+        let cele_te_same = old_tps == cele_nowe;
         if let Some(bk) = self.basket_mut(id) {
             let plan_inny = bk.tps != cele_nowe
                 || bk.zone_lo != zone_lo
@@ -3397,6 +3479,13 @@ impl Engine {
             bk.zone_hi = zone_hi;
             bk.entry_lo = e.lo;
             bk.entry_hi = e.hi;
+            // This is a source snapshot, not a certificate of broker ACK.
+            // Any uncertain cancellation remains governed by the broker gate.
+            let revision = bk.entry_edit_state.as_ref().map_or(1, |s| s.revision.saturating_add(1));
+            bk.entry_edit_state = Some(Box::new(EntryEditState {
+                schema_version: 1, revision, source: Some(e.clone()),
+                applied_ts: ts, cancelled_by_source_ts: None, review: None,
+            }));
             if plan_inny {
                 bk.zeruj_postep();
             }
@@ -3410,23 +3499,44 @@ impl Engine {
         if let Some(v) = sl {
             self.set_basket_sl(b, id, v, ts);
         }
-        let cele_te_same = self
-            .basket(id)
-            .map(|bk| {
-                bk.tps.len() == e.tps.len()
-                    && bk
-                        .tps
-                        .iter()
-                        .zip(e.tps.iter())
-                        .all(|(a, b)| (a - b).abs() < 1e-9)
-            })
-            .unwrap_or(false);
         let bez_zmian = (old_lo - zone_lo).abs() < 1e-9
             && (old_hi - zone_hi).abs() < 1e-9
             && old_sl.map(|x| (x * 1e9) as i64) == sl.map(|x| (x * 1e9) as i64)
             && cele_te_same;
         if mozna_przestawic && !bez_zmian {
-            self.cancel_pendings(b, id);
+            let pending_before = b.pendings().iter().filter(|o| o.basket == Some(id)).count();
+            let cancelled = self.cancel_pendings(b, id);
+            let remaining: Vec<_> = b.pendings().iter().filter(|o| o.basket == Some(id))
+                .map(|o| o.ticket).collect();
+            let unconfirmed = cancelled != pending_before || !remaining.is_empty()
+                || before_positions != position_signature(b)
+                || before_session != b.execution_session()
+                || b.close_receipts_pending()
+                || b.receipt_barrier() != crate::broker::ReceiptBarrier::Clear;
+            if unconfirmed {
+                // Cancellation/modify may have partly executed. Preserve the last
+                // source revision and actual broker exposure; do not manufacture
+                // a replacement or pretend the changed plan was fully committed.
+                let positions: Vec<_> = b.positions().iter().filter(|p| p.basket == Some(id))
+                    .cloned().collect();
+                if let Some(bk) = self.basket_mut(id) {
+                    *bk = before_edit;
+                    bk.pendings = remaining;
+                    bk.tickets = positions.iter().map(|p| p.ticket).collect();
+                    if !positions.is_empty() {
+                        bk.had_positions = true;
+                        bk.state = BasketState::Working;
+                        for position in &positions {
+                            if let Some(level) = bk.levels.iter_mut().find(|g| g.level == position.level) {
+                                level.filled = true;
+                                level.fill_ts = position.open_ts;
+                            }
+                        }
+                    }
+                }
+                self.edit_review(id, e, ts, "LegacyCancelOrFillUnconfirmed");
+                return;
+            }
             self.place_grid(b, id, ts);
         } else if mozna_przestawic {
             self.basket_note(
@@ -4974,6 +5084,7 @@ impl Engine {
             ts,
             format!("TP{stage} bez naszej pozycji ({src}) — etap koszyka NIE rusza"),
         );
+        if self.keep_explicit_pending(id) { return; }
         if !self.cfg.pending_drop_on_target {
             if let Some(bk) = self.basket_mut(id) {
                 bk.plan_wykonany_do = bk.plan_wykonany_do.max(stage);
@@ -5191,12 +5302,12 @@ impl Engine {
             }
         }
 
-        let cancel_stage = match self.cfg.pending_lifetime {
+        let cancel_stage = if self.keep_explicit_pending(id) { None } else { match self.cfg.pending_lifetime {
             PendingLifetime::UntilTp1 => Some(1),
             PendingLifetime::UntilTp2 => Some(2),
             PendingLifetime::UntilTp3 => Some(3),
             PendingLifetime::Never => None,
-        };
+        }};
         if let Some(cs) = cancel_stage {
             if target_stage >= cs {
                 let n = self.cancel_pendings(b, id);
@@ -5268,7 +5379,7 @@ impl Engine {
         level: Px,
         ts: Ts,
     ) {
-        if self.basket_exit_pending(id) {
+        if self.basket_exit_pending(id) || self.keep_explicit_pending(id) {
             return;
         }
         if let Some(bk) = self.basket_mut(id) {
@@ -5892,7 +6003,7 @@ impl Engine {
             None => return,
         };
 
-        if self.cfg.pending_cancel_on_riskfree {
+        if self.cfg.pending_cancel_on_riskfree && !self.keep_explicit_pending(id) {
             let n = self.cancel_pendings(b, id);
             if n > 0 {
                 self.basket_note(
@@ -6683,6 +6794,7 @@ impl Engine {
         self.continuation_observe(b);
         self.deferred_observe(b, q);
         self.refresh_basket_slots();
+        self.retry_source_cancellations(b);
         let ts = q.ts;
         cien::puls(ts, conduit_mozg_cien::cien::PULS_TICK);
 
@@ -7202,6 +7314,7 @@ impl Engine {
                         .map(|id| self.basket_exit_pending(id))
                         .unwrap_or(false)
                 })
+                .filter(|o| !o.basket.is_some_and(|id| self.keep_explicit_pending(id)))
                 .filter(|o| {
                     let born = if from_basket {
                         o.basket
@@ -7313,6 +7426,15 @@ impl Engine {
         if self.halted.is_some() || self.risk_override {
             return;
         }
+        // A latched stop remains an exit obligation even if equity recovers or
+        // the EOD trigger hour has passed. Broker rejection cannot leave an
+        // old pending ladder free to fill later in the stopped trading day.
+        if self.stopped_trading_day() == Some(day_of(q.ts, self.cfg.session_offset())) {
+            if !b.positions().is_empty() || !b.pendings().is_empty() {
+                self.close_everything(b, q.ts, CloseReason::DayTarget);
+            }
+            return;
+        }
         let lot = self.lot_size(self.podstawa_lota());
         let scale = self.cfg.usd_scale(lot);
         let eq = self.stats.equity;
@@ -7407,7 +7529,7 @@ impl Engine {
         }
         if self.cfg.day_trail_stop_usd > 0.0 {
             let d = self.stats.day_peak_equity - eq;
-            if d >= self.cfg.day_trail_stop_usd * scale && !b.positions().is_empty() {
+            if d >= self.cfg.day_trail_stop_usd * scale && (!b.positions().is_empty() || !b.pendings().is_empty()) {
                 self.close_everything(b, q.ts, CloseReason::DayTarget);
                 self.log(q.ts, 2, format!("DAY-TRAIL: equity −{d:.2} $ od piku dnia"));
                 self.jguard(
@@ -7428,7 +7550,7 @@ impl Engine {
                 scale
             };
             let today = eq - self.stats.day_start_equity;
-            if today >= self.cfg.day_target_usd * scale2 && !b.positions().is_empty() {
+            if today >= self.cfg.day_target_usd * scale2 && (!b.positions().is_empty() || !b.pendings().is_empty()) {
                 self.close_everything(b, q.ts, CloseReason::DayTarget);
                 self.log(q.ts, 1, format!("CEL DZIENNY osiągnięty: +{today:.2} $"));
                 self.jguard(
@@ -7446,7 +7568,7 @@ impl Engine {
             let baza = self.stats.day_start_equity.max(1.0);
             let prog = baza * self.cfg.day_target_pct / 100.0;
             let dzis = eq - self.stats.day_start_equity;
-            if dzis >= prog && !b.positions().is_empty() {
+            if dzis >= prog && (!b.positions().is_empty() || !b.pendings().is_empty()) {
                 self.close_everything(b, q.ts, CloseReason::DayTarget);
                 let r = format!(
                     "CEL DZIENNY {:.2} % osiągnięty: +{dzis:.2} $ z {baza:.2} $ (próg {prog:.2} $)",
@@ -7457,21 +7579,20 @@ impl Engine {
             }
         }
         if self.cfg.day_trail_stop_pct > 0.0 && self.bramka_dnia_czynna() {
-            let szczyt = self.stats.day_peak_equity.max(1.0);
-            let zysk_szczytu = self.stats.day_peak_equity - self.stats.day_start_equity;
-            let uzbrojony = self.cfg.day_trail_arm_pct <= 0.0
-                || zysk_szczytu
-                    >= self.stats.day_start_equity.max(1.0) * self.cfg.day_trail_arm_pct / 100.0;
+            let threshold = self.cfg.day_trail_threshold(
+                self.stats.day_start_equity, self.stats.day_peak_equity);
+            let uzbrojony = threshold.is_some();
+            let (szczyt, prog) = threshold.unwrap_or((1.0, 0.0));
             let oddane = self.stats.day_peak_equity - eq;
-            let prog = szczyt * self.cfg.day_trail_stop_pct / 100.0;
             if uzbrojony && oddane >= prog {
                 self.zatrzymaj_dobe(q.ts);
             }
-            if uzbrojony && oddane >= prog && !b.positions().is_empty() {
+            if uzbrojony && oddane >= prog && (!b.positions().is_empty() || !b.pendings().is_empty()) {
                 self.close_everything(b, q.ts, CloseReason::DayTarget);
                 let r = format!(
-                    "STOP DNIA: oddane {oddane:.2} $ ze szczytu {szczyt:.2} $ \
+                    "STOP DNIA: oddane {oddane:.2} $, podstawa {:?} {szczyt:.2} $ \
                      ({:.2} % ≥ {:.2} %)",
+                    self.cfg.day_trail_basis,
                     oddane / szczyt * 100.0,
                     self.cfg.day_trail_stop_pct
                 );
@@ -7490,7 +7611,7 @@ impl Engine {
         let hour = hour_of(q.ts, self.cfg.session_offset());
         if self.cfg.eod_flat_hour > 0.0 && hour == self.cfg.eod_flat_hour as u32 {
             self.zatrzymaj_dobe(q.ts);
-            if !b.positions().is_empty() {
+            if !b.positions().is_empty() || !b.pendings().is_empty() {
                 self.close_everything(b, q.ts, CloseReason::EodFlat);
                 self.log(q.ts, 0, "EOD-FLAT");
             }
@@ -7499,7 +7620,7 @@ impl Engine {
             let wd = weekday_of(q.ts, self.cfg.session_offset());
             if wd == 4 && hour >= self.cfg.flat_weekend_hour as u32 {
                 self.zatrzymaj_dobe(q.ts);
-                if !b.positions().is_empty() {
+                if !b.positions().is_empty() || !b.pendings().is_empty() {
                     self.close_everything(b, q.ts, CloseReason::EodFlat);
                     self.log(q.ts, 0, "FLAT przed weekendem");
                 }
@@ -7518,6 +7639,16 @@ impl Engine {
             1,
             "DOBA ZAMKNIĘTA dla wejść — do północy silnika".to_string(),
         );
+    }
+
+    /// Account/strategy-scoped persistence for the day latch, independent of
+    /// optional order-continuation replay. Restoring it can only retain a stop.
+    pub fn stopped_trading_day(&self) -> Option<i64> {
+        (self.day_stop != i64::MIN).then_some(self.day_stop)
+    }
+
+    pub fn restore_stopped_trading_day(&mut self, day: Option<i64>) {
+        if let Some(day) = day { self.day_stop = self.day_stop.max(day); }
     }
 
 
@@ -8441,7 +8572,8 @@ impl Engine {
             .baskets
             .iter()
             .filter(|x| {
-                x.alive() && !x.had_positions && x.tickets.is_empty() && ts - x.created_ts > limit
+                x.alive() && !self.keep_explicit_pending(x.id)
+                    && !x.had_positions && x.tickets.is_empty() && ts - x.created_ts > limit
             })
             .map(|x| x.id)
             .collect();
@@ -9540,7 +9672,7 @@ impl Engine {
         let czekajace: Vec<u32> = self
             .baskets
             .iter()
-            .filter(|x| x.alive() && x.drop_po_ts > 0)
+            .filter(|x| x.alive() && x.drop_po_ts > 0 && !self.keep_explicit_pending(x.id))
             .map(|x| x.id)
             .collect();
         let gotowe: Vec<(u32, bool)> = czekajace
@@ -9594,7 +9726,7 @@ impl Engine {
         let stare: Vec<u32> = self
             .baskets
             .iter()
-            .filter(|x| x.alive())
+            .filter(|x| x.alive() && !self.keep_explicit_pending(x.id))
             .filter(|x| {
                 let mut lim = f64::INFINITY;
                 if limit_wieku > 0.0 {
@@ -11931,6 +12063,7 @@ mod testy_pakiet_a {
         closed: Vec<ClosedTrade>,
         next: Ticket,
         pub(super) stops: f64,
+        cancel_failures: usize,
     }
 
     impl Atrapa {
@@ -11946,6 +12079,7 @@ mod testy_pakiet_a {
                 closed: Vec::new(),
                 next: 1,
                 stops: 0.0,
+                cancel_failures: 0,
             }
         }
 
@@ -12066,6 +12200,10 @@ mod testy_pakiet_a {
             Ok(0.0)
         }
         fn cancel_pending(&mut self, t: Ticket) -> BResult<()> {
+            if self.cancel_failures > 0 {
+                self.cancel_failures -= 1;
+                return Err(BrokerError::Rejected);
+            }
             let przed = self.pendings.len();
             self.pendings.retain(|o| o.ticket != t);
             if self.pendings.len() < przed {
@@ -12280,6 +12418,374 @@ mod testy_pakiet_a {
                 koszykow,
                 "oś A6 = {os}: re-delivery tej samej wiadomości"
             );
+        }
+    }
+
+    #[test]
+    fn market_now_orphan_edit_respects_the_entry_guard() {
+        let mut b = Atrapa::nowa();
+        let mut e = silnik(|c| {
+            c.honor_market_open = true;
+            c.edycja_sieroty_nie_otwiera = true;
+        });
+        e.on_message(&mut b, &wiad(1, 50, Some(50), "BUY NOW"));
+        assert!(e.baskets.is_empty(), "orphan market edit opened new risk");
+        assert!(b.positions.is_empty());
+        assert_eq!(e.odrzuty.get("EditOrphan"), Some(&1));
+    }
+
+    #[test]
+    fn market_now_redelivery_is_idempotent_even_after_restore() {
+        let mut b = Atrapa::nowa();
+        let mut e = silnik(|c| c.honor_market_open = true);
+        let original = wiad(1, 50, None, "BUY NOW");
+        e.on_message(&mut b, &original);
+        assert_eq!(e.baskets.len(), 1);
+        assert_eq!(b.positions.len(), 1);
+        e.done_actions.clear(); // replay after volatile dedup memory was lost
+        e.on_message(&mut b, &original);
+        assert_eq!(e.baskets.len(), 1, "market re-delivery created another basket");
+        assert_eq!(b.positions.len(), 1);
+    }
+
+    #[test]
+    fn market_now_edit_cannot_reopen_a_known_entry_with_a_changed_direction() {
+        let mut b = Atrapa::nowa();
+        let mut e = silnik(|c| c.honor_market_open = true);
+        e.on_message(&mut b, &wiad(1, 50, None, "BUY NOW"));
+        e.on_message(&mut b, &wiad(1, 50, Some(50), "SELL NOW"));
+        assert_eq!(e.baskets.len(), 1, "changed market edit opened opposite risk");
+        assert_eq!(b.positions.len(), 1);
+    }
+
+    #[test]
+    fn cosmetic_entry_edit_preserves_management_progress_and_stop() {
+        let mut b = Atrapa::nowa();
+        let mut e = silnik(|_| {});
+        e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+        e.on_message(&mut b, &wiad(1, 2, None, "MOVE SL TO 3998"));
+        e.baskets[0].tp_stage = 1;
+        e.baskets[0].plan_wykonany_do = 1;
+        e.baskets[0].tp_touch_ts = vec![TS0, 0];
+        let before = (e.baskets[0].sl, e.baskets[0].tp_stage,
+            e.baskets[0].plan_wykonany_do, e.baskets[0].tp_touch_ts.clone());
+        let orders = format!("{:?}", b.pendings);
+        e.on_message(&mut b, &wiad(1, 1, Some(1), &format!("{WEJSCIE}\nGood luck")));
+        assert_eq!((e.baskets[0].sl, e.baskets[0].tp_stage,
+            e.baskets[0].plan_wykonany_do, e.baskets[0].tp_touch_ts.clone()), before,
+            "cosmetic edit rolled back the active stop or TP progress");
+        assert_eq!(format!("{:?}", b.pendings), orders, "cosmetic edit changed broker orders");
+    }
+
+    #[test]
+    fn target_only_entry_edit_updates_the_armed_broker_plan() {
+        let mut b = Atrapa::nowa();
+        b.ustaw_cene(TS0, 4004.0, 4004.2);
+        let mut e = silnik(|_| {});
+        e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+        let before: Vec<_> = b.pendings.iter().map(|p| p.tp).collect();
+        assert!(!before.is_empty());
+        e.on_message(&mut b, &wiad(1, 1, Some(1), &WEJSCIE.replace("4010", "4012").replace("4020", "4022")));
+        let after: Vec<_> = b.pendings.iter().map(|p| p.tp).collect();
+        assert_ne!(before, after, "engine targets changed but broker targets did not");
+        assert!(after.iter().all(|tp| tp.is_none_or(|v| v == 4012.0 || v == 4022.0)));
+    }
+
+    #[test]
+    fn switching_off_v2_cannot_clear_an_existing_edit_review() {
+        let mut b = Atrapa::nowa();
+        let mut e = silnik(|_| {});
+        e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+        let state = e.baskets[0].entry_edit_state.as_mut().unwrap();
+        state.review = Some(EntryEditReview {
+            desired_source: state.source.clone().unwrap(), received_ts: TS0,
+            reason: "SyntheticUnconfirmedModify".into(),
+        });
+        let before = e.baskets[0].sl;
+        e.on_message(&mut b, &wiad(1, 1, Some(1), &WEJSCIE.replace("3990", "3988")));
+        assert!(e.baskets[0].entry_edit_state.as_ref().unwrap().review.is_some());
+        assert_eq!(e.baskets[0].sl, before);
+    }
+
+    #[test]
+    fn explicit_pending_validity_survives_14_days_age_ttl_and_target_touch() {
+        for explicit in [false, true] {
+            for enabled in [false, true] {
+                let mut b = Atrapa::nowa();
+                b.ustaw_cene(TS0, 4004.0, 4004.2);
+                let mut e = silnik(|c| {
+                    c.explicit_pending_until_cancel = enabled;
+                    c.ignore_old_after_min = 1.0;
+                    c.pending_ttl_h = 0.01;
+                    c.basket_max_age_min = 1.0;
+                    c.pending_drop_on_target = true;
+                    c.pending_drop_arm = false;
+                    c.pending_lifetime = PendingLifetime::UntilTp1;
+                });
+                let text = if explicit { WEJSCIE.to_string() } else { WEJSCIE.replace("LIMITS ", "") };
+                e.on_message(&mut b, &wiad(1, 1, None, &text));
+                assert!(!b.pendings.is_empty(), "fixture must place pending orders");
+                let old: Vec<_> = b.pendings.iter().map(|o| o.ticket).collect();
+                b.ustaw_cene(TS0 + 14 * 86_400_000, 4011.0, 4011.2);
+                let q = b.quote();
+                e.on_tick(&mut b, &q);
+                if enabled && explicit {
+                    assert_eq!(old, b.pendings.iter().map(|o| o.ticket).collect::<Vec<_>>());
+                    assert_eq!(e.export_pending_source_memory().len(), 1);
+                    assert_eq!(e.baskets[0].plan_wykonany_do, 0,
+                        "unfilled source limits cannot consume their plan at a historical TP touch");
+                    let mut tp = wiad(1, 2, None, "TP1 HIT"); tp.reply_to = Some(1); tp.ts = q.ts + 1;
+                    e.on_message(&mut b, &tp);
+                    assert_eq!(old, b.pendings.iter().map(|o| o.ticket).collect::<Vec<_>>());
+                    let mut rf = wiad(1, 3, None, "RISK FREE"); rf.reply_to = Some(1); rf.ts = q.ts + 2;
+                    e.cfg.pending_cancel_on_riskfree = true;
+                    e.on_message(&mut b, &rf);
+                    assert_eq!(old, b.pendings.iter().map(|o| o.ticket).collect::<Vec<_>>());
+                } else {
+                    assert!(b.pendings.is_empty(), "ordinary grid/legacy validity must keep its configured expiry");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_cancel_variants_route_to_14_day_old_message_not_the_newest_grid() {
+        for text in ["CANCEL", "CANCELLED", "CANCELED", "NO LONGER VALID",
+            "THIS SETUP IS NO LONGER VALID", "DELETE ALL LIMITS", "INVALID"] {
+            let mut b = Atrapa::nowa(); b.ustaw_cene(TS0, 4004.0, 4004.2);
+            let mut e = silnik(|c| c.explicit_pending_until_cancel = true);
+            e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+            let old_id = e.baskets[0].id;
+            let mut second = wiad(1, 2, None, &WEJSCIE.replace("4000/3995", "3998/3993"));
+            second.ts += 14 * 86_400_000;
+            e.on_message(&mut b, &second);
+            assert_eq!(e.baskets.len(), 2);
+            let latest = e.baskets[1].id;
+            let newer_orders: Vec<_> = b.pendings.iter().filter(|p| p.basket == Some(latest))
+                .map(|p| p.ticket).collect();
+            assert!(!newer_orders.is_empty());
+            let mut cancel = wiad(1, 3, None, text); cancel.reply_to = Some(1); cancel.ts = second.ts + 1;
+            e.on_message(&mut b, &cancel);
+            assert!(e.pending_source_cancelled(old_id), "{text}");
+            assert!(!b.pendings.iter().any(|p| p.basket == Some(old_id)), "{text}");
+            assert_eq!(newer_orders, b.pendings.iter().map(|p| p.ticket).collect::<Vec<_>>(), "{text}");
+            assert!(!e.pending_source_cancelled(latest));
+        }
+    }
+
+    #[test]
+    fn explicit_pending_requires_known_reply_and_honors_it_when_generic_cancel_is_off() {
+        let mut b = Atrapa::nowa(); b.ustaw_cene(TS0, 4004.0, 4004.2);
+        let mut e = silnik(|c| { c.explicit_pending_until_cancel = true; c.honor_cancel = false; });
+        e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+        let id = e.baskets[0].id;
+        e.on_message(&mut b, &wiad(1, 2, None, "NO LONGER VALID"));
+        assert!(!b.pendings.is_empty()); assert!(!e.pending_source_cancelled(id));
+        let mut unknown = wiad(1, 3, None, "CANCEL"); unknown.reply_to = Some(9999);
+        e.on_message(&mut b, &unknown);
+        assert!(!b.pendings.is_empty()); assert!(!e.pending_source_cancelled(id));
+        let mut known = wiad(1, 4, None, "CANCEL"); known.reply_to = Some(1);
+        e.on_message(&mut b, &known);
+        assert!(b.pendings.is_empty()); assert!(e.pending_source_cancelled(id));
+    }
+
+    #[test]
+    fn pending_source_cancel_retries_after_restart_without_closing_filled_positions() {
+        let mut b = Atrapa::nowa(); b.ustaw_cene(TS0, 4004.0, 4004.2);
+        let mut e = silnik(|c| c.explicit_pending_until_cancel = true);
+        e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+        let id = e.baskets[0].id;
+        let ticket = b.open_market(OrderReq { side:Side::Buy, volume:0.01,
+            sl:Some(3990.0), tp:Some(4020.0), basket:Some(id), level:99,
+            is_toucher:false, comment:String::new() }).unwrap();
+        b.cancel_failures = 100;
+        let mut cancel = wiad(1, 9, None, "NO LONGER VALID"); cancel.reply_to = Some(1);
+        e.on_message(&mut b, &cancel);
+        assert!(!b.pendings.is_empty(), "fixture rejection must retain real broker orders");
+        let source_json = serde_json::to_vec(&e.export_pending_source_memory()).unwrap();
+        let baskets_json = serde_json::to_vec(&e.baskets).unwrap();
+        let mut restarted = silnik(|c| { c.explicit_pending_until_cancel = true; c.entry_idempotencja = false; });
+        restarted.restore_pending_source_memory(&serde_json::from_slice::<Vec<PendingSourceRecord>>(&source_json).unwrap());
+        restarted.adopt_baskets(serde_json::from_slice(&baskets_json).unwrap());
+        b.cancel_failures = 0;
+        b.ustaw_cene(TS0 + 14 * 86_400_000, 4004.0, 4004.2);
+        let q = b.quote(); restarted.on_tick(&mut b, &q);
+        assert!(b.pendings.is_empty());
+        assert_eq!(b.positions.iter().map(|p| p.ticket).collect::<Vec<_>>(), vec![ticket]);
+        assert!(restarted.pending_source_cancelled(id));
+        let mut repeated = wiad(1, 1, None, WEJSCIE); repeated.ts = q.ts;
+        restarted.on_message(&mut b, &repeated);
+        repeated.edit_of = Some(1); repeated.text = WEJSCIE.replace("4000/3995", "4001/3994");
+        restarted.on_message(&mut b, &repeated);
+        assert!(b.pendings.is_empty(), "re-delivery/edit cannot rearm a withdrawn source");
+        assert_eq!(b.positions.len(), 1);
+    }
+
+    #[test]
+    fn pending_source_revision_tracks_all_mutations_without_false_dirty_repeats() {
+        let mut b = Atrapa::nowa(); b.ustaw_cene(TS0, 4004.0, 4004.2);
+        let mut e = silnik(|c| { c.explicit_pending_until_cancel = true; c.reply_graph_transitive = true; });
+        let initial = e.pending_source_memory_revision();
+        e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+        let accepted = e.pending_source_memory_revision(); assert_ne!(accepted, initial);
+        let records = e.export_pending_source_memory();
+        e.restore_pending_source_memory(&records);
+        assert_eq!(accepted, e.pending_source_memory_revision(), "identical restore dirtied the ledger");
+        let mut alias = wiad(1, 9, None, "TP1 HIT"); alias.reply_to = Some(1);
+        e.on_message(&mut b, &alias);
+        let aliased = e.pending_source_memory_revision(); assert_ne!(aliased, accepted);
+        e.on_message(&mut b, &alias);
+        assert_eq!(aliased, e.pending_source_memory_revision());
+        let mut cancel = wiad(1, 10, None, "CANCEL"); cancel.reply_to = Some(9);
+        e.on_message(&mut b, &cancel);
+        let withdrawn = e.pending_source_memory_revision(); assert_ne!(withdrawn, aliased);
+        e.on_message(&mut b, &cancel);
+        assert_eq!(withdrawn, e.pending_source_memory_revision());
+        let mut replacement = silnik(|_| {});
+        assert_ne!(replacement.pending_source_memory_revision(), withdrawn,
+            "engine replacement must invalidate the old persistence signature");
+        replacement.restore_pending_source_memory(&e.export_pending_source_memory());
+        let loaded = replacement.pending_source_memory_revision();
+        replacement.restore_pending_source_memory(&e.export_pending_source_memory());
+        assert_eq!(loaded, replacement.pending_source_memory_revision());
+        assert_eq!(replacement.export_pending_source_memory(), e.export_pending_source_memory());
+        // A restart after toggling the axis off can still adopt a newly known
+        // alias from a compatible basket snapshot without dropping its source.
+        let mut adopted = e.baskets[0].clone(); adopted.msg_aliases.push(99);
+        replacement.adopt_baskets(vec![adopted]);
+        assert_ne!(loaded, replacement.pending_source_memory_revision());
+        assert!(replacement.export_pending_source_memory()[0].aliases.contains(&99));
+    }
+
+    #[test]
+    fn pending_source_alias_survives_snapshot_then_actual_history_prune_and_restart() {
+        let mut b = Atrapa::nowa(); b.ustaw_cene(TS0, 4004.0, 4004.2);
+        let mut e = silnik(|c| { c.explicit_pending_until_cancel = true; c.reply_graph_transitive = true; });
+        e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+        let id = e.baskets[0].id;
+        let mut alias = wiad(1, 9, None, "TP1 HIT"); alias.reply_to = Some(1);
+        e.on_message(&mut b, &alias);
+        assert!(e.export_pending_source_memory()[0].aliases.contains(&9));
+        e.close_everything(&mut b, TS0 + 1, CloseReason::MaxDd);
+        let old = e.baskets[0].clone();
+        for n in 2..=501 {
+            let mut historical = old.clone(); historical.id = n; historical.msg_id = 1000 + n as i64;
+            historical.msg_aliases.clear();
+            e.baskets.push(historical);
+        }
+        b.ustaw_cene(TS0 + 14 * 86_400_000, 4004.0, 4004.2);
+        let q = b.quote(); e.on_tick(&mut b, &q);
+        assert!(e.baskets.is_empty(), "fixture must exercise real seven-day history pruning");
+        let saved = e.export_pending_source_memory();
+        assert!(saved[0].aliases.contains(&9), "later snapshot lost alias after pruning its basket");
+        let mut restored = silnik(|c| c.explicit_pending_until_cancel = true);
+        restored.restore_pending_source_memory(&saved);
+        let mut cancel = wiad(1, 10, None, "CANCEL"); cancel.reply_to = Some(9); cancel.ts = q.ts + 1;
+        restored.on_message(&mut b, &cancel);
+        assert!(restored.pending_source_cancelled(id));
+    }
+
+    #[test]
+    fn risk_exit_keeps_source_validity_and_disk_tombstone_outlives_broker_exposure() {
+        let mut b = Atrapa::nowa(); b.ustaw_cene(TS0, 4004.0, 4004.2);
+        let mut e = silnik(|c| c.explicit_pending_until_cancel = true);
+        e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
+        let id = e.baskets[0].id;
+        e.close_everything(&mut b, TS0 + 1, CloseReason::MaxDd);
+        assert!(b.pendings.is_empty());
+        assert!(e.keep_explicit_pending(id), "risk exit is not a publisher withdrawal");
+        let mut restored = silnik(|c| c.explicit_pending_until_cancel = true);
+        restored.restore_pending_source_memory(&e.export_pending_source_memory());
+        assert!(restored.baskets.is_empty(), "no broker exposure is invented on restart");
+        let mut cancel = wiad(1, 9, None, "CANCEL"); cancel.reply_to = Some(1);
+        cancel.ts += 28 * 86_400_000;
+        restored.on_message(&mut b, &cancel);
+        assert!(restored.pending_source_cancelled(id));
+        let mut final_restore = silnik(|c| { c.explicit_pending_until_cancel = false; c.entry_idempotencja = false; });
+        final_restore.restore_pending_source_memory(&restored.export_pending_source_memory());
+        let mut again = wiad(1, 1, None, WEJSCIE); again.ts = cancel.ts + 1;
+        final_restore.on_message(&mut b, &again);
+        assert!(b.pendings.is_empty(), "turning off a setting cannot clear a persisted source withdrawal");
+        assert!(final_restore.baskets.is_empty());
+    }
+
+    #[test]
+    fn close_guards_cancel_pending_only_exposure() {
+        for guard in ["day-trail-pct", "day-trail-usd", "day-target-pct",
+            "day-target-usd", "eod", "weekend"] {
+            let mut b = Atrapa::nowa();
+            // A Friday quote with no entry touch leaves a broker pending ladder.
+            let ts = 1788537600000i64; // 2026-09-04 16:00 UTC
+            b.ustaw_cene(ts, 4004.0, 4004.2);
+            let mut e = silnik(|c| {
+                match guard {
+                    "day-trail-pct" => { c.day_trail_stop_pct = 1.0; c.day_trail_arm_pct = 0.0; }
+                    "day-trail-usd" => c.day_trail_stop_usd = 1.0,
+                    "day-target-pct" => { c.day_target_pct = 1.0; c.day_target_close = true; }
+                    "day-target-usd" => { c.day_target_usd = 1.0; c.day_target_close = true; }
+                    "eod" => c.eod_flat_hour = 16.0,
+                    "weekend" => { c.flat_weekend = true; c.flat_weekend_hour = 16.0; }
+                    _ => unreachable!(),
+                }
+            });
+            let mut message = wiad(1, 1, None, WEJSCIE);
+            message.ts = ts;
+            e.on_message(&mut b, &message);
+            assert!(b.positions.is_empty(), "{guard}");
+            assert!(!b.pendings.is_empty(), "{guard}: fixture needs broker pending exposure");
+            e.stats.day_start_equity = 400.0;
+            e.stats.day_peak_equity = 500.0;
+            e.stats.equity = 450.0;
+            let q = b.quote();
+            e.check_guards(&mut b, &q);
+            assert!(b.pendings.is_empty(), "{guard}: pending orders survived a close guard");
+        }
+    }
+
+    #[test]
+    fn stopped_day_retries_pending_cancel_after_trigger_hour_passes() {
+        for confirmed in [false, true] {
+            let ts = 1788537600000i64; // Friday 16:00 UTC
+            let mut b = Atrapa::nowa();
+            b.ustaw_cene(ts, 4004.0, 4004.2);
+            let mut e = silnik(|c| { c.eod_flat_hour = 16.0; c.confirmed_exit_retry = confirmed; });
+            let mut message = wiad(1, 1, None, WEJSCIE);
+            message.ts = ts;
+            e.on_message(&mut b, &message);
+            assert!(!b.pendings.is_empty());
+            b.cancel_failures = 100;
+            let q = b.quote();
+            e.on_tick(&mut b, &q);
+            assert!(!b.pendings.is_empty(), "fixture cancel must fail");
+            assert_eq!(e.stopped_trading_day(), Some(day_of(ts, 0)));
+            b.cancel_failures = 0;
+            b.ustaw_cene(ts + 3_600_000, 4004.0, 4004.2);
+            let q = b.quote();
+            assert_ne!(hour_of(q.ts, 0), e.cfg.eod_flat_hour as u32);
+            e.on_tick(&mut b, &q);
+            assert!(b.pendings.is_empty(), "day stop forgot unconfirmed pending cancellation (confirmed={confirmed})");
+        }
+    }
+
+    #[test]
+    fn profit_peak_guard_closes_positions_and_stops_the_day_at_shared_threshold() {
+        for (basis, closes) in [(DayTrailBasis::EquityPeak, false), (DayTrailBasis::ProfitPeak, true)] {
+            let mut b = Atrapa::nowa();
+            let mut e = silnik(|c| {
+                c.honor_market_open = true;
+                c.day_trail_stop_pct = 30.0;
+                c.day_trail_arm_pct = 12.0;
+                c.day_trail_basis = basis;
+            });
+            e.on_message(&mut b, &wiad(1, 1, None, "BUY NOW"));
+            assert_eq!(b.positions.len(), 1);
+            e.stats.day_start_equity = 400.0;
+            e.stats.day_peak_equity = 480.0;
+            e.stats.equity = 455.0; // gave back 25; ProfitPeak threshold is 24
+            let q = b.quote();
+            e.check_guards(&mut b, &q);
+            assert_eq!(b.positions.is_empty(), closes);
+            assert_eq!(e.day_stop == day_of(q.ts, e.cfg.session_offset()), closes);
         }
     }
 }

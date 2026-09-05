@@ -268,7 +268,8 @@ pub const POLA_RACHUNKU: &[&str] = &[
     "konto_dzwignia",
 ];
 
-pub const LICZBA_POL_USTAWIEN: usize = 515;
+// day_trail_basis is strategy-owned, like the existing day trail percentages.
+pub const LICZBA_POL_USTAWIEN: usize = 517;
 
 /// Składa ustawienia dla JEDNEGO formatu.
 ///

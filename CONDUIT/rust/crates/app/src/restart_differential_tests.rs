@@ -155,6 +155,86 @@ fn restart_must_preserve_latched_day_stop_after_funds_change(){
 }
 
 #[test]
+fn day_stop_survives_account_memory_without_optional_order_continuation() {
+    let mut c = cfg();
+    c.restore_strategy_continuation = false;
+    c.day_trail_stop_pct = 1.0;
+    c.day_trail_arm_pct = 0.0;
+    let (mut s, mut b) = rig(c.clone());
+    tick(&mut s, &mut b, T + 1000, 4020.0);
+    tick(&mut s, &mut b, T + 2000, 4004.0);
+    assert!(b.positions().is_empty());
+    let stopped = s.glowny().engine.stopped_trading_day();
+    assert!(stopped.is_some());
+    b.inner.balance += 400.0;
+    let memory = memory_of(&mut s, &b);
+    let (mut restored, reports) = restore_memory(c, memory, &b, ContinuationOrigin::Memory);
+    assert!(reports.is_empty(), "the order-continuation axis remains OFF");
+    assert_eq!(restored.glowny().engine.stopped_trading_day(), stopped);
+    tick(&mut restored, &mut b, T + 3000, 4004.0);
+    restored.glowny_mut().engine.on_message(&mut b, &msg(T + 3000, 4, TEXT, None));
+    assert!(b.positions().is_empty(), "cash deposit/reconnect erased the day latch");
+    let next_day = T + 86_400_000;
+    tick(&mut restored, &mut b, next_day, 4004.0);
+    restored.glowny_mut().engine.on_message(&mut b, &msg(next_day, 5, TEXT, None));
+    assert!(!b.positions().is_empty(), "yesterday's latch blocked the new trading day");
+}
+
+#[test]
+fn live_risk_signature_tracks_source_alias_withdrawal_day_stop_and_engine_replacement() {
+    let mut c = cfg(); c.explicit_pending_until_cancel = true; c.reply_graph_transitive = true;
+    let (mut s, mut b) = rig(c);
+    let original = sygnatura_ryzyka(&s);
+    s.glowny_mut().engine.on_message(&mut b,
+        &msg(T+10,10,"BUY LIMITS GOLD @ 3990/3985\nTP 4050\nSL 3970",None));
+    let accepted = sygnatura_ryzyka(&s); assert_ne!(accepted, original);
+    s.glowny_mut().engine.on_message(&mut b, &msg(T+20,11,"TP1 HIT",Some(10)));
+    let aliased = sygnatura_ryzyka(&s); assert_ne!(aliased, accepted);
+    assert_eq!(aliased, sygnatura_ryzyka(&s), "unchanged loop must not dirty the source ledger");
+    s.glowny_mut().engine.on_message(&mut b, &msg(T+30,12,"CANCEL",Some(11)));
+    let withdrawn = sygnatura_ryzyka(&s); assert_ne!(withdrawn, aliased);
+    s.glowny_mut().engine.restore_stopped_trading_day(Some(123));
+    let stopped = sygnatura_ryzyka(&s); assert_ne!(stopped, withdrawn);
+    s.glowny_mut().engine.risk_override = true;
+    let overridden = sygnatura_ryzyka(&s); assert_ne!(overridden, stopped);
+    s.glowny_mut().engine.halted = Some("synthetic risk stop".into());
+    let halted = sygnatura_ryzyka(&s); assert_ne!(halted, overridden);
+    let restored = production_restart(&mut s, &b);
+    assert_ne!(sygnatura_ryzyka(&restored), halted,
+        "new engine instance must force complete durable snapshot even with equal source count");
+    assert!(restored.glowny().engine.export_pending_source_memory().iter()
+        .any(|r|r.msg_id==10 && r.aliases.contains(&11) && r.cancelled_ts.is_some()));
+}
+
+#[test]
+fn publisher_pending_validity_and_withdrawal_survive_actual_app_restart_projection() {
+    let mut c = cfg(); c.explicit_pending_until_cancel = true;
+    c.restore_strategy_continuation = false; c.reply_graph_transitive = true;
+    let (mut s, mut b) = rig(c);
+    let pending = "BUY LIMITS GOLD @ 3990/3985\nTP 4050\nTP 4060\nSL 3970";
+    s.glowny_mut().engine.on_message(&mut b, &msg(T+10,10,pending,None));
+    assert!(!b.pendings().is_empty());
+    s.glowny_mut().engine.on_message(&mut b, &msg(T+20,11,"TP1 HIT",Some(10)));
+    let mut restored = production_restart(&mut s, &b);
+    tick(&mut restored, &mut b, T + 14*86_400_000, 4004.0);
+    assert!(!b.pendings().is_empty(), "source limits survive two weeks and restart");
+    let before_positions: Vec<_> = b.positions().iter().map(|p|p.ticket).collect();
+    restored.glowny_mut().engine.on_message(&mut b,
+        &msg(T+14*86_400_000+1,12,"NO LONGER VALID",Some(11)));
+    assert!(b.pendings().is_empty(), "persisted alias must resolve to the old source setup");
+    assert_eq!(before_positions,b.positions().iter().map(|p|p.ticket).collect::<Vec<_>>());
+    let ledger = restored.glowny().engine.export_pending_source_memory();
+    assert!(ledger.iter().any(|r|r.msg_id==10 && r.cancelled_ts.is_some()));
+    let mut after_cancel = production_restart(&mut restored, &b);
+    assert!(after_cancel.glowny().engine.export_pending_source_memory()
+        .iter().any(|r|r.msg_id==10 && r.cancelled_ts.is_some()));
+    after_cancel.glowny_mut().engine.on_message(&mut b,
+        &msg(T+28*86_400_000,10,pending,None));
+    assert!(b.pendings().is_empty(), "no-exposure recovery must preserve the source tombstone");
+    assert_eq!(before_positions,b.positions().iter().map(|p|p.ticket).collect::<Vec<_>>());
+}
+
+#[test]
 fn continuation_off_keeps_legacy_projection_without_new_key(){
     let mut c=cfg();c.restore_strategy_continuation=false;
     let(mut s,mut b)=rig(c);tick(&mut s,&mut b,T+1000,4008.0);b.reject_next_modify=true;
