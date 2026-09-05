@@ -1,0 +1,397 @@
+/* ============================================================
+   WYKRES
+   ============================================================ */
+
+.chart {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-surface);
+}
+
+/* Pełny ekran: renderowany portalem do <body>, więc żaden kontekst układania
+   karty nie może go przykryć. z-index poniżej modali (300) i toastów (500). */
+.chart--fs {
+  position: fixed;
+  inset: 0;
+  z-index: 280;
+  background: var(--bg-canvas);
+  animation: fadeIn var(--dur-2) var(--ease);
+}
+
+.chart--fs .chart__bar {
+  background: var(--bg-surface);
+  padding: 8px var(--sp-4);
+}
+
+.chart__fstitle {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-right: 6px;
+}
+.chart__fstitle b {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.03em;
+}
+
+/* Pasek narzędzi.
+
+   `flex-wrap: nowrap` jest tu ZASADĄ, nie stylem: przy zawijaniu każdy element
+   pojawiający się warunkowo przesuwa pozostałe do drugiego rzędu, a przyciski
+   „skaczą" pod kursorem. Cokolwiek trafia do paska, ma mieć stałe wymiary;
+   rzeczy zależne od kursora idą na nakładkę nad kanwą (patrz `.chart__legend`). */
+.chart__bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-wrap: nowrap;
+  min-height: 40px;
+}
+
+/* STREFA PRZEWIJANA — rośnie z liczbą narzędzi i wolno jej wyjechać poza kadr.
+   STREFA PRZYPIĘTA — reset, eksport i pełny ekran; nie kurczy się i nie
+   odjeżdża. Patrz komentarz przy `chart__bar` w TradingChart.tsx: pełny ekran
+   był ostatni we wspólnym przewijanym rzędzie z UKRYTYM suwakiem, więc przy
+   węższym oknie stawał się nieosiągalny.
+
+   `min-width: 0` jest tu konieczne: element flex domyślnie nie kurczy się
+   poniżej rozmiaru treści, więc bez tego strefa przewijana rozpychałaby pasek
+   i spychała strefę przypiętą dokładnie tak, jak przed poprawką. */
+.chart__bar-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chart__bar-scroll::-webkit-scrollbar {
+  display: none;
+}
+.chart__bar-scroll > * {
+  flex: 0 0 auto;
+}
+.chart__bar-fix {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  /* Oddzielenie od strefy przewijanej, żeby było widać, że treść obok się
+     urywa, a nie kończy. */
+  padding-left: 6px;
+  border-left: 1px solid var(--border-soft);
+}
+/* elementy paska nie kurczą się i nie rozpychają go */
+
+
+.chart__tfs,
+.chart__styles,
+.chart__tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.chart__tf {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 26px;
+  padding: 0 7px;
+  border-radius: var(--r-xs);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  transition:
+    background-color var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+
+.chart__tf:hover {
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+
+.chart__tf[data-active="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.chart__colors {
+  display: flex;
+  gap: 3px;
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.chart__color {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1.5px solid transparent;
+  transition: transform var(--dur-1) var(--ease);
+}
+.chart__color:hover {
+  transform: scale(1.18);
+}
+.chart__color[data-active="true"] {
+  border-color: var(--text);
+  transform: scale(1.14);
+}
+
+/* ---------- legenda OHLC ----------
+   NAKŁADKA nad kanwą, nie element paska narzędzi.
+
+   Wcześniej odczyt siedział w `.chart__bar`, czyli w układzie przepływowym
+   z `flex-wrap`. Pojawiał się dopiero przy najechaniu na wykres, pasek
+   przekraczał szerokość, łamał się na drugi rząd i przyciski eksportu oraz
+   pełnego ekranu przeskakiwały w dół — a przy zjechaniu myszą wracały.
+   Element, którego istnienie zależy od kursora, nie może uczestniczyć
+   w przepływie paska. */
+.chart__legend {
+  position: absolute;
+  left: 14px;
+  top: 46px;
+  z-index: 3;
+  display: flex;
+  gap: 10px;
+  /* stała wysokość wiersza — legenda nigdy nie zmienia wymiarów */
+  height: 15px;
+  align-items: center;
+  pointer-events: none;
+  user-select: none;
+  font-size: var(--fs-2xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  /* cyfry o równej szerokości: liczby nie „pulsują" przy zmianie ceny */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+.chart__legend b {
+  color: var(--text-dim);
+  font-weight: var(--fw-semi);
+}
+
+/* ---------- wybór formatu eksportu ---------- */
+.chart__export {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.chart__fmts {
+  display: inline-flex;
+  gap: 1px;
+  padding: 2px;
+  border-radius: var(--r-xs);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+}
+
+.chart__fmt {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: var(--fs-3xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  transition:
+    background-color var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+.chart__fmt:hover {
+  color: var(--text-dim);
+}
+.chart__fmt[data-active="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.chart__canvas {
+  position: relative;
+  width: 100%;
+  min-height: 160px;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  /* zapasowe zabezpieczenie: gdyby listener 'wheel' nie zdążył się podpiąć,
+     przeglądarka i tak nie przewinie strony gestem nad wykresem */
+  overscroll-behavior: contain;
+}
+
+.chart__canvas[data-tool="cursor"] {
+  cursor: grab;
+}
+.chart__canvas[data-tool="cursor"]:active {
+  cursor: grabbing;
+}
+.chart__canvas[data-tool="brush"],
+.chart__canvas[data-tool="line"],
+.chart__canvas[data-tool="hline"],
+.chart__canvas[data-tool="rect"] {
+  cursor: crosshair;
+}
+.chart__canvas[data-tool="eraser"] {
+  cursor: cell;
+}
+
+/* Kursor nad linią SL/TP — musi wygrać z `grab`/`grabbing` powyżej,
+   dlatego ta reguła stoi PÓŹNIEJ i powtarza :active. */
+.chart__canvas[data-hot="level"],
+.chart__canvas[data-hot="level"]:active {
+  cursor: ns-resize;
+}
+.chart__canvas[data-hot="x"],
+.chart__canvas[data-hot="x"]:active {
+  cursor: pointer;
+}
+
+.chart__canvas canvas {
+  display: block;
+}
+
+/* ---------- potwierdzenie zmiany SL/TP (bez ONE CLICK) ---------- */
+.chart__ask {
+  position: absolute;
+  left: 14px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
+  border-radius: var(--r-sm);
+  background: var(--bg-surface-3);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+  font-size: var(--fs-2xs);
+  white-space: nowrap;
+  cursor: default;
+  animation: fadeIn var(--dur-2) var(--ease);
+}
+
+.chart__ask-txt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+}
+.chart__ask-txt b {
+  color: var(--text);
+  font-weight: var(--fw-bold);
+}
+
+/* Zlecenia spoza bota. Wolno je ruszyć — to rachunek użytkownika — ale przy
+   grupowaniu po cenie jedno pociągnięcie potrafi objąć kilkanaście cudzych
+   zleceń, więc moment zatwierdzenia musi to mówić wprost. */
+.chart__ask-obce {
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  font-size: var(--fs-3xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Pole wpisania poziomu z klawiatury. Wypełnione wartością z przeciągnięcia
+   i zaznaczone, żeby dało się od razu nadpisać. */
+.chart__askin {
+  width: 9ch;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-inset);
+  color: var(--text);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-bold);
+  text-align: right;
+}
+.chart__askin:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.chart__askin::selection {
+  background: var(--accent-soft);
+}
+
+/* ---------- chorągiewki stanu wykresu (lewy dolny róg) ---------- */
+.chart__flags {
+  position: absolute;
+  left: 12px;
+  bottom: 28px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.chart__flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-surface-3);
+  color: var(--text-muted);
+  font-size: var(--fs-3xs);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+button.chart__flag {
+  cursor: pointer;
+}
+button.chart__flag:hover {
+  opacity: 1;
+  color: var(--text-dim);
+}
+.chart__flag--warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.chart__watermark {
+  position: absolute;
+  left: 14px;
+  top: 10px;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  opacity: 0.32;
+}
+.chart__watermark span {
+  font-size: 21px;
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.02em;
+  color: var(--text);
+  line-height: 1;
+}
+.chart__watermark small {
+  font-size: var(--fs-2xs);
+  color: var(--text-muted);
+}
+
+/* ---------- mini sparkline ---------- */
+.spark {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}

@@ -1,0 +1,367 @@
+/* ============================================================
+   KRONIKA — style widoku rejestratora.
+
+   Tokeny i prymitywy jak wszędzie indziej (`views.css`, `ui.css`).
+   Tutaj tylko to, czego nie ma w innych ekranach: pasek źródła,
+   wielka liczba statystyki, strumień zdarzeń i lista kanałów.
+   ============================================================ */
+
+/* ---------------- pasek źródła ---------------- */
+.kron__zrodlo {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 10px var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-surface-2);
+  color: var(--text-2);
+  font-size: 13px;
+}
+.kron__zrodlo--uwaga {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn-text);
+}
+.kron__info {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-3);
+  cursor: help;
+}
+
+.kron__blad,
+.kron__ok {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 10px var(--sp-3);
+  border-radius: var(--r-md);
+  font-size: 13px;
+}
+.kron__blad {
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+.kron__ok {
+  border: 1px solid var(--long);
+  background: var(--long-soft);
+  color: var(--long-text);
+}
+
+/* ---------------- statystyka ---------------- */
+.kron__glowna {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) 1fr;
+  gap: var(--sp-3);
+  align-items: stretch;
+}
+@media (max-width: 780px) {
+  .kron__glowna {
+    grid-template-columns: 1fr;
+  }
+}
+
+.kron__wielka {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+}
+.kron__wielka__v {
+  font-size: 40px;
+  line-height: 1.05;
+  font-weight: 700;
+  color: var(--accent-text);
+  letter-spacing: -0.02em;
+}
+.kron__wielka__k {
+  font-size: 13px;
+  color: var(--accent-text);
+}
+.kron__wielka__d {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.kron__pary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+@media (max-width: 620px) {
+  .kron__pary {
+    grid-template-columns: 1fr;
+  }
+}
+.kron__para {
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-surface-2);
+}
+.kron__para--akcent {
+  border-color: var(--accent);
+}
+.kron__para__h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-3);
+  margin-bottom: 6px;
+}
+.kron__para__v {
+  font-size: 24px;
+  font-weight: 650;
+  color: var(--text-1);
+}
+.kron__para__r {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.kron__para__r b {
+  color: var(--text-2);
+}
+
+/* ---------------- liczniki ---------------- */
+.kron__licz {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.kron__licz--drobne {
+  border-top: 1px solid var(--border);
+  padding-top: var(--sp-3);
+}
+.kron__licznik {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--bg-surface-2);
+}
+.kron__licznik__k {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+.kron__licznik__v {
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--text-1);
+}
+
+/* ---------------- alarm o przyczynowości ---------------- */
+.kron__alarm {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+  color: var(--warn-text);
+}
+.kron__alarm b {
+  display: block;
+  margin-bottom: 4px;
+}
+.kron__alarm span {
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.kron__uwaga {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.kron__uwaga code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+/* ---------------- plik ---------------- */
+.kron__plik {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.kron__plik code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-surface-3);
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+/* ---------------- tabela ---------------- */
+.kron__tabela {
+  margin-top: var(--sp-3);
+  overflow-x: auto;
+}
+.kron__tabela table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.kron__tabela th {
+  text-align: left;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+  font-weight: 600;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.kron__tabela th.num,
+.kron__tabela td.num {
+  text-align: right;
+}
+.kron__tabela td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-soft, var(--border));
+  color: var(--text-2);
+}
+.kron__tabela tbody tr:hover {
+  background: var(--bg-surface-2);
+}
+.kron__tabela td:first-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+}
+
+/* ---------------- strumień ---------------- */
+.kron__strumien {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 560px;
+  overflow-y: auto;
+}
+.kron__wiersz {
+  display: grid;
+  grid-template-columns: 74px 92px 1fr;
+  gap: var(--sp-2);
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border);
+  align-items: start;
+}
+.kron__wiersz:last-child {
+  border-bottom: none;
+}
+.kron__wiersz[data-rodzaj="edycja"] {
+  background: var(--warn-soft);
+}
+.kron__wiersz--sesja {
+  grid-template-columns: 74px auto 1fr;
+  background: var(--bg-surface-2);
+  align-items: center;
+  padding: 5px 6px;
+}
+.kron__czas {
+  font-size: 11.5px;
+  color: var(--text-3);
+  padding-top: 2px;
+}
+.kron__znak {
+  display: flex;
+}
+.kron__tresc {
+  min-width: 0;
+}
+.kron__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+.kron__meta b {
+  color: var(--text-1);
+  font-size: 12.5px;
+  max-width: 220px;
+}
+.kron__text {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-surface-2);
+}
+
+/* ---------------- kanały ---------------- */
+.kron__kanaly {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--sp-2);
+}
+.kron__kanal {
+  padding: 10px var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-surface-2);
+}
+.kron__kanal[data-on="true"] {
+  border-color: var(--accent);
+}
+.kron__kanal__h {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.kron__kanal__n {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.kron__kanal__n b {
+  max-width: 170px;
+}
+.kron__tematy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--border);
+}

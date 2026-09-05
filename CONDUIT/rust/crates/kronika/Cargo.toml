@@ -1,0 +1,36 @@
+[package]
+name = "conduit-kronika"
+version.workspace = true
+edition.workspace = true
+
+# Nazwa binarki celowo BEZ przedrostka `conduit-`: użytkownik dostaje plik
+# `kronika.exe` leżący obok `conduit.exe` i od razu wie, co robi.
+[[bin]]
+name = "kronika"
+path = "src/main.rs"
+
+# TU JEST TYLKO BINARKA. Sam zapis (opcje, jeden plik, statystyka edycji,
+# eksport) mieszka w `conduit-server`, w module `kronika` — obok `archive.rs`,
+# który robi to samo o pokolenie wcześniej.
+#
+# Dlaczego nie biblioteka w tym pakiecie: `conduit-telegram` zależy od
+# `conduit-server` (kontrakt logowania i magazyn poświadczeń). Biblioteka
+# tutaj dałaby cykl `server → kronika → telegram → server`, którego Cargo
+# nie przyjmuje. Kosztu i tak nie ma: przez `conduit-telegram` ta binarka
+# kompilowała serwer już wcześniej.
+[dependencies]
+conduit-server = { path = "../server" }
+conduit-telegram = { path = "../telegram" }
+conduit-core = { path = "../core" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "signal", "net"] }
+chrono = { workspace = true }
+# interfejs: mikroserwer + strona wkompilowana w binarkę, dokładnie tak samo
+# jak w `crates/wizualizacja` — jeden wzorzec na oba narzędzia
+axum = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+open = { workspace = true }
+parking_lot = { workspace = true }

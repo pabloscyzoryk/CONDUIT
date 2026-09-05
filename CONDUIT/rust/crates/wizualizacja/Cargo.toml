@@ -1,0 +1,27 @@
+[package]
+name = "conduit-wizualizacja"
+version.workspace = true
+edition.workspace = true
+
+# Nazwa binarki celowo BEZ przedrostka `conduit-`: użytkownik dostaje plik
+# `wizualizacja.exe` leżący obok `conduit.exe` i od razu wie, co robi.
+[[bin]]
+name = "wizualizacja"
+path = "src/main.rs"
+
+# Świadomie ZERO zależności od pozostałych crate'ów projektu.
+#
+# Kuszące byłoby wziąć `Workspace::load_models` z `conduit-server`, ale ta
+# zależność ciągnie silnik, backtesty, trening AI, SMTP i generator kodów QR —
+# czyli kilkadziesiąt sekund budowy i kilkanaście megabajtów binarki dla ~40
+# linii logiki, którą widać w całości w `main.rs`. Narzędzie do oglądania
+# plików nie może zależeć od tego, czy silnik się kompiluje.
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+open = { workspace = true }

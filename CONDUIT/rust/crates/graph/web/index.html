@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CONDUIT GRAPH</title>
+<link rel="stylesheet" href="styl.css">
+</head><body>
+
+<header>
+  <h1>CONDUIT GRAPH<span id="podpis">wczytuję…</span></h1>
+  <div class="prawo">
+    <button class="n" id="bocznyPrzel" title="pokaż/ukryj listę przebiegów">☰ przebiegi</button>
+    <span id="wersja" class="szary"></span>
+  </div>
+</header>
+
+<div id="uklad">
+
+  <aside id="boczny">
+    <div class="sekcja">
+      <label class="etyk">SZUKAJ</label>
+      <input id="filtr" placeholder="preset, katalog, tryb…" autocomplete="off">
+    </div>
+    <div class="sekcja">
+      <label class="etyk">DODAJ KATALOG Z PRZEBIEGAMI</label>
+      <div class="wiersz">
+        <input id="nowyKatalog" placeholder="np. C:\…\rust\out_pelne" autocomplete="off">
+        <button class="n" id="dodajKatalog">dodaj</button>
+      </div>
+      <div id="skanInfo" class="szary mini"></div>
+    </div>
+    <div class="sekcja rosnie">
+      <label class="etyk">PRZEBIEGI — klik = główny (A) · <span class="b">Shift+klik = porównanie (B)</span></label>
+      <div id="lista"></div>
+    </div>
+  </aside>
+
+  <main id="glowny">
+
+    <nav id="okruchy"></nav>
+
+    <div class="kafle" id="kafle"></div>
+
+    <div class="pasek">
+      <span class="grupa" id="poziomy"></span>
+      <span class="rozdziel"></span>
+      <button class="n" id="reset" title="pokaż cały przebieg">↺ całość</button>
+      <button class="n" id="wyzej" title="Backspace">↑ wyżej</button>
+      <span class="rozdziel"></span>
+      <button class="n on" id="log">skala log.</button>
+      <button class="n on" id="weekend">bez weekendów</button>
+      <button class="n" id="puste">bez pustych</button>
+      <button class="n on" id="znaczniki">znaczniki transakcji</button>
+      <button class="n" id="procenty">porównanie w %</button>
+      <button class="n" id="roznica" title="słupek = wynik A minus wynik B">słupki A−B</button>
+      <span class="rozdziel"></span>
+      <button class="n" id="csvKrzywa">CSV krzywa</button>
+      <button class="n" id="csvSlupki">CSV słupki</button>
+      <button class="n" id="csvTrans">CSV transakcje</button>
+      <span class="wsk" id="wsk">kółko = przybliżanie · przeciąganie = przesuwanie · Shift+przeciąganie = zaznaczenie · dwuklik = całość · klik w słupek = wejdź głębiej</span>
+    </div>
+
+    <div id="uwaga" class="uwaga"></div>
+
+    <div class="tytul" id="tytulSlupki">WYNIK OKRESU</div>
+    <div id="owijka">
+      <canvas id="cSlupki"></canvas>
+      <div class="tytul">KAPITAŁ — equity i saldo</div>
+      <div class="leg" id="legenda"></div>
+      <canvas id="cKapital"></canvas>
+      <div class="tytul">OBSUNIĘCIE OD SZCZYTU PRZEBIEGU</div>
+      <canvas id="cDd"></canvas>
+      <div id="dymek"></div>
+    </div>
+
+    <div class="tytul" id="tytulTabeli">TABELA — klik w wiersz wchodzi głębiej · klik w nagłówek sortuje</div>
+    <div class="tabelka"><table id="t">
+      <thead><tr id="glowa"></tr></thead>
+      <tbody></tbody>
+    </table></div>
+
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body></html>

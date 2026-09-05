@@ -1,0 +1,37 @@
+[package]
+name = "conduit-monitor"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "conduit_monitor"
+path = "src/lib.rs"
+
+# Okienko postępu. Osobna, mała binarka — świadomie NIE jest zakładką w
+# `conduit.exe`: ma się dać postawić obok terminala i przeżyć śmierć każdej
+# innej części systemu.
+[[bin]]
+name = "postep"
+path = "src/bin/postep.rs"
+required-features = ["gui"]
+
+[features]
+# Domyślnie budujemy okno. `--no-default-features` daje SAM PROTOKÓŁ (serde +
+# kilka funkcji na plikach) — i w takiej postaci zależą od nas `conduit-backtest`
+# oraz `conduit-ai`, żeby backtest nie ciągnął za sobą OpenGL-a ani winita.
+default = ["gui"]
+# `chrono` wchodzi TYLKO z oknem — po to, żeby zamienić „zostało 2 h 14 min"
+# na godzinę na zegarze. Backtest i trening biorą ten crate z
+# `default-features = false` i nie płacą za to ani bajtem.
+gui = ["dep:eframe", "dep:chrono"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `glow` (OpenGL) zamiast `wgpu`: mniejsza binarka i brak zależności od
+# sterowników Vulkan/DX12. Bez `x11`/`wayland` — to jest program pod Windows.
+eframe = { version = "0.35", default-features = false, features = [
+    "glow",
+    "default_fonts",
+], optional = true }
+chrono = { workspace = true, optional = true }

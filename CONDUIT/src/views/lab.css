@@ -1,0 +1,273 @@
+/* ============================================================
+   LABORATORIUM — backtesty i trening AI
+
+   Wszystkie kolory i odstępy z tokenów (`styles/tokens.css`), więc widok
+   działa w obu motywach i we wszystkich ośmiu paletach bez żadnego „if".
+   ============================================================ */
+
+/* ---------------- pasek danych w nagłówku ---------------- */
+.lab__data {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- postęp ---------------- */
+.lab__title {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  margin-bottom: var(--sp-3);
+  line-height: 1.5;
+}
+
+.lab__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.lab__bar .meter {
+  flex: 1;
+}
+.lab__pct {
+  font-size: var(--fs-lg);
+  min-width: 5.5ch;
+  text-align: right;
+  letter-spacing: -0.02em;
+}
+
+/* „co teraz liczy" — najważniejszy napis na ekranie, więc dostaje
+   własne tło i monospace, żeby zmienna treść nie skakała w poziomie */
+.lab__now {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  min-height: 38px;
+}
+
+.lab__spin {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--accent-line);
+  border-top-color: var(--accent);
+  animation: labspin 0.75s linear infinite;
+}
+@keyframes labspin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lab__spin {
+    animation-duration: 3s;
+  }
+}
+
+.lab__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.lab__metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-soft);
+}
+.lab__metric b {
+  font-size: var(--fs-md);
+  letter-spacing: -0.015em;
+}
+.lab__metric span {
+  font-size: var(--fs-3xs);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.lab__note,
+.lab__err,
+.lab__hintbox,
+.lab__resume {
+  margin-top: var(--sp-3);
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.lab__note {
+  background: var(--long-soft);
+  color: var(--long-text);
+}
+.lab__err {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  background: var(--short-soft);
+  color: var(--short-text);
+}
+.lab__hintbox {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  background: var(--bg-inset);
+  color: var(--text-muted);
+}
+.lab__hintbox svg,
+.lab__err svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* ---------------- wznowienie treningu ---------------- */
+.lab__resume {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  flex-wrap: wrap;
+}
+.lab__resume > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 240px;
+}
+.lab__resume span {
+  font-size: var(--fs-xs);
+  opacity: 0.9;
+}
+
+/* ---------------- wykres fitness ---------------- */
+.lab__chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.lab__chart svg {
+  width: 100%;
+  height: 190px;
+  display: block;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+}
+.lab__line {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+.lab__line--center {
+  stroke: var(--accent);
+  stroke-width: 2.2;
+}
+.lab__line--best {
+  stroke: var(--long);
+}
+.lab__line--median {
+  stroke: var(--text-faint);
+  stroke-dasharray: 3 3;
+}
+.lab__line--worst {
+  stroke: var(--short);
+  opacity: 0.55;
+}
+
+.lab__legend {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  font-size: var(--fs-2xs);
+  color: var(--text-muted);
+}
+.lab__key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.lab__key::before {
+  content: "";
+  width: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.lab__key--center::before {
+  background: var(--accent);
+}
+.lab__key--best::before {
+  background: var(--long);
+}
+.lab__key--median::before {
+  background: var(--text-faint);
+}
+.lab__key--worst::before {
+  background: var(--short);
+}
+
+.lab__chartempty {
+  padding: var(--sp-5);
+  text-align: center;
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+}
+
+/* ---------------- podgląd SVG z chart.rs ---------------- */
+.lab__svg {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-inset);
+}
+.lab__svg img {
+  display: block;
+  width: 100%;
+  min-width: 720px;
+  height: auto;
+}
+
+/* ---------------- historia zadań ---------------- */
+.lab__hist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.lab__histitem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-soft);
+}
+.lab__histbody {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.lab__histbody b {
+  font-size: var(--fs-sm);
+}

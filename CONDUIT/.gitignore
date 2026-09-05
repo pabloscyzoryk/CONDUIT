@@ -1,0 +1,96 @@
+# Rust / Node build products
+target/
+rust/target/
+target-*/
+node_modules/
+dist/
+*.tsbuildinfo
+rust/crates/server/web/
+rust/crates/kronika/web/
+rust/crates/wizualizacja/web/
+rust/crates/app/gen/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Compiled/binary outputs
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
+*.ex5
+*.tst
+*.zip
+
+# Credentials and sessions
+.env
+.env.*
+secrets.json
+secrets.bak
+secrets_*.json
+*.session
+*.session-*
+telegram.session
+kronika.session
+smtp.json
+
+# Runtime configuration/state (keep public examples and shipped preset)
+/settings.json
+/settings.bak
+/channels.json
+/channels.bak
+/lancuchy.json
+/lancuchy.bak
+/koszyki.json
+/kronika.json
+/window.json
+/window.bak
+/PACZKA.json
+/RUNTIME_MANIFEST.json
+/OFFLINE_PREFLIGHT.json
+/NEXT_PACKAGE_GATE.json
+/logs/
+/backup_memory/
+/journal/
+/archive/
+/models/
+
+# Market/chat/backtest data and generated analysis
+*.jsonl
+*.csv
+*.tsv
+*.bin
+*.npz
+*.npy
+*.tkc
+*.hcc
+*.hc
+*.dat
+alllogs*.txt
+ChatExport*/
+signals_*.json
+ticks_*.json
+ticks_*.csv
+/out/
+/output/
+/analiza/
+/analizy/
+/reports/
+/raporty/
+/*sweep*/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Explicitly keep sanitized public templates and preset catalogue
+!config/examples/*.example.json
+!config/presets/*.json

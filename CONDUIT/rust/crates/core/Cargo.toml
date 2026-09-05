@@ -1,0 +1,20 @@
+[package]
+name = "conduit-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+chrono = { workspace = true }
+# ETAP E0 — arbiter cieniowy (spis pisarzy zmierzony W RUCHU). Crate bez
+# żadnych własnych zależności; bez zmiennej `MOZG_CIEN` każde wpięcie kosztuje
+# jeden odczyt `OnceLock` i nie dotyka brokera ani stanu silnika.
+conduit-mozg-cien = { path = "../mozg_cien" }
+# MOZG: rdzen decyzyjny EA. Rdzen wola mozg, nigdy odwrotnie — mozg nie zna
+# brokera ani ustawien i ma tego nie poznac (granica czystosci, ARCHITEKTURA §3.2).
+conduit-mozg = { path = "../mozg" }

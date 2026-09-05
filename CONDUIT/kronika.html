@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="pl" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="CONDUIT — Kronika: zapis każdej wersji każdej wiadomości z Telegrama wraz ze statystyką edycji." />
+    <title>CONDUIT · Kronika</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236d7bff'/%3E%3Cg stroke='white' stroke-width='1.8' stroke-linecap='round' fill='none'%3E%3Cpath d='M9 9h14M9 14h14M9 19h9'/%3E%3C/g%3E%3Ccircle cx='23' cy='21' r='3.4' fill='white'/%3E%3C/svg%3E" />
+    <script>
+      // Ten sam skrypt co w index.html: motyw i paleta ustawione ZANIM React
+      // wystartuje, żeby przy pierwszym malowaniu nie mignęły złe kolory.
+      // Klucze magazynu są wspólne z głównym panelem — wybór wyglądu
+      // przenosi się między `conduit.exe` a `kronika.exe`.
+      (function () {
+        var d = document.documentElement;
+        var ok = ["violet", "red", "green", "yellow", "orange", "matrix", "vantage", "puprime"];
+        try {
+          var t = JSON.parse(localStorage.getItem("conduit.theme") || '"dark"');
+          var p = JSON.parse(localStorage.getItem("conduit.palette") || '"violet"');
+          d.dataset.theme = t === "light" ? "light" : "dark";
+          d.dataset.palette = ok.indexOf(p) >= 0 ? p : "violet";
+        } catch (e) {
+          d.dataset.theme = "dark";
+          d.dataset.palette = "violet";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/kronika.tsx"></script>
+  </body>
+</html>

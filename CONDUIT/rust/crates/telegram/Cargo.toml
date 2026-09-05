@@ -1,0 +1,32 @@
+[package]
+name = "conduit-telegram"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conduit-core = { path = "../core" }
+# Kontrakt logowania (`auth::TelegramAuth`) i magazyn poświadczeń
+# (`secrets.json`) mieszkają w serwerze. Zależność idzie WYŁĄCZNIE w tę stronę:
+# serwer nie wie o istnieniu tego crate'a, więc binarka bez Telegrama nadal
+# działa i uczciwie mówi, że logowanie jest niedostępne.
+conduit-server = { path = "../server" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+
+# Klient MTProto w czystym Ruście. Wersja zweryfikowana na crates.io
+# (0.10.0 — najnowsza), API sprawdzone w źródłach, nie zgadywane.
+grammers-client = "0.10"
+# Ten sam crate, który re-eksportuje grammers-client; włączamy `serde`,
+# żeby dało się zapisać sesję do pliku (wbudowane magazyny to tylko
+# pamięć RAM albo SQLite przez libsql).
+grammers-session = { version = "0.10", default-features = false, features = ["serde"] }
+
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+# Bez `image`/`svg` — kod QR renderujemy sami z macierzy modułów,
+# żeby nie ciągnąć całej biblioteki graficznej pod dwa rysunki.
+qrcode = { version = "0.14", default-features = false }
+base64 = "0.22"

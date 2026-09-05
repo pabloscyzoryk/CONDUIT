@@ -1,0 +1,267 @@
+/* ============================================================
+   CONDUIT — DESIGN TOKENS
+   Jedno źródło prawdy dla kolorów, typografii, promieni, cieni,
+   przestrzeni i ruchu. Motywy przełączane atrybutem
+   `data-theme` na <html>: "dark" (domyślny) | "light".
+   ============================================================ */
+
+:root {
+  /* ---------- TYPOGRAFIA ---------- */
+  --font-sans: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui,
+    -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Mono", "Consolas",
+    ui-monospace, monospace;
+
+  --fs-3xs: 9.5px;
+  --fs-2xs: 10.5px;
+  --fs-xs: 11.5px;
+  --fs-sm: 12.5px;
+  --fs-md: 13.5px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+  --fs-3xl: 28px;
+  --fs-4xl: 36px;
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semi: 600;
+  --fw-bold: 700;
+
+  --lh-tight: 1.15;
+  --lh-snug: 1.35;
+  --lh-base: 1.55;
+
+  /* ---------- PRZESTRZEŃ (skala 4px) ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+  --sp-9: 56px;
+
+  /* ---------- PROMIENIE ---------- */
+  --r-xs: 5px;
+  --r-sm: 8px;
+  --r-md: 11px;
+  --r-lg: 15px;
+  --r-xl: 20px;
+  --r-full: 999px;
+
+  /* ---------- RUCH ---------- */
+  --ease: cubic-bezier(0.22, 0.75, 0.25, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 280ms;
+  --dur-4: 480ms;
+
+  /* ---------- WYMIARY UKŁADU ---------- */
+  --rail-w: 232px;
+  --rail-w-collapsed: 64px;
+  --topbar-h: 58px;
+  --statstrip-h: 66px;
+
+  /* ---------- KOLORY MARKI (niezmienne w obu motywach) ---------- */
+  --brand-500: #6d7bff;
+  --brand-400: #8b95ff;
+  --brand-600: #5563f5;
+  --brand-700: #4450d8;
+
+  --long-500: #26d9a3;
+  --long-400: #4fe6b8;
+  --long-600: #12b98a;
+
+  --short-500: #ff5c7a;
+  --short-400: #ff8098;
+  --short-600: #e73a5c;
+
+  --warn-500: #f5b74e;
+  --warn-400: #ffcd76;
+
+  --ai-500: #c88dff;
+  --ai-400: #dcb0ff;
+
+  --info-500: #56b8ff;
+}
+
+/* ============================================================
+   MOTYW CIEMNY (domyślny)
+   ============================================================ */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-root: #080a0f;
+  --bg-canvas: #0b0e14;
+  --bg-surface: #111520;
+  --bg-surface-2: #161b28;
+  --bg-surface-3: #1c2231;
+  --bg-inset: #0d1017;
+  --bg-hover: rgba(255, 255, 255, 0.045);
+  --bg-active: rgba(255, 255, 255, 0.08);
+
+  --border: #222839;
+  --border-soft: #1a1f2d;
+  --border-strong: #2f374b;
+
+  /* Trzy poziomy tekstu drugorzędnego. Wszystkie przekraczają 4,5:1 na tle
+     karty (--bg-surface): 8,10 / 5,69 / 5,01 — próg WCAG AA dla tekstu
+     normalnego, bo etykiety w terminalu bywają małe i niosą realne dane. */
+  --text: #e8ecf5;
+  --text-dim: #a4adc2;
+  --text-muted: #8590a8;
+  --text-faint: #7b86a2;
+
+  --accent: var(--brand-500);
+  --accent-soft: rgba(109, 123, 255, 0.14);
+  --accent-line: rgba(109, 123, 255, 0.36);
+  --accent-text: #a3acff;
+  /* kolor napisu NA wypełnieniu akcentem — jasne palety (żółta, matrix,
+     pomarańczowa) wymagają ciemnego tekstu, inaczej przycisk jest nieczytelny */
+  --accent-fg: #ffffff;
+  --accent-hover: var(--brand-400);
+
+  --long: var(--long-500);
+  --long-soft: rgba(38, 217, 163, 0.13);
+  --long-text: #4fe6b8;
+
+  --short: var(--short-500);
+  --short-soft: rgba(255, 92, 122, 0.13);
+  --short-text: #ff8098;
+
+  --warn: var(--warn-500);
+  --warn-soft: rgba(245, 183, 78, 0.13);
+  --warn-text: #ffcd76;
+
+  --ai: var(--ai-500);
+  --ai-soft: rgba(200, 141, 255, 0.13);
+  --ai-text: #dcb0ff;
+
+  --info: var(--info-500);
+  --info-soft: rgba(86, 184, 255, 0.13);
+  --info-text: #8fd0ff;
+
+  --grid-line: rgba(255, 255, 255, 0.045);
+  --grid-line-strong: rgba(255, 255, 255, 0.085);
+  --chart-crosshair: rgba(255, 255, 255, 0.35);
+  --chart-axis-text: #8590a8;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 6px 18px -6px rgba(0, 0, 0, 0.65);
+  --shadow-lg: 0 20px 48px -14px rgba(0, 0, 0, 0.8);
+  --shadow-pop: 0 24px 60px -12px rgba(0, 0, 0, 0.85);
+
+  --ring: 0 0 0 1px var(--accent-line), 0 0 0 4px rgba(109, 123, 255, 0.13);
+  --glass: rgba(17, 21, 32, 0.78);
+  --scrim: rgba(4, 6, 11, 0.72);
+
+  --sheen: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.035) 0%,
+    rgba(255, 255, 255, 0) 62%
+  );
+}
+
+/* ============================================================
+   MOTYW JASNY
+   ============================================================ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-root: #eef1f7;
+  --bg-canvas: #f5f7fb;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #f7f9fd;
+  --bg-surface-3: #eef2f9;
+  --bg-inset: #f1f4fa;
+  --bg-hover: rgba(16, 22, 40, 0.04);
+  --bg-active: rgba(16, 22, 40, 0.07);
+
+  --border: #dfe4ef;
+  --border-soft: #e9edf5;
+  --border-strong: #c7cfe0;
+
+  /* jw. — na białej karcie: 8,57 / 5,48 / 4,55 */
+  --text: #101627;
+  --text-dim: #414c66;
+  --text-muted: #5f6982;
+  --text-faint: #6b7690;
+
+  --accent: var(--brand-600);
+  --accent-soft: rgba(85, 99, 245, 0.1);
+  --accent-line: rgba(85, 99, 245, 0.32);
+  --accent-text: #4450d8;
+  --accent-fg: #ffffff;
+  --accent-hover: var(--brand-500);
+
+  /* Zieleń zysku na białym tle musi być ciemniejsza niż w motywie ciemnym:
+     #12b98a dawało 2,52:1 (grafika) i 3,52:1 (tekst) — obie poniżej progu. */
+  --long: #0e9d75;
+  --long-soft: rgba(14, 157, 117, 0.12);
+  --long-text: #0b7d5e;
+
+  --short: var(--short-600);
+  --short-soft: rgba(231, 58, 92, 0.11);
+  --short-text: #d32e50;
+
+  --warn: #d8952a;
+  --warn-soft: rgba(216, 149, 42, 0.13);
+  --warn-text: #a86f14;
+
+  --ai: #9a4ee0;
+  --ai-soft: rgba(154, 78, 224, 0.11);
+  --ai-text: #7f36c4;
+
+  --info: #1b8ddb;
+  --info-soft: rgba(27, 141, 219, 0.11);
+  --info-text: #1272b5;
+
+  --grid-line: rgba(16, 22, 40, 0.055);
+  --grid-line-strong: rgba(16, 22, 40, 0.1);
+  --chart-crosshair: rgba(16, 22, 40, 0.42);
+  --chart-axis-text: #5f6982;
+
+  --shadow-sm: 0 1px 2px rgba(16, 22, 40, 0.07);
+  --shadow-md: 0 6px 18px -8px rgba(16, 22, 40, 0.18);
+  --shadow-lg: 0 20px 44px -16px rgba(16, 22, 40, 0.24);
+  --shadow-pop: 0 24px 56px -14px rgba(16, 22, 40, 0.28);
+
+  --ring: 0 0 0 1px var(--accent-line), 0 0 0 4px rgba(85, 99, 245, 0.12);
+  --glass: rgba(255, 255, 255, 0.85);
+  --scrim: rgba(22, 28, 45, 0.42);
+
+  --sheen: linear-gradient(
+    180deg,
+    rgba(16, 22, 40, 0.018) 0%,
+    rgba(16, 22, 40, 0) 62%
+  );
+}
+
+/* Zmiana motywu = krótkie, jednorazowe przejście kolorów (klasa dodawana
+   przez ThemeProvider tylko na czas animacji, żeby nie spowalniać scrolla). */
+:root.theme-anim,
+:root.theme-anim *,
+:root.theme-anim *::before,
+:root.theme-anim *::after {
+  transition:
+    background-color var(--dur-3) var(--ease),
+    border-color var(--dur-3) var(--ease),
+    color var(--dur-3) var(--ease),
+    fill var(--dur-3) var(--ease),
+    box-shadow var(--dur-3) var(--ease) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

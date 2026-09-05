@@ -1,0 +1,160 @@
+[package]
+name = "conduit-backtest"
+version.workspace = true
+edition.workspace = true
+
+# Kopia binarki `bt` pod inną nazwą. Zespół PRÓG pracuje równolegle z innym
+# przebiegiem, który TRZYMA `bt.exe` otwarty — bez osobnej nazwy `cargo build`
+# przerywa się na „failed to remove file". Ten sam kod, inny plik wyjściowy.
+[[bin]]
+name = "btp"
+path = "src/bin/bt.rs"
+
+# GIGA7 z globalnym limitem pojedynczego zlecenia 5 lotów. Osobna nazwa
+# pozwala zbudować metrykę daty najgorszego dnia bez naruszania działającego
+# równolegle, nieograniczonego btp.exe.
+[[bin]]
+name = "btpG7cap5"
+path = "src/bin/bt.rs"
+
+# Trzecia kopia pod inna nazwa — btp.exe bywa trzymany otwarty przez
+# rownolegly przebieg i wtedy cargo przerywa sie na "failed to remove file".
+# Ten sam kod, inny plik wyjsciowy.
+[[bin]]
+name = "btpF2"
+path = "src/bin/bt.rs"
+
+# Generacja KRAWEDZ (25.08.2026, naprawa wejsc ponizej dalszej krawedzi strefy).
+# Ten sam kod, osobna nazwa pliku — rownolegle fale trzymaja poprzednie
+# binarki otwarte i `cargo build` przerywa sie na „failed to remove file".
+[[bin]]
+name = "btpF10"
+path = "src/bin/bt.rs"
+
+# btpF11 = ta sama generacja co btpF10, zbudowana PO ostatnim szlifie zapisu
+# do dziennika (jedno zdanie na przebieg zamiast jednego na jednostkę).
+# Osobna nazwa, bo btpF10 był w tej chwili uruchomiony i Windows trzyma exe.
+[[bin]]
+name = "btpF11"
+path = "src/bin/bt.rs"
+
+# F12: niezależna binarka audytu single-source księgowania koszyka.
+[[bin]]
+name = "btpF12"
+path = "src/bin/bt.rs"
+
+# F14perf: dokładnie ta sama strategia, badawcza optymalizacja pętli TP.
+# Zamrożone F13 pozostaje niezmiennym punktem odniesienia wydania.
+[[bin]]
+name = "btpF14perf"
+path = "src/bin/bt.rs"
+
+# F15perf: walidowany cache ID→slot, bez modyfikowania F13/F14.
+[[bin]]
+name = "btpF15perf"
+path = "src/bin/bt.rs"
+
+# F18audit: osobny przyrząd do kontroli OFF nowych kontraktów. Nie nadpisuje
+# zamrożonych F13/F15, których hashe wiążą wcześniejsze wyniki.
+[[bin]]
+name = "btpF18audit"
+path = "src/bin/bt.rs"
+
+[[bin]]
+name = "most_eaF18audit"
+path = "src/bin/most_ea.rs"
+
+# F19audit: continuation A + jawny model nowego pending SL. F18 pozostaje
+# zamrożonym punktem odniesienia; nowa nazwa nie oznacza certyfikacji live.
+[[bin]]
+name = "btpF19audit"
+path = "src/bin/bt.rs"
+
+[[bin]]
+name = "most_eaF19audit"
+path = "src/bin/most_ea.rs"
+
+# F20audit: physical source-row identities for the opt-in B15 execution model.
+# F19 and live/release binaries remain immutable reference instruments.
+[[bin]]
+name = "btpF20audit"
+path = "src/bin/bt.rs"
+
+[[bin]]
+name = "most_eaF20audit"
+path = "src/bin/most_ea.rs"
+
+# F21audit: explicit native swap settlement and non-rankable-result gates.
+# New immutable research instruments; neither F20 nor live builds are replaced.
+[[bin]]
+name = "btpF21audit"
+path = "src/bin/bt.rs"
+
+[[bin]]
+name = "most_eaF21audit"
+path = "src/bin/most_ea.rs"
+
+# F22: common MAIN/WF configuration and precise HOLD extent diagnostics.
+# F21 and every previously delivered binary remain unchanged.
+[[bin]]
+name = "btpF22audit"
+path = "src/bin/bt.rs"
+
+[[bin]]
+name = "most_eaF22audit"
+path = "src/bin/most_ea.rs"
+
+# btpEA1 = binarka do prac nad WARSTWĄ EA (25.08.2026). Osobna nazwa, bo
+# btpF10/btpF11 są PUNKTEM ODNIESIENIA trwających pomiarów (bramka parytetu,
+# przemiat sufitów lota) i przebudowanie ich w miejscu zmieniłoby znaczenie
+# liczb, do których inne przebiegi się odwołują. Reguła domu: nowa generacja
+# = nowa nazwa, nigdy nadpisanie działającego przyrządu pomiarowego.
+[[bin]]
+name = "btpEA1"
+path = "src/bin/bt.rs"
+
+# --- ETAP E0 (spis pisarzy + arbiter cieniowy), 25.08.2026 ---
+# btpE0BAZA = ODNIESIENIE. Budowana z drzewa SPRZED wpięcia arbitra cieniowego,
+# żeby parytet „co do centa" dało się udowodnić POMIAREM (ta sama binarka co
+# btpE0, minus instrumentacja), a nie rozumowaniem.
+[[bin]]
+name = "btpE0BAZA"
+path = "src/bin/bt.rs"
+
+# btpE0 = ta sama binarka PO wpięciu arbitra cieniowego. Bez zmiennej
+# środowiskowej `MOZG_CIEN` cała diagnostyka kosztuje jeden odczyt `OnceLock`
+# na wpięcie i nie dotyka ani stanu silnika, ani brokera.
+[[bin]]
+name = "btpE0"
+path = "src/bin/bt.rs"
+
+# --- MOZG EA (kanon kanalu jako taktyka Z bety), 25.08.2026 ---
+# Osobna binarka, zeby porownanie z mozgiem i bez byly tym samym kodem
+# uruchomionym dwa razy, a nie dwoma buildami roznymi o cokolwiek jeszcze.
+[[bin]]
+name = "btpMOZG"
+path = "src/bin/bt.rs"
+
+[dependencies]
+conduit-core = { path = "../core" }
+# ETAP E0 — zapis raportu arbitra cieniowego na końcu przebiegu. Bez
+# `MOZG_CIEN` wywołanie zwraca `None` po jednym odczycie `OnceLock`.
+conduit-mozg-cien = { path = "../mozg_cien" }
+# SAM protokół plików stanu okienka postępu — `default-features = false`
+# odcina eframe/OpenGL. Backtest ma pisać plik JSON, a nie linkować się z
+# biblioteką graficzną.
+conduit-monitor = { path = "../monitor", default-features = false }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+memmap2 = { workspace = true }
+rayon = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+# Test parytetu `zen_pojedyncze_wejscie.rs` przepisuje wzorce wejścia SPRZED
+# zmiany i porównuje je z tym, co widzi parser dzisiaj. Bez własnej kopii
+# tamtych wzorców nie da się odróżnić „rozpoznane od zawsze" od „rozpoznane
+# przez nową gałąź" — a to jest cała treść tego testu.
+regex = { workspace = true }

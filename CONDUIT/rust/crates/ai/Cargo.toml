@@ -1,0 +1,21 @@
+[package]
+name = "conduit-ai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conduit-core = { path = "../core" }
+conduit-backtest = { path = "../backtest" }
+# sam protokół okienka postępu, bez warstwy graficznej (patrz crates/monitor)
+conduit-monitor = { path = "../monitor", default-features = false }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+chrono = { workspace = true }
+
+[[bin]]
+name = "train"
+path = "src/bin/train.rs"

@@ -1,0 +1,22 @@
+[package]
+name = "conduit-mozg-cien"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# ETAP E0 — ARBITER CIENIOWY (spis pisarzy w RUCHU).
+#
+# ZERO ZALEŻNOŚCI i to nie jest wygoda, tylko granica 1 z §3.2 architektury
+# wymuszona strukturalnie: crate nie zna brokera, ustawień, silnika, sieci
+# ani serializatora, bo nie ma ich w tej sekcji i nie może ich dostać bez
+# zmiany tego pliku.
+#
+# DLACZEGO OSOBNY CRATE, A NIE `crates/mozg`: 25.08.2026 o 14:10 `crates/mozg`
+# był JEDNOCZEŚNIE zakładany przez równoległy przepływ E0 (obserwator ramy,
+# `src/rama.rs`, binarka `e0rama`). Wspólny `lib.rs` dwóch przepływów to
+# wyścig o plik, a nie architektura — więc arbiter cieniowy dostał własny
+# katalog. Scalenie obu w `crates/mozg` jest trywialne (dwa `pub mod`)
+# i należy do etapu, który będzie miał ten plik na wyłączność.
+[dependencies]

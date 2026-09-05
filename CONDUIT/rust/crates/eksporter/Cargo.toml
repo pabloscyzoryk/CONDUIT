@@ -1,0 +1,38 @@
+[package]
+name = "conduit-eksporter"
+version.workspace = true
+edition.workspace = true
+
+# Nazwa binarki bez przedrostka `conduit-`, tak samo jak `graph.exe`
+# i `wizualizacja.exe`: użytkownik dostaje `eksport.exe` obok `conduit.exe`
+# i od razu wie, co robi.
+[[bin]]
+name = "eksport"
+path = "src/main.rs"
+
+# ZALEŻNOŚCI ŚWIADOMIE OGRANICZONE DO LOGOWANIA.
+#
+# `conduit-telegram` jest tu wyłącznie po to, żeby użyć TEJ SAMEJ sesji
+# MTProto, co bot — inaczej trzeba by się logować drugi raz i mieć drugie
+# urządzenie w liście sesji Telegrama. `conduit-server` wchodzi tylko jako
+# magazyn `secrets.json` (i tak wchodzi tranzytywnie przez `conduit-telegram`).
+#
+# Czego tu NIE MA i nie może być: `conduit-core`, `conduit-backtest`,
+# `conduit-mt5`, `conduit-app`. Eksporter nie wie nic o silniku, presetach,
+# koszykach ani rachunku. Nie potrafi otworzyć pozycji, bo nie ma czym.
+# To narzędzie do POBIERANIA HISTORII i niczego więcej.
+[dependencies]
+conduit-telegram = { path = "../telegram" }
+# Klient MTProto — ta sama wersja co w `conduit-telegram`, bo dzielimy typ
+# `PeerRef` i `Client`. Rozjazd wersji dalby dwa nieprzystajace typy.
+grammers-client = "0.10"
+conduit-server = { path = "../server" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+open = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

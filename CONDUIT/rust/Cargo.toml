@@ -1,0 +1,90 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/backtest",
+    # MÓZG — etap E0 (obserwator ramy). Crate CELOWO nie zależy od
+    # `conduit-core`: to jest granica 1 z `wiedza/ARCHITEKTURA_MOZGU_EA.md`
+    # §3.2 wymuszona strukturalnie. Dołożenie go do listy nie zmienia ani
+    # jednej linii żadnej innej skrzynki, więc nie rusza binarek handlowych.
+    "crates/mozg",
+    "crates/ai",
+    "crates/mt5",
+    "crates/telegram",
+    "crates/server",
+    "crates/app",
+    "crates/monitor",
+    # samodzielny podgląd modeli AI (`wizualizacja.exe`) — bez zależności
+    # od silnika, serwera i sterowników; buduje się w kilkanaście sekund
+    "crates/wizualizacja",
+    # CONDUIT GRAPH (`graph.exe`) — analiza wykresów z backtestów, zejście
+    # dzień → godzina → minuta. Ten sam wzorzec co `wizualizacja`: RustEmbed
+    # + mikroserwer, ZERO zależności od silnika. Czyta pliki `*_dane.json`,
+    # więc musi się otwierać nawet wtedy, gdy `crates/backtest` się nie buduje.
+    "crates/graph",
+    # CONDUIT EKSPORTER (`eksport.exe`) — pobieranie historii czatu do JSON-a
+    # w formacie Telegram Desktop. Powstał, bo Desktop potrafi odmówić eksportu
+    # albo cicho urwać historię. Z bota bierze WYŁĄCZNIE sesję Telegrama
+    # z `secrets.json` — nie zna silnika, presetów ani rachunku.
+    "crates/eksporter",
+    # KRONIKA — samodzielny rejestrator Telegrama. Osobny proces i OSOBNA
+    # sesja, żeby dało się go trzymać 24/7 obok bota bez ryzyka, że obie
+    # instancje pobiją się o ten sam plik sesji.
+    "crates/kronika",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["CONDUIT"]
+license = "proprietary"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+memmap2 = "0.9"
+rayon = "1"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+once_cell = "1"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+rand = "0.8"
+rand_chacha = "0.3"
+
+# --- warstwa serwera i powłoki okna ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+futures-util = "0.3"
+rust-embed = "8"
+mime_guess = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+open = "5"
+# Poczta SMTP do powiadomień. `rustls-tls` zamiast domyślnego `native-tls`:
+# certyfikaty jadą z programem (webpki-roots), więc wysyłka nie zależy od
+# magazynu certyfikatów systemu ani od OpenSSL-a na maszynie docelowej.
+# Bez `pool` — wysyłamy kilka maili dziennie, nie kilkaset na sekundę.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "rustls-tls",
+    "builder",
+    "hostname",
+] }
+
+# profil zwolniony pod maksymalną wydajność backtestów i treningu
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# szybkie iteracje przy pracy nad silnikiem, ale z optymalizacją zależności
+[profile.dev.package."*"]
+opt-level = 2

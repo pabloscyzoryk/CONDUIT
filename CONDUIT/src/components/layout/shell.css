@@ -1,0 +1,669 @@
+/* ============================================================
+   POWŁOKA APLIKACJI
+   ============================================================ */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  height: 100%;
+  background: var(--bg-canvas);
+  transition: grid-template-columns var(--dur-3) var(--ease);
+}
+
+.shell--collapsed {
+  grid-template-columns: var(--rail-w-collapsed) 1fr;
+}
+
+/* ================= RAIL ================= */
+.rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.rail__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--topbar-h);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border-soft);
+  position: relative;
+}
+
+.rail__logo {
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+
+.rail__name {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.12em;
+  line-height: 1.1;
+  min-width: 0;
+  white-space: nowrap;
+}
+.rail__name small {
+  font-size: var(--fs-3xs);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.rail__collapse {
+  position: absolute;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-xs);
+  color: var(--text-faint);
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.rail__collapse:hover {
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+
+.rail__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.rail__item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+
+.rail__item svg {
+  flex: none;
+}
+
+.rail__item:hover {
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+
+.rail__item[data-active="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.rail__item[data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.rail__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.rail__kbd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-3xs);
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 15px;
+  flex: none;
+}
+
+.rail__dot {
+  position: absolute;
+  right: 8px;
+  top: 9px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-soft);
+}
+
+.rail__foot {
+  padding: 10px 8px;
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rail__conn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 4px;
+}
+
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-2xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.conn--ok {
+  color: var(--long-text);
+}
+.conn--off {
+  color: var(--short-text);
+}
+.conn .rail__label {
+  color: var(--text-muted);
+}
+
+/* Przycisk „Otwórz w przeglądarce" — widoczny tylko w oknie natywnym.
+   Wygląd celowo cichszy niż karta użytkownika: to skrót, nie akcja główna. */
+.rail__browser {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md, 10px);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--t-fast, 120ms), color var(--t-fast, 120ms), border-color var(--t-fast, 120ms);
+}
+.rail__browser:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  border-color: var(--accent);
+  color: var(--text);
+}
+.shell--collapsed .rail__browser {
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.rail__user {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px;
+  border-radius: var(--r-sm);
+  transition: background-color var(--dur-1) var(--ease);
+}
+.rail__user:hover {
+  background: var(--bg-hover);
+}
+
+.rail__avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  display: grid;
+  place-items: center;
+  background: linear-gradient(140deg, var(--accent-hover), var(--accent));
+  color: var(--accent-fg);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.02em;
+}
+
+.rail__uinfo {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+.rail__uinfo b {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semi);
+  color: var(--text);
+}
+.rail__uinfo small {
+  font-size: var(--fs-3xs);
+  color: var(--text-muted);
+}
+
+.rail__logout {
+  flex: none;
+  color: var(--text-faint);
+}
+
+/* --- stan zwinięty --- */
+.shell--collapsed .rail__label,
+.shell--collapsed .rail__kbd,
+.shell--collapsed .rail__name,
+.shell--collapsed .rail__uinfo,
+.shell--collapsed .rail__logout {
+  display: none;
+}
+.shell--collapsed .rail__item {
+  justify-content: center;
+  padding: 0;
+}
+.shell--collapsed .rail__brand {
+  justify-content: center;
+  padding: 0;
+}
+.shell--collapsed .rail__collapse {
+  right: -1px;
+  top: 42px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+}
+.shell--collapsed .rail__conn {
+  align-items: center;
+}
+.shell--collapsed .rail__user {
+  justify-content: center;
+}
+
+/* ================= MAIN ================= */
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ---------------- TOPBAR ---------------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--topbar-h);
+  padding: 0 var(--sp-4);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.topbar__burger {
+  display: none;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: var(--r-sm);
+  color: var(--text-dim);
+}
+
+
+.ticker {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+
+  
+  flex: 0 0 auto;
+  overflow: hidden;
+
+  
+  flex-wrap: wrap;
+  align-content: flex-start;
+  max-height: calc(var(--fs-md) * 1.4);
+}
+.ticker__sym {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.04em;
+}
+.ticker__px {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semi);
+  letter-spacing: -0.02em;
+}
+.ticker__chg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semi);
+}
+.ticker__meta {
+  font-size: var(--fs-2xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  /* Bez tego flex ściskał napis „spread 0.22" do „spr…": `nowrap` zabrania
+     zawinięcia, ale nie zabrania KURCZENIA elementu, a `.ticker` ma
+     `min-width: 0`. Cały pasek jest wąski, więc etykieta ustępowała
+     miejsca cenie i przełącznikowi trybu. */
+  flex: 0 0 auto;
+}
+.ticker__meta b {
+  color: var(--text-dim);
+}
+/* Etykieta „spread" ustępuje pierwsza, liczba zostaje — patrz komentarz
+   przy tym elemencie w `Shell.tsx`. Odstęp siedzi TU, a nie w znaczniku,
+   żeby po schowaniu etykiety nie została po niej sierota spacji. */
+.ticker__meta-etykieta {
+  margin-right: 4px;
+}
+
+.topbar__preset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+
+  
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.topbar__acct {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.25;
+  padding-right: 4px;
+}
+.topbar__acct b {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semi);
+}
+.topbar__acct span:last-child {
+  font-size: var(--fs-2xs);
+}
+
+/* ---------------- STAT STRIP ---------------- */
+.statstrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 1px;
+  background: var(--border-soft);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 12px;
+  background: var(--bg-surface);
+  min-width: 0;
+}
+
+.stat__k {
+  font-size: var(--fs-3xs);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat__v {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semi);
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat--mode {
+  align-items: flex-start;
+  justify-content: center;
+}
+
+/* ---------------- HALT ---------------- */
+.halt {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px var(--sp-4);
+  background: var(--short-soft);
+  border-bottom: 1px solid rgba(255, 92, 122, 0.28);
+  color: var(--short-text);
+  animation: riseIn var(--dur-3) var(--ease-out);
+  flex: none;
+}
+.halt > div {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+  flex: 1;
+  min-width: 0;
+}
+.halt b {
+  font-size: var(--fs-sm);
+}
+.halt span {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+/* strażnik wyłączony ręcznie — ostrzeżenie, nie blokada */
+.halt--override {
+  background: var(--warn-soft);
+  border-bottom-color: rgba(245, 183, 78, 0.32);
+  color: var(--warn-text);
+}
+
+/* ---------------- CONTENT ---------------- */
+.content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--sp-4);
+  scroll-behavior: smooth;
+}
+
+.shell__scrim {
+  display: none;
+}
+
+/* ================= RESPONSYWNOŚĆ =================
+
+   Trzy progi, od najwcześniejszego: `hide-lg` (1440) → `hide-md` (1240) →
+   `hide-sm` (900). Kolejność nie jest estetyczna, tylko wynika z tego, ile
+   dana liczba mówi o awarii: spread ustępuje pierwszy, bo cena, wiek
+   kwotowania i puls mostu niosą wszystko, co potrzebne do rozpoznania, że
+   coś stanęło. */
+@media (max-width: 1440px) {
+  .topbar__hide-lg {
+    display: none;
+  }
+}
+
+@media (max-width: 1240px) {
+  .topbar__hide-md {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+  .rail {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--rail-w);
+    z-index: 260;
+    transform: translateX(-100%);
+    transition: transform var(--dur-3) var(--ease-out);
+    box-shadow: var(--shadow-lg);
+  }
+  .shell--navopen .rail {
+    transform: translateX(0);
+  }
+  .shell--navopen .shell__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 255;
+    background: var(--scrim);
+    animation: fadeIn var(--dur-2) var(--ease);
+  }
+  .topbar__burger {
+    display: grid;
+  }
+  .topbar__hide-sm {
+    display: none;
+  }
+  .content {
+    padding: var(--sp-3);
+  }
+  .statstrip {
+    grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  }
+  .stat {
+    padding: 7px 9px;
+  }
+}
+
+/* ================= TOASTY ================= */
+.toasts {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: min(340px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: var(--r-md);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  animation: slideInRight var(--dur-3) var(--ease-out);
+  pointer-events: auto;
+  align-items: flex-start;
+}
+
+.toast__icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  display: grid;
+  place-items: center;
+}
+.toast--success .toast__icon {
+  background: var(--long-soft);
+  color: var(--long-text);
+}
+.toast--error .toast__icon {
+  background: var(--short-soft);
+  color: var(--short-text);
+}
+.toast--warn .toast__icon {
+  background: var(--warn-soft);
+  color: var(--warn-text);
+}
+.toast--info .toast__icon {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.toast__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.toast__title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semi);
+}
+.toast__text {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+
+.toast__actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.toast__action {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semi);
+  padding: 3px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.toast__action:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.toast__close {
+  flex: none;
+  color: var(--text-faint);
+  padding: 2px;
+  border-radius: 4px;
+}
+.toast__close:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+/* Wybór łańcucha w górnym pasku — chowany na wąskim oknie razem z resztą
+   `topbar__hide-md`, ale opakowany w `<span>`, żeby przycisk „Łańcuchy"
+   obok NIE znikał. Panel ma ten sam select w środku, więc na wąskim oknie
+   traci się skrót, nie funkcję.
+
+   Reguła MUSI siedzieć w `min-width`, a nie stać luzem: selektor z rodzicem
+   ma wyższą swoistość niż `.topbar__hide-md { display: none }` z zapytania
+   medialnego i przebiłby ukrywanie, przez które tu w ogóle jest. */
+@media (min-width: 1241px) {
+  .topbar__preset > .topbar__hide-md {
+    display: inline-flex;
+    min-width: 0;
+  }
+}

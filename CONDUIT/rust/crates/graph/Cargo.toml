@@ -1,0 +1,28 @@
+[package]
+name = "conduit-graph"
+version.workspace = true
+edition.workspace = true
+
+# Nazwa binarki bez przedrostka `conduit-`, tak samo jak `wizualizacja.exe`:
+# użytkownik dostaje `graph.exe` obok `conduit.exe` i od razu wie, co robi.
+[[bin]]
+name = "graph"
+path = "src/main.rs"
+
+# Świadomie ZERO zależności od pozostałych crate'ów projektu — dokładnie
+# z tego powodu, co `conduit-wizualizacja`: narzędzie do OGLĄDANIA wyników
+# nie może przestać się budować dlatego, że ktoś właśnie przebudowuje silnik.
+#
+# Kształt danych, które czytamy (`*_dane.json`, `transakcje.json`, `dni.json`),
+# jest opisany lokalnie w `src/main.rs` i celowo tolerancyjny: brakujące pola
+# biorą wartości domyślne, nadmiarowe są ignorowane. Plik sprzed trzech
+# tygodni ma się otworzyć, a nie wysypać.
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+open = { workspace = true }

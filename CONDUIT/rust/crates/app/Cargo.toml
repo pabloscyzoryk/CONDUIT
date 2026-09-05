@@ -1,0 +1,43 @@
+[package]
+name = "conduit-app"
+version.workspace = true
+edition.workspace = true
+default-run = "conduit"
+
+[[bin]]
+name = "conduit"
+path = "src/main.rs"
+
+[features]
+# Okno natywne (Tauri v2 + WebView2). Domyślnie włączone — to jest docelowy
+# sposób uruchamiania na maszynie użytkownika. Wyłączenie
+# (`--no-default-features`) daje binarkę czysto serwerową: przydatną na VPS
+# bez WebView2 i wielokrotnie szybszą w budowie.
+default = ["window"]
+window = ["dep:tauri", "dep:tauri-build"]
+
+[dependencies]
+conduit-core = { path = "../core" }
+conduit-server = { path = "../server" }
+# Prawdziwe logowanie MTProto (kod QR + zapisana sesja) oraz nadzór nad
+# terminalem MT5. Bez tych dwóch binarka działa, ale zamiast logowania
+# pokazuje komunikat „klient niedostępny" — nigdy atrapę kodu QR.
+conduit-telegram = { path = "../telegram" }
+conduit-mt5 = { path = "../mt5" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+open = { workspace = true }
+tauri = { version = "2", features = ["tray-icon"], optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
+[dev-dependencies]
+# `SimBroker` wyłącznie do testów: pozwala sprawdzić, co trafia do dziennika
+# przy odmowie brokera, bez podłączania prawdziwego terminala MT5.
+conduit-backtest = { path = "../backtest" }

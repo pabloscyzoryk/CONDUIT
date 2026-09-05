@@ -1,0 +1,13 @@
+[package]
+name = "conduit-mt5"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conduit-core = { path = "../core" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }

@@ -1,0 +1,1024 @@
+/* ============================================================
+   CONDUIT — BIBLIOTEKA PRYMITYWÓW UI
+   Klasy używane przez komponenty z src/components/ui.
+   ============================================================ */
+
+/* ---------------- KARTA ---------------- */
+.card {
+  position: relative;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--sheen);
+  pointer-events: none;
+}
+
+.card--flush {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+.card--flush::before {
+  display: none;
+}
+
+
+.card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-soft);
+  min-height: 46px;
+  position: relative;
+  z-index: 3;
+}
+
+.card__head--tight {
+  padding: var(--sp-2) var(--sp-3);
+  min-height: 40px;
+}
+
+.card__title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semi);
+  letter-spacing: -0.008em;
+  color: var(--text);
+  min-width: 0;
+}
+
+.card__title svg {
+  color: var(--text-muted);
+  flex: none;
+}
+
+.card__sub {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  font-weight: var(--fw-regular);
+}
+
+.card__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.card__body {
+  padding: var(--sp-4);
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+.card__body--tight {
+  padding: var(--sp-3);
+}
+.card__body--flush {
+  padding: 0;
+}
+
+.card__foot {
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  position: relative;
+  /* Nad ciałem (stopka też bywa gospodarzem list rozwijanych, tyle że tych
+     otwieranych DO GÓRY), pod nagłówkiem. Patrz komentarz przy `.card__head`. */
+  z-index: 2;
+}
+
+/* Wariant "accent" — cienki pasek koloru na górze karty */
+.card--accent::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: var(--r-lg);
+  right: var(--r-lg);
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--card-accent, var(--accent)),
+    transparent
+  );
+  opacity: 0.7;
+}
+
+/* ---------------- PRZYCISKI ---------------- */
+.btn {
+  --btn-bg: var(--bg-surface-2);
+  --btn-fg: var(--text);
+  --btn-bd: var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--btn-bd);
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease),
+    transform var(--dur-1) var(--ease),
+    opacity var(--dur-1) var(--ease);
+  user-select: none;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-surface-3);
+  border-color: var(--border-strong);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.btn svg {
+  flex: none;
+}
+
+.btn--primary {
+  --btn-bg: var(--accent);
+  --btn-fg: var(--accent-fg);
+  --btn-bd: transparent;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.16) inset;
+}
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: transparent;
+}
+
+.btn--long {
+  --btn-bg: var(--long-soft);
+  --btn-fg: var(--long-text);
+  --btn-bd: rgba(38, 217, 163, 0.3);
+}
+.btn--long:hover:not(:disabled) {
+  background: var(--long);
+  color: #04120d;
+  border-color: transparent;
+}
+
+.btn--short {
+  --btn-bg: var(--short-soft);
+  --btn-fg: var(--short-text);
+  --btn-bd: rgba(255, 92, 122, 0.3);
+}
+.btn--short:hover:not(:disabled) {
+  background: var(--short);
+  color: #1a0409;
+  border-color: transparent;
+}
+
+.btn--danger {
+  --btn-bg: transparent;
+  --btn-fg: var(--short-text);
+  --btn-bd: rgba(255, 92, 122, 0.34);
+}
+.btn--danger:hover:not(:disabled) {
+  background: var(--short-soft);
+  border-color: var(--short);
+}
+
+.btn--ghost {
+  --btn-bg: transparent;
+  --btn-bd: transparent;
+  --btn-fg: var(--text-dim);
+}
+.btn--ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: transparent;
+}
+
+.btn--outline {
+  --btn-bg: transparent;
+}
+
+.btn--sm {
+  height: 26px;
+  padding: 0 9px;
+  font-size: var(--fs-xs);
+  border-radius: var(--r-xs);
+}
+.btn--lg {
+  height: 40px;
+  padding: 0 18px;
+  font-size: var(--fs-md);
+  border-radius: var(--r-md);
+}
+.btn--icon {
+  width: 32px;
+  padding: 0;
+}
+.btn--icon.btn--sm {
+  width: 26px;
+}
+.btn--icon.btn--lg {
+  width: 40px;
+}
+.btn--block {
+  width: 100%;
+}
+
+/* ---------------- POLA FORMULARZA ---------------- */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.field__label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  transition:
+    border-color var(--dur-1) var(--ease),
+    box-shadow var(--dur-1) var(--ease),
+    background-color var(--dur-1) var(--ease);
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--text-faint);
+}
+
+.input:hover,
+.select:hover,
+.textarea:hover {
+  border-color: var(--border-strong);
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--bg-surface);
+}
+
+.input--num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  padding-right: 9px;
+}
+
+.input--sm,
+.select--sm {
+  height: 26px;
+  font-size: var(--fs-xs);
+  padding: 0 8px;
+}
+
+.textarea {
+  height: auto;
+  min-height: 88px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.select {
+  appearance: none;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23808aa2' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  cursor: pointer;
+}
+
+.select option {
+  background: var(--bg-surface);
+  color: var(--text);
+}
+
+.input-affix {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.input-affix .input {
+  padding-right: 34px;
+}
+.input-affix__suffix {
+  position: absolute;
+  right: 9px;
+  font-size: var(--fs-2xs);
+  color: var(--text-faint);
+  pointer-events: none;
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ZERO NAZWANE PO IMIENIU — „BEZ LIMITU" / „WYŁĄCZONE" / „AUTOMAT".
+   Napis leży NA polu (kliknięcie i tak trafia w input — `pointer-events`),
+   i znika, gdy tylko użytkownik zacznie pisać. Celowo mocniejszy niż
+   placeholder: puste pole czyta się jako „nie ustawione", a to jest
+   dokładnie ta pomyłka, która kosztowała konto (RAPORT.md O71). */
+.input-affix__zero {
+  position: absolute;
+  left: 11px;
+  right: 34px;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Po wejściu w pole napis blednie — nie zasłania tego, co użytkownik pisze,
+   ale nadal mówi, jaka wartość tam stoi, dopóki nic nie wpisano. */
+.input-affix[data-zero="1"]:focus-within .input-affix__zero {
+  opacity: 0.4;
+}
+
+/* ---------------- PRZEŁĄCZNIK (SWITCH) ---------------- */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  user-select: none;
+  min-width: 0;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch__track {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 19px;
+  border-radius: var(--r-full);
+  background: var(--bg-surface-3);
+  border: 1px solid var(--border-strong);
+  transition:
+    background-color var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease);
+}
+
+.switch__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition:
+    transform var(--dur-2) var(--ease-out),
+    background-color var(--dur-2) var(--ease);
+}
+
+.switch input:checked + .switch__track {
+  background: var(--accent);
+  border-color: transparent;
+}
+.switch input:checked + .switch__track .switch__thumb {
+  transform: translateX(15px);
+  background: var(--accent-fg);
+}
+.switch input:focus-visible + .switch__track {
+  box-shadow: var(--ring);
+}
+.switch input:disabled + .switch__track {
+  opacity: 0.4;
+}
+
+.switch__text {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  min-width: 0;
+}
+
+/* ---------------- CHECKBOX ---------------- */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+
+.check input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.check__box {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-inset);
+  display: grid;
+  place-items: center;
+  transition:
+    background-color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease);
+}
+
+.check__box svg {
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity var(--dur-1) var(--ease),
+    transform var(--dur-1) var(--ease-out);
+  color: var(--accent-fg);
+}
+
+.check input:checked + .check__box {
+  background: var(--accent);
+  border-color: transparent;
+}
+.check input:checked + .check__box svg {
+  opacity: 1;
+  transform: scale(1);
+}
+.check input:focus-visible + .check__box {
+  box-shadow: var(--ring);
+}
+.check input:disabled + .check__box {
+  opacity: 0.4;
+}
+
+/* ---------------- SEGMENTED CONTROL ---------------- */
+.seg {
+  position: relative;
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.seg__btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  transition:
+    color var(--dur-2) var(--ease),
+    background-color var(--dur-2) var(--ease);
+  white-space: nowrap;
+}
+
+.seg__btn:hover {
+  color: var(--text-dim);
+}
+
+.seg__btn[data-active="true"] {
+  color: var(--seg-fg, var(--text));
+  background: var(--seg-bg, var(--bg-surface-3));
+}
+
+.seg--sm .seg__btn {
+  height: 22px;
+  padding: 0 9px;
+  font-size: var(--fs-2xs);
+}
+
+/* ---------------- PLAKIETKI / CHIPY ---------------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: var(--r-full);
+  font-size: var(--fs-3xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+  background: var(--bg-surface-3);
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  white-space: nowrap;
+  flex: none;
+}
+
+.badge--long {
+  background: var(--long-soft);
+  color: var(--long-text);
+  border-color: rgba(38, 217, 163, 0.24);
+}
+.badge--short {
+  background: var(--short-soft);
+  color: var(--short-text);
+  border-color: rgba(255, 92, 122, 0.24);
+}
+.badge--accent {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-color: var(--accent-line);
+}
+.badge--warn {
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  border-color: rgba(245, 183, 78, 0.26);
+}
+.badge--ai {
+  background: var(--ai-soft);
+  color: var(--ai-text);
+  border-color: rgba(200, 141, 255, 0.26);
+}
+.badge--info {
+  background: var(--info-soft);
+  color: var(--info-text);
+  border-color: rgba(86, 184, 255, 0.26);
+}
+.badge--muted {
+  background: var(--bg-surface-3);
+  color: var(--text-muted);
+  border-color: var(--border-soft);
+}
+
+.badge--dot::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--bg-surface-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* ---------------- MultiSelect ---------------- */
+.msel {
+  position: relative;
+  display: inline-block;
+}
+.msel__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+/* LISTA MIESZKA W PORTALU, przypięta do EKRANU (`fixed`), a nie do rodzica.
+   Powód opisany szczegółowo przy komponencie `MultiSelect`: element w drzewie
+   karty przegrywał albo z kontekstem układania nagłówka, albo z przycinaniem
+   `overflow-y: auto` na kontenerze widoku. `fixed` + portal do `body` omija
+   oba naraz. Współrzędne wstawia komponent — tu tylko wygląd i warstwa.
+
+   Warstwa 500 celowo NAD oknem modalnym (300) i powiadomieniem (400):
+   rozwinięta lista jest zawsze tym, na co użytkownik właśnie patrzy, a znika
+   przy pierwszym kliknięciu obok. */
+.msel__pop {
+  position: fixed;
+  z-index: 500;
+  max-width: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+.msel__row {
+  padding: 4px 6px;
+  border-radius: var(--r-xs, 4px);
+  white-space: nowrap;
+}
+.msel__row:hover {
+  background: var(--bg-surface-2);
+}
+.msel__clear {
+  display: block;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 5px 6px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.msel__clear:hover {
+  color: var(--text);
+}
+
+/* Plakietka bywa PRZYCISKIEM (filtr rodzaju w widoku Sygnałów). `button` ma
+   własną czcionkę i wyrównanie od przeglądarki — bez tego trzy plakietki
+   z klawiaturą wyglądałyby inaczej niż reszta rzędu. */
+button.chip {
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-align: left;
+  appearance: none;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+button.chip:hover {
+  color: var(--text);
+}
+button.chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chip--live {
+  color: var(--long-text);
+  border-color: rgba(38, 217, 163, 0.28);
+  background: var(--long-soft);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.dot--pulse {
+  position: relative;
+}
+.dot--pulse::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: pulseRing 2s var(--ease-out) infinite;
+  color: inherit;
+}
+
+/* ---------------- TABELE ---------------- */
+.tbl-wrap {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.tbl {
+  width: 100%;
+  font-size: var(--fs-sm);
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.tbl th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-surface-2);
+  text-align: right;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.tbl th:first-child,
+.tbl td:first-child {
+  text-align: left;
+  padding-left: var(--sp-4);
+}
+.tbl th:last-child,
+.tbl td:last-child {
+  padding-right: var(--sp-4);
+}
+
+.tbl td {
+  text-align: right;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.tbl tbody tr {
+  transition: background-color var(--dur-1) var(--ease);
+}
+.tbl tbody tr:hover {
+  background: var(--bg-hover);
+}
+.tbl tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.tbl th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.tbl th.sortable:hover {
+  color: var(--text-dim);
+}
+.tbl th .sort-arrow {
+  display: inline-block;
+  margin-left: 3px;
+  color: var(--accent-text);
+}
+
+.tbl--rows-lg td {
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+
+/* ---------------- STAN PUSTY ---------------- */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-7) var(--sp-4);
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.empty__icon {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--r-md);
+  display: grid;
+  place-items: center;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-soft);
+  color: var(--text-faint);
+  margin-bottom: 2px;
+}
+
+.empty__title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-dim);
+}
+
+.empty__text {
+  font-size: var(--fs-xs);
+  max-width: 340px;
+  line-height: 1.55;
+}
+
+/* ---------------- MODAL ---------------- */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: var(--scrim);
+  backdrop-filter: blur(6px);
+  display: grid;
+  place-items: center;
+  padding: var(--sp-5);
+  animation: fadeIn var(--dur-2) var(--ease);
+}
+
+.modal {
+  width: min(var(--modal-w, 560px), 100%);
+  max-height: min(86vh, 860px);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: popIn var(--dur-3) var(--ease-out);
+}
+
+.modal__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.modal__title {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semi);
+}
+
+.modal__body {
+  padding: var(--sp-4) var(--sp-5);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal__foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-surface-2);
+}
+
+/* ---------------- TOOLTIP ---------------- */
+.tip {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Dymek żyje w `document.body` (portal), więc pozycja jest EKRANOWA, a nie
+   względem kotwicy. Dzięki temu nie ucina go kontener z przewijaniem —
+   w tabeli pozycji tekst dosłownie nie mieścił się w kadrze. */
+.tip__bubble {
+  position: fixed;
+  z-index: 400;
+  transform: translate(-50%, -100%);
+  width: max-content;
+  max-width: 280px;
+  padding: 7px 10px;
+  background: var(--bg-surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-dim);
+  pointer-events: none;
+  
+  animation: popInTip var(--dur-1) var(--ease-out);
+  white-space: normal;
+}
+
+@keyframes popInTip {
+  0% {
+    opacity: 0;
+    scale: 0.96;
+    translate: 0 4px;
+  }
+  100% {
+    opacity: 1;
+    scale: 1;
+    translate: 0 0;
+  }
+}
+
+/* brak miejsca u góry ekranu — dymek idzie pod kotwicę */
+.tip__bubble--pod {
+  transform: translate(-50%, 0);
+}
+
+/* ---------------- PASEK POSTĘPU ---------------- */
+.meter {
+  height: 5px;
+  border-radius: var(--r-full);
+  background: var(--bg-surface-3);
+  overflow: hidden;
+}
+.meter__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--dur-3) var(--ease-out);
+}
+
+/* ---------------- SIATKI POMOCNICZE ---------------- */
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.row--tight {
+  gap: 6px;
+}
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.spacer {
+  flex: 1;
+}
+.grid-auto {
+  display: grid;
+  gap: var(--sp-3);
+  grid-template-columns: repeat(auto-fit, minmax(var(--min, 200px), 1fr));
+}
+
+.divider {
+  height: 1px;
+  background: var(--border-soft);
+  margin: var(--sp-3) 0;
+}
+.divider--v {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 var(--sp-1);
+  flex: none;
+}
+
+
+.tip__bubble--szeroki {
+  max-width: min(460px, calc(100vw - 24px));
+  padding: 0;
+  color: var(--text);
+}
+
+/* Kontener listy wiadomosci — istnieje po to, zeby miec KLUCZ
+   zalezny od filtra (patrz ChatPanel). Bez wlasnego ukladu. */
+.chat__lista {
+  display: contents;
+}

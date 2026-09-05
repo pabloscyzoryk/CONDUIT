@@ -1,0 +1,151 @@
+/* ============================================================
+   POWŁOKA SAMODZIELNEJ WIZUALIZACJI (`wizualizacja.exe`)
+
+   Zastępuje `Shell` z głównego panelu: bez nawigacji, bez logowania,
+   bez pasków stanu — jeden pasek u góry i przewijana treść.
+   Wszystkie kolory z tokenów, więc 16 kombinacji motyw × paleta
+   działa tu tak samo jak w panelu.
+   ============================================================ */
+
+.wiz {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-canvas);
+}
+
+/* ---------------- pasek górny ---------------- */
+.wiz__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.wiz__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.wiz__logo {
+  display: flex;
+  flex: none;
+}
+
+.wiz__name {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+
+.wiz__name b {
+  font-size: var(--fs-md);
+  letter-spacing: -0.01em;
+}
+
+.wiz__name small {
+  font-size: var(--fs-2xs);
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.wiz__spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wiz__tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* Ścieżka katalogu modeli. `min-width: 0` + `truncate` — długa ścieżka
+   NIE MOŻE rozepchnąć paska, bo wtedy strona jeździłaby w poziomie. */
+.wiz__path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--fs-2xs);
+  color: var(--text-muted);
+}
+
+.wiz__path span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- treść ---------------- */
+.wiz__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--sp-4);
+  overscroll-behavior: contain;
+}
+
+/* ---------------- ostrzeżenie o pustym katalogu ---------------- */
+.wiz__pusto {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.wiz__pusto code {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* Lista sprawdzonych ścieżek. `word-break` w `code` wyżej pilnuje, żeby
+   długa ścieżka złamała się, zamiast rozepchnąć stronę w poziomie. */
+.wiz__gdzie {
+  margin: var(--sp-2) 0;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.wiz__gdzie ul {
+  margin: 4px 0 6px;
+  padding-left: var(--sp-4);
+  list-style: disc;
+}
+
+@media (max-width: 620px) {
+  .wiz__bar {
+    padding: var(--sp-2) var(--sp-3);
+    gap: var(--sp-2);
+  }
+  .wiz__body {
+    padding: var(--sp-3);
+  }
+  /* na wąskim ekranie paleta i motyw schodzą do drugiego rzędu,
+     zamiast zwężać się do nieczytelnych kikutów */
+  .wiz__tools {
+    width: 100%;
+  }
+  .wiz__tools .select {
+    flex: 1;
+    min-width: 0;
+  }
+}

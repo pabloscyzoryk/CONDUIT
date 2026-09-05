@@ -1,0 +1,476 @@
+/* ============================================================
+   CONDUIT — PALETY KOLORYSTYCZNE
+   Atrybut `data-palette` na <html>, niezależny od `data-theme`.
+   Każda paleta ma osobno dostrojony wariant CIEMNY i JASNY.
+
+   Selektory celowo mają postać [data-theme][data-palette] (0,3,0),
+   żeby wygrywały z regułami motywu z tokens.css (0,2,0) i nie
+   przeciekały między motywami.
+
+   Reguły doboru:
+   • Zieleń zysku i czerwień straty pozostają rozróżnialne w KAŻDEJ
+     palecie — to jedyna para, której znaczenia nie wolno rozmyć.
+   • Gdy akcent wpada w rodzinę zysku lub straty (czerwona, zielona,
+     matrix), semantyczny kolor jest przesuwany w jasności, żeby nie
+     zlewał się z przyciskami.
+   • --accent-fg to kolor napisu NA wypełnieniu akcentem: jasne
+     akcenty (żółty, pomarańczowy, matrix, vantage) dostają ciemny
+     tekst, inaczej przycisk jest nieczytelny.
+
+   Nazwy „vantage" i „puprime" oznaczają palety INSPIROWANE stylistyką
+   tych marek — to nie są oficjalne kolory brandowe.
+   ============================================================ */
+
+/* ============================================================
+   1. FIOLETOWA (domyślna) — indygo
+   ============================================================ */
+:root[data-theme="dark"][data-palette="violet"] {
+  /* Odcień dobrany tak, by JEDNOCZEŚNIE spełnić dwa progi: biały napis na
+     wypełnieniu ≥ 4,5:1 (5,21) i sam akcent jako element graficzny na tle
+     karty ≥ 3:1 (3,50). Jaśniejsze #6d7bff dawało tylko 3,54 dla napisu. */
+  --accent: #4f5ce8;
+  --accent-hover: #6d7bff;
+  --accent-soft: rgba(109, 123, 255, 0.14);
+  --accent-line: rgba(109, 123, 255, 0.36);
+  --accent-text: #a3acff;
+  --accent-fg: #ffffff;
+}
+:root[data-theme="light"][data-palette="violet"] {
+  --accent: #5563f5;
+  --accent-hover: #6d7bff;
+  --accent-soft: rgba(85, 99, 245, 0.1);
+  --accent-line: rgba(85, 99, 245, 0.32);
+  --accent-text: #4450d8;
+  --accent-fg: #ffffff;
+}
+
+/* ============================================================
+   2. CZERWONA
+   Akcent = jasna róża, strata = GŁĘBSZA karmazyn. Rozdzielenie
+   jasnością, żeby przycisk akcji nie wyglądał jak przycisk straty.
+   ============================================================ */
+:root[data-theme="dark"][data-palette="red"] {
+  --accent: #ff4d5e;
+  --accent-hover: #ff7382;
+  --accent-soft: rgba(255, 77, 94, 0.14);
+  --accent-line: rgba(255, 77, 94, 0.38);
+  --accent-text: #ff8b97;
+  --accent-fg: #230206;
+
+  --short: #d4213f;
+  --short-soft: rgba(212, 33, 63, 0.16);
+  --short-text: #f2637a;
+
+  --bg-root: #0b0709;
+  --bg-canvas: #0e0a0c;
+  --bg-surface: #150f11;
+  --bg-surface-2: #1c1418;
+  --bg-surface-3: #241a1e;
+  --bg-inset: #100b0d;
+  --border: #2c1e23;
+  --border-soft: #221619;
+  --border-strong: #3d2a30;
+}
+:root[data-theme="light"][data-palette="red"] {
+  --accent: #d92b3a;
+  --accent-hover: #f2404f;
+  --accent-soft: rgba(217, 43, 58, 0.1);
+  --accent-line: rgba(217, 43, 58, 0.32);
+  --accent-text: #b31f2c;
+  --accent-fg: #ffffff;
+
+  --short: #9f1239;
+  --short-soft: rgba(159, 18, 57, 0.11);
+  --short-text: #9f1239;
+
+  --bg-root: #f7eff0;
+  --bg-canvas: #fbf5f6;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #fdf6f7;
+  --bg-surface-3: #f8eced;
+  --bg-inset: #faf1f2;
+  --border: #ecdcdf;
+  --border-soft: #f3e7e9;
+  --border-strong: #d9bfc4;
+}
+
+/* ============================================================
+   3. ZIELONA
+   Akcent = szmaragd. Zysk przesunięty w jaśniejszą miętę, strata
+   bez zmian — para zysk/strata dalej czytelna.
+   ============================================================ */
+:root[data-theme="dark"][data-palette="green"] {
+  --accent: #22c55e;
+  --accent-hover: #4ade80;
+  --accent-soft: rgba(34, 197, 94, 0.14);
+  --accent-line: rgba(34, 197, 94, 0.36);
+  --accent-text: #6ee7a0;
+  --accent-fg: #02160a;
+
+  --long: #5eead4;
+  --long-soft: rgba(94, 234, 212, 0.13);
+  --long-text: #7dead9;
+
+  --bg-root: #060b08;
+  --bg-canvas: #080e0b;
+  --bg-surface: #0e1712;
+  --bg-surface-2: #131e18;
+  --bg-surface-3: #19271f;
+  --bg-inset: #0a120d;
+  --border: #1e2f26;
+  --border-soft: #17241d;
+  --border-strong: #2b4436;
+}
+:root[data-theme="light"][data-palette="green"] {
+  --accent: #15803d;
+  --accent-hover: #16a34a;
+  --accent-soft: rgba(21, 128, 61, 0.1);
+  --accent-line: rgba(21, 128, 61, 0.3);
+  --accent-text: #14532d;
+  --accent-fg: #ffffff;
+
+  --long: #0f766e;
+  --long-soft: rgba(15, 118, 110, 0.12);
+  --long-text: #0f766e;
+
+  --bg-root: #edf4ef;
+  --bg-canvas: #f4f9f5;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #f6fbf7;
+  --bg-surface-3: #ecf5ee;
+  --bg-inset: #f2f8f3;
+  --border: #dcebe1;
+  --border-soft: #e7f2ea;
+  --border-strong: #bdd6c5;
+}
+
+/* ============================================================
+   4. ŻÓŁTA
+   Akcent bardzo jasny → napis na wypełnieniu musi być ciemny.
+   ============================================================ */
+:root[data-theme="dark"][data-palette="yellow"] {
+  --accent: #f5c518;
+  --accent-hover: #ffd84d;
+  --accent-soft: rgba(245, 197, 24, 0.14);
+  --accent-line: rgba(245, 197, 24, 0.36);
+  --accent-text: #f7d360;
+  --accent-fg: #1a1400;
+
+  --warn: #fb923c;
+  --warn-soft: rgba(251, 146, 60, 0.14);
+  --warn-text: #fdba74;
+
+  --bg-root: #0b0a05;
+  --bg-canvas: #0e0d07;
+  --bg-surface: #15130c;
+  --bg-surface-2: #1c1910;
+  --bg-surface-3: #242015;
+  --bg-inset: #100e08;
+  --border: #2d2718;
+  --border-soft: #221e13;
+  --border-strong: #423926;
+}
+:root[data-theme="light"][data-palette="yellow"] {
+  --accent: #b45309;
+  --accent-hover: #d97706;
+  --accent-soft: rgba(180, 83, 9, 0.1);
+  --accent-line: rgba(180, 83, 9, 0.3);
+  --accent-text: #92400e;
+  --accent-fg: #ffffff;
+
+  --warn: #b45309;
+  --warn-soft: rgba(180, 83, 9, 0.12);
+  --warn-text: #92400e;
+
+  --bg-root: #f7f3e8;
+  --bg-canvas: #fbf8f0;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #fdfaf3;
+  --bg-surface-3: #f7f1e4;
+  --bg-inset: #faf6ec;
+  --border: #ece3d0;
+  --border-soft: #f3ecdd;
+  --border-strong: #d8c9a9;
+}
+
+/* ============================================================
+   5. POMARAŃCZOWA
+   ============================================================ */
+:root[data-theme="dark"][data-palette="orange"] {
+  --accent: #ff7a1a;
+  --accent-hover: #ff964d;
+  --accent-soft: rgba(255, 122, 26, 0.14);
+  --accent-line: rgba(255, 122, 26, 0.36);
+  --accent-text: #ffa869;
+  --accent-fg: #1d0c00;
+
+  --bg-root: #0b0805;
+  --bg-canvas: #0e0b07;
+  --bg-surface: #16110c;
+  --bg-surface-2: #1d1710;
+  --bg-surface-3: #251d15;
+  --bg-inset: #110d08;
+  --border: #2e2318;
+  --border-soft: #231a13;
+  --border-strong: #443426;
+}
+:root[data-theme="light"][data-palette="orange"] {
+  --accent: #c2410c;
+  --accent-hover: #ea580c;
+  --accent-soft: rgba(194, 65, 12, 0.1);
+  --accent-line: rgba(194, 65, 12, 0.3);
+  --accent-text: #9a3412;
+  --accent-fg: #ffffff;
+
+  --bg-root: #f8f1eb;
+  --bg-canvas: #fcf7f3;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #fdf8f4;
+  --bg-surface-3: #f8efe7;
+  --bg-inset: #fbf4ef;
+  --border: #eee0d5;
+  --border-soft: #f4eae1;
+  --border-strong: #dcc6b4;
+}
+
+/* ============================================================
+   6. MATRIX
+   Czerń terminala, fosforowa zieleń. Zysk = akcent (to celowe —
+   cała paleta jest „zielona"), strata pozostaje wyraźnie czerwona,
+   więc kierunek rynku nadal czyta się natychmiast.
+   ============================================================ */
+:root[data-theme="dark"][data-palette="matrix"] {
+  --accent: #00ff41;
+  --accent-hover: #5cff85;
+  --accent-soft: rgba(0, 255, 65, 0.12);
+  --accent-line: rgba(0, 255, 65, 0.34);
+  --accent-text: #5cff85;
+  --accent-fg: #001a06;
+
+  --long: #00ff41;
+  --long-soft: rgba(0, 255, 65, 0.12);
+  --long-text: #5cff85;
+
+  --short: #ff2e4d;
+  --short-soft: rgba(255, 46, 77, 0.14);
+  --short-text: #ff6b80;
+
+  --warn: #d7ff3f;
+  --warn-soft: rgba(215, 255, 63, 0.12);
+  --warn-text: #e4ff7a;
+
+  --info: #22d3ee;
+  --info-soft: rgba(34, 211, 238, 0.12);
+  --info-text: #67e8f9;
+
+  --ai: #a3ff5c;
+  --ai-soft: rgba(163, 255, 92, 0.12);
+  --ai-text: #c4ff94;
+
+  --bg-root: #000000;
+  --bg-canvas: #000603;
+  --bg-surface: #030d07;
+  --bg-surface-2: #05140b;
+  --bg-surface-3: #081c10;
+  --bg-inset: #010a05;
+  --border: #0f2e1a;
+  --border-soft: #0a2113;
+  --border-strong: #17492a;
+
+  --text: #ccffdb;
+  --text-dim: #7ee8a0;
+  --text-muted: #52c47a;
+  --text-faint: #3f9e60;
+
+  --grid-line: rgba(0, 255, 65, 0.06);
+  --grid-line-strong: rgba(0, 255, 65, 0.12);
+  --chart-crosshair: rgba(0, 255, 65, 0.42);
+  --chart-axis-text: #52c47a;
+
+  --font-sans: "JetBrains Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
+}
+:root[data-theme="light"][data-palette="matrix"] {
+  --accent: #047857;
+  --accent-hover: #059669;
+  --accent-soft: rgba(4, 120, 87, 0.1);
+  --accent-line: rgba(4, 120, 87, 0.3);
+  --accent-text: #065f46;
+  --accent-fg: #eaffef;
+
+  --long: #047857;
+  --long-soft: rgba(4, 120, 87, 0.12);
+  --long-text: #065f46;
+
+  --short: #be123c;
+  --short-soft: rgba(190, 18, 60, 0.11);
+  --short-text: #9f1239;
+
+  --bg-root: #e9f2ec;
+  --bg-canvas: #f1f8f3;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #f5fbf7;
+  --bg-surface-3: #eaf5ee;
+  --bg-inset: #f0f7f2;
+  --border: #d7e8dd;
+  --border-soft: #e4f0e8;
+  --border-strong: #b4d0be;
+
+  --text: #05200f;
+  --text-dim: #14532d;
+  --text-muted: #2f6a45;
+  --text-faint: #3d7a53;
+
+  --chart-axis-text: #2f6a45;
+
+  --font-sans: "JetBrains Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
+}
+
+/* ============================================================
+   7. VANTAGE (paleta inspirowana)
+   Granat brokerski + energetyczna zieleń.
+   ============================================================ */
+:root[data-theme="dark"][data-palette="vantage"] {
+  --accent: #00c389;
+  --accent-hover: #2ee0a8;
+  --accent-soft: rgba(0, 195, 137, 0.13);
+  --accent-line: rgba(0, 195, 137, 0.34);
+  --accent-text: #46e0b0;
+  --accent-fg: #00190f;
+
+  --long: #00c389;
+  --long-soft: rgba(0, 195, 137, 0.13);
+  --long-text: #46e0b0;
+
+  --short: #ff5470;
+  --short-soft: rgba(255, 84, 112, 0.13);
+  --short-text: #ff8298;
+
+  --info: #4cc9f0;
+  --info-soft: rgba(76, 201, 240, 0.13);
+  --info-text: #8ad9f5;
+
+  --bg-root: #030a14;
+  --bg-canvas: #04101c;
+  --bg-surface: #071a2b;
+  --bg-surface-2: #0a2135;
+  --bg-surface-3: #0e2a41;
+  --bg-inset: #04121f;
+  --border: #143351;
+  --border-soft: #0f2841;
+  --border-strong: #1e4a70;
+
+  --text: #e4f1fb;
+  --text-dim: #a3c1d9;
+  --text-muted: #7ba3c2;
+  --text-faint: #6b93b3;
+
+  --grid-line: rgba(160, 200, 235, 0.06);
+  --chart-axis-text: #7ba3c2;
+}
+:root[data-theme="light"][data-palette="vantage"] {
+  --accent: #00845d;
+  --accent-hover: #00a173;
+  --accent-soft: rgba(0, 132, 93, 0.1);
+  --accent-line: rgba(0, 132, 93, 0.3);
+  --accent-text: #00694a;
+  --accent-fg: #ffffff;
+
+  --long: #00845d;
+  --long-soft: rgba(0, 132, 93, 0.12);
+  --long-text: #00694a;
+
+  --short: #d21f4a;
+  --short-soft: rgba(210, 31, 74, 0.11);
+  --short-text: #b01840;
+
+  --bg-root: #e9eff5;
+  --bg-canvas: #f2f6fa;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #f6f9fc;
+  --bg-surface-3: #eaf1f7;
+  --bg-inset: #f1f5f9;
+  --border: #d8e3ed;
+  --border-soft: #e6eef4;
+  --border-strong: #b6c9d9;
+
+  --text: #05203a;
+  --text-dim: #2d4a68;
+  --text-muted: #4a6b84;
+  --text-faint: #5b7c96;
+
+  --chart-axis-text: #4a6b84;
+}
+
+/* ============================================================
+   8. PU PRIME (paleta inspirowana)
+   Głęboki fiolet + magenta.
+   ============================================================ */
+:root[data-theme="dark"][data-palette="puprime"] {
+  /* jw. — #b14aed dawało 4,14 dla białego napisu; #9838d6 daje 5,42 przy
+     zachowaniu 3,48 jako element graficzny */
+  --accent: #9838d6;
+  --accent-hover: #b14aed;
+  --accent-soft: rgba(177, 74, 237, 0.14);
+  --accent-line: rgba(177, 74, 237, 0.36);
+  --accent-text: #d09cf7;
+  --accent-fg: #ffffff;
+
+  --ai: #f0abfc;
+  --ai-soft: rgba(240, 171, 252, 0.13);
+  --ai-text: #f5c2fd;
+
+  --short: #ff4f8b;
+  --short-soft: rgba(255, 79, 139, 0.13);
+  --short-text: #ff85ae;
+
+  --bg-root: #0a0512;
+  --bg-canvas: #0d0717;
+  --bg-surface: #150d22;
+  --bg-surface-2: #1c122c;
+  --bg-surface-3: #241738;
+  --bg-inset: #100924;
+  --border: #2d1d44;
+  --border-soft: #231636;
+  --border-strong: #422a63;
+
+  --text: #efe6fa;
+  --text-dim: #bda8d6;
+  --text-muted: #9c84bb;
+  --text-faint: #8b73ab;
+
+  --grid-line: rgba(200, 170, 240, 0.06);
+  --chart-axis-text: #9c84bb;
+}
+:root[data-theme="light"][data-palette="puprime"] {
+  --accent: #7e22ce;
+  --accent-hover: #9333ea;
+  --accent-soft: rgba(126, 34, 206, 0.1);
+  --accent-line: rgba(126, 34, 206, 0.3);
+  --accent-text: #6b21a8;
+  --accent-fg: #ffffff;
+
+  --ai: #a21caf;
+  --ai-soft: rgba(162, 28, 175, 0.11);
+  --ai-text: #86198f;
+
+  --short: #db2777;
+  --short-soft: rgba(219, 39, 119, 0.11);
+  --short-text: #be185d;
+
+  --bg-root: #f2ecf8;
+  --bg-canvas: #f8f4fc;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #fbf8fd;
+  --bg-surface-3: #f3ecf9;
+  --bg-inset: #f7f2fb;
+  --border: #e6dbf0;
+  --border-soft: #efe7f5;
+  --border-strong: #cbb5dd;
+
+  --text: #200a35;
+  --text-dim: #4a2a68;
+  --text-muted: #6b4a88;
+  --text-faint: #7c5c99;
+
+  --chart-axis-text: #6b4a88;
+}

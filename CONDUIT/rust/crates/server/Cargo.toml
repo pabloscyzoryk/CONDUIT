@@ -1,0 +1,36 @@
+[package]
+name = "conduit-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conduit-core = { path = "../core" }
+# Laboratorium (backtesty i trening AI) liczy W TYM SAMYM procesie, co serwer —
+# dzięki temu postęp jest zwykłą sekcją stanu, a nie parsowaniem cudzego stdout.
+conduit-backtest = { path = "../backtest" }
+conduit-ai = { path = "../ai" }
+# SAM PROTOKÓŁ okienka postępu, bez `gui` — serwer melduje postęp do
+# `LAB\postep.exe` dokładnie tak samo jak `bt.exe`, ale nie ciągnie za sobą
+# ani OpenGL-a, ani winita.
+conduit-monitor = { path = "../monitor", default-features = false }
+rayon = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+futures-util = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+qrcode = { workspace = true }
+lettre = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+open = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio-tungstenite = "0.29"

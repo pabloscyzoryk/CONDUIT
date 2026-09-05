@@ -1,0 +1,19 @@
+[package]
+name = "conduit-mozg"
+version.workspace = true
+edition.workspace = true
+
+# CRATE MÓZGU — bez brokera, bez zegara, bez losowości.
+#
+# Lista zależności jest CZĘŚCIĄ SPECYFIKACJI, nie wygodą. Crate CELOWO nie
+# zależy od `conduit-core`: to jest granica 1 z ARCHITEKTURA_MOZGU_EA §3.2,
+# wymuszona strukturalnie, a nie umową w komentarzu.
+#
+# `memmap2` i `serde_json` obsługują WYŁĄCZNIE moduł `we` i binarkę
+# obserwacyjną `e0rama` — czytanie zrzutów z dysku poza pętlą decyzyjną.
+# Rdzeń decyzyjny (`margines` i to, co dojdzie w E2) nie dotyka plików;
+# pilnuje tego test `higiena_rdzenia_skan_zrodel` w `lib.rs`.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+memmap2 = { workspace = true }

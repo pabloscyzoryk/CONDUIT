@@ -1,0 +1,399 @@
+/* ============================================================
+   WIDOK „MODELE AI"
+
+   Wszystkie kolory pochodzą z tokenów (`var(--…)`), więc diagram
+   sieci przemalowuje się razem z motywem i wszystkimi ośmioma
+   paletami — dokładnie tak jak renderer wykresu.
+   ============================================================ */
+
+/* ---------------- układ ---------------- */
+.aim__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 388px;
+  gap: var(--sp-4);
+  align-items: start;
+}
+@media (max-width: 1320px) {
+  .aim__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.aim__err {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+/* ---------------- diagram sieci ---------------- */
+.aim__net {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* Szeroki diagram przewija się WE WŁASNYM kontenerze — strona nigdy
+   nie przewija się w poziomie (ta sama technika co `.tbl-wrap`). */
+.aim__svgwrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  padding: var(--sp-2) 0;
+}
+
+.aim__svg {
+  display: block;
+  width: 100%;
+}
+
+.aim__collabel {
+  font-size: 10px;
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  fill: var(--text-faint);
+}
+
+.aim__outlabel {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  fill: var(--text-dim);
+}
+.aim__outlabel--param {
+  fill: var(--text-faint);
+  font-style: italic;
+}
+
+.aim__info {
+  min-height: 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-soft);
+}
+.aim__info b {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.aim__legend {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.aim__scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.aim__scale i {
+  display: block;
+  border-radius: var(--r-full);
+}
+
+/* ---------------- panel cech ---------------- */
+.aim__feats {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aimfeat {
+  display: grid;
+  grid-template-columns: 26px minmax(120px, 2fr) minmax(80px, 3fr) 56px;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px var(--sp-2);
+  border-radius: var(--r-xs);
+  transition: background var(--dur-1) var(--ease);
+  min-width: 0;
+}
+.aimfeat:hover,
+.aimfeat[data-hot="true"] {
+  background: var(--bg-hover);
+}
+.aimfeat--sm {
+  grid-template-columns: minmax(90px, 1fr) minmax(60px, 1.4fr) 46px;
+  padding: 2px var(--sp-1);
+}
+
+.aimfeat__rank {
+  font-size: var(--fs-2xs);
+  color: var(--text-faint);
+  text-align: right;
+}
+.aimfeat__name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.aimfeat__name b {
+  font-size: var(--fs-xs);
+  color: var(--text);
+}
+.aimfeat__name .hint {
+  font-size: var(--fs-3xs);
+}
+.aimfeat__bar {
+  display: block;
+  height: 7px;
+  border-radius: var(--r-full);
+  background: var(--bg-surface-3);
+  overflow: hidden;
+  min-width: 0;
+}
+.aimfeat__bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width var(--dur-3) var(--ease-out);
+}
+.aimfeat__val {
+  font-size: var(--fs-2xs);
+  color: var(--text-dim);
+  text-align: right;
+}
+
+/* ---------------- metryki ---------------- */
+.aim__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1px;
+  background: var(--border-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.aimmetric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px var(--sp-2);
+  background: var(--bg-surface);
+  min-width: 0;
+}
+.aimmetric span {
+  font-size: var(--fs-3xs);
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aimmetric b {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+/* ---------------- symulator ---------------- */
+.aim__sim {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--sp-4);
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .aim__sim {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.aim__sliders {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(214px, 1fr));
+  gap: var(--sp-3);
+}
+.aim__sliders > p.hint {
+  grid-column: 1 / -1;
+}
+
+.aimslider {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.aimslider--off {
+  opacity: 0.45;
+}
+.aimslider__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.aimslider__label {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  font-weight: var(--fw-medium);
+}
+.aimslider__head b {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.aimslider .hint {
+  font-size: var(--fs-3xs);
+}
+
+.aim__switches {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  justify-content: center;
+}
+
+/* Suwak — własny, bo projekt nie ma jeszcze kontrolki `range`. */
+.aim-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 5px;
+  border-radius: var(--r-full);
+  background: var(--bg-surface-3);
+  border: 1px solid var(--border-soft);
+  outline: none;
+  cursor: pointer;
+}
+.aim-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+.aim-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-surface);
+  cursor: pointer;
+}
+.aim-range:focus-visible {
+  box-shadow: var(--ring);
+}
+.aim-range:disabled {
+  cursor: not-allowed;
+}
+
+/* ---------------- wyjście sieci ---------------- */
+.aim__decision {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.aim__verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--ai-soft);
+  border: 1px solid var(--border-soft);
+}
+.aim__verdict b {
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  color: var(--ai-text);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+.aim__verdict--sm {
+  padding: var(--sp-2);
+}
+.aim__verdict--sm b {
+  font-size: var(--fs-sm);
+}
+
+.aim__outs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.aim__outgrp {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.aimout {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(60px, 2fr) 56px;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.aimout__k {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.aimout__bar {
+  display: block;
+  height: 8px;
+  border-radius: var(--r-full);
+  background: var(--bg-surface-3);
+  overflow: hidden;
+  min-width: 0;
+}
+.aimout__bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width var(--dur-2) var(--ease-out);
+}
+.aimout__v {
+  font-size: var(--fs-2xs);
+  color: var(--text-dim);
+  text-align: right;
+}
+
+/* ---------------- porównanie ---------------- */
+.aim__cmp {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--sp-4);
+}
+.aim__cmpcol {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* ---------------- pomoc ---------------- */
+.aim__help {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-3);
+}
+.aim__help > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.aim__help b {
+  font-size: var(--fs-sm);
+}

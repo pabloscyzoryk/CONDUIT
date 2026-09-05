@@ -1,0 +1,105 @@
+/* CONDUIT GRAPH — te same barwy i ta sama typografia co panel `conduit.exe`
+   i `wizualizacja.exe`; narzędzia mają wyglądać jak jedna rodzina. */
+:root{
+  --tlo:#0b0e14; --panel:#11151f; --linia:#1e2536; --tekst:#e8ecf5; --szary:#8590a8;
+  --zielony:#26d9a3; --czerwony:#e06c75; --niebieski:#4a9eff; --zolty:#e5c07b;
+  --fiolet:#c678dd; --pomaranczowy:#e59f5b;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--tlo);color:var(--tekst);
+  font:14px/1.5 Inter,"Segoe UI",system-ui,sans-serif;overflow:hidden}
+
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--linia)}
+h1{margin:0;font-size:16px;letter-spacing:.02em;white-space:nowrap}
+h1 span{color:var(--szary);font-weight:400;font-size:12.5px;margin-left:10px}
+header .prawo{margin-left:auto;display:flex;align-items:center;gap:10px}
+.szary{color:var(--szary)}
+.mini{font-size:11px}
+.b{color:var(--niebieski)}
+
+#uklad{display:flex;height:calc(100vh - 45px)}
+
+/* ---------- lista przebiegów ---------- */
+#boczny{width:300px;min-width:300px;border-right:1px solid var(--linia);
+  display:flex;flex-direction:column;overflow:hidden;background:#0d1119}
+#boczny.zwiniety{display:none}
+.sekcja{padding:10px 12px;border-bottom:1px solid var(--linia)}
+.sekcja.rosnie{flex:1;overflow:auto;border-bottom:none}
+.etyk{display:block;font-size:9.5px;letter-spacing:.07em;color:var(--szary);margin-bottom:5px}
+.wiersz{display:flex;gap:5px}
+input{width:100%;background:#141a26;border:1px solid #232c3f;border-radius:5px;
+  color:var(--tekst);padding:5px 8px;font:12px inherit;font-family:inherit}
+input:focus{outline:none;border-color:var(--niebieski)}
+
+.poz{padding:7px 9px;border:1px solid transparent;border-radius:6px;cursor:pointer;margin-bottom:3px}
+.poz:hover{background:#151b28}
+.poz.a{background:rgba(38,217,163,.10);border-color:#26d9a355}
+.poz.bb{background:rgba(200,120,221,.10);border-color:#c678dd55}
+.poz .nz{font-size:12.5px;font-weight:600;display:flex;gap:6px;align-items:baseline}
+.poz .nz em{font-style:normal;font-size:9.5px;padding:1px 5px;border-radius:3px;
+  background:#1c2434;color:var(--szary)}
+/* ŹRÓDŁO SYGNAŁÓW zawsze widoczne przy nazwie: od 03.08 „HYPER-2" istnieje
+   na pięciu różnych zbiorach i bez tej plakietki dwa słupki obok siebie
+   są nieporównywalne bez wiedzy spoza aplikacji. */
+.poz .nz em.zr{background:#1d2b3a;color:var(--niebieski)}
+.poz .op{font-size:10.5px;color:var(--szary);font-family:ui-monospace,Consolas,monospace;margin-top:2px}
+.poz .wy{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}
+
+/* ---------- główny ---------- */
+#glowny{flex:1;overflow:auto;position:relative}
+
+#okruchy{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:9px 18px 0;font-size:12px}
+#okruchy button{background:none;border:none;color:var(--niebieski);cursor:pointer;
+  font:inherit;padding:2px 4px;border-radius:4px}
+#okruchy button:hover{background:#151b28}
+#okruchy .teraz{color:var(--tekst);font-weight:600}
+#okruchy .strz{color:var(--szary)}
+
+.kafle{display:flex;flex-wrap:wrap;gap:1px;background:var(--linia);margin:9px 0 0;
+  border-top:1px solid var(--linia);border-bottom:1px solid var(--linia)}
+.kafel{flex:1 1 108px;background:var(--panel);padding:8px 12px}
+.kafel .w{font:700 15px ui-monospace,Consolas,monospace}
+.kafel .e{font-size:9px;letter-spacing:.06em;color:var(--szary);margin-top:2px}
+
+.pasek{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:9px 18px;
+  border-bottom:1px solid var(--linia)}
+.grupa{display:flex;gap:3px}
+.rozdziel{width:1px;height:18px;background:var(--linia);margin:0 3px}
+button.n{background:#1a2030;color:var(--tekst);border:1px solid #2a3346;border-radius:5px;
+  padding:4px 10px;font:12px inherit;font-family:inherit;cursor:pointer;white-space:nowrap}
+button.n:hover{background:#222a3d}
+button.n.on{border-color:var(--zielony);color:var(--zielony)}
+button.n:disabled{opacity:.35;cursor:default}
+button.n.aktywny{background:#1f2b3d;border-color:var(--niebieski);color:var(--niebieski)}
+.wsk{margin-left:auto;color:var(--szary);font-size:10.5px}
+
+.uwaga{display:none;margin:9px 18px 0;padding:7px 11px;border-radius:6px;font-size:12px;
+  background:rgba(229,192,123,.10);border:1px solid #e5c07b44;color:var(--zolty)}
+.uwaga.jest{display:block}
+
+.tytul{padding:12px 18px 3px;font-size:10.5px;letter-spacing:.07em;color:var(--szary)}
+#owijka{position:relative;padding:0 18px}
+canvas{width:100%;display:block;cursor:crosshair;touch-action:none}
+#cSlupki{height:200px}#cKapital{height:330px}#cDd{height:120px}
+#dymek{position:absolute;pointer-events:none;background:#0d1117f2;border:1px solid #2a3346;
+  border-radius:6px;padding:8px 11px;font:11.5px/1.5 ui-monospace,Consolas,monospace;
+  white-space:pre;opacity:0;transition:opacity .06s;z-index:9;max-width:420px}
+.leg{display:flex;gap:15px;padding:3px 18px 0;font-size:11px;color:var(--szary);flex-wrap:wrap}
+.leg i{display:inline-block;width:11px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
+.leg b{font-weight:400;color:var(--tekst)}
+
+.tabelka{margin:6px 18px 40px;max-height:430px;overflow:auto;
+  border:1px solid #161c29;border-radius:6px}
+table{border-collapse:collapse;width:100%;min-width:900px;font-size:12.5px}
+th,td{padding:4px 10px;text-align:right;border-bottom:1px solid #161c29;
+  font-family:ui-monospace,Consolas,monospace;white-space:nowrap}
+th{position:sticky;top:0;background:#131926;color:var(--szary);font-weight:600;
+  font-family:inherit;font-size:9.5px;letter-spacing:.05em;z-index:2;cursor:pointer;user-select:none}
+th:hover{color:var(--tekst)}
+td:first-child,th:first-child{text-align:left}
+tbody tr{cursor:pointer}
+tbody tr:hover td{background:#151b28}
+tbody tr.pod td{background:rgba(74,158,255,.13)}
+.z{color:var(--zielony)}.c{color:var(--czerwony)}.g{color:var(--szary)}
+.pusto{padding:40px 18px;color:var(--szary);text-align:center}

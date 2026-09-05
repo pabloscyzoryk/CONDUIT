@@ -1,0 +1,218 @@
+/* ============================================================
+   TRYB DEMO — wirtualny broker w czasie rzeczywistym
+
+   Wszystkie kolory i odstępy z tokenów (`styles/tokens.css`), więc widok
+   działa w obu motywach i we wszystkich paletach bez żadnego „if".
+   ============================================================ */
+
+.demo__badge {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- pasek postępu ---------------- */
+.demo__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.demo__bar .meter {
+  flex: 1;
+}
+.demo__pct {
+  font-size: var(--fs-lg);
+  min-width: 5.5ch;
+  text-align: right;
+  letter-spacing: -0.02em;
+}
+
+/* WIRTUALNY ZEGAR — najważniejszy napis na tym ekranie, bo to on mówi,
+   w którym miejscu historii bot się właśnie znajduje */
+.demo__clock {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  min-height: 38px;
+}
+
+.demo__spin {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  border-top-color: transparent;
+  animation: demo-spin 0.8s linear infinite;
+}
+@keyframes demo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------------- liczby przebiegu ---------------- */
+.demo__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.demo__metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+}
+.demo__metric b {
+  font-size: var(--fs-md);
+  letter-spacing: -0.02em;
+}
+.demo__metric span {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+/* ---------------- komunikaty ---------------- */
+.demo__note,
+.demo__err,
+.demo__hintbox {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.demo__note {
+  color: var(--text-muted);
+}
+.demo__err {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  background: var(--short-soft);
+  color: var(--short-text);
+}
+.demo__hintbox {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  color: var(--text-muted);
+}
+.demo__hintbox code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-elev);
+}
+
+/* ---------------- pole pliku (drag & drop) ---------------- */
+.demo__drop {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  padding: 6px;
+  margin: -6px;
+  border-radius: var(--r-md);
+  border: 1px dashed transparent;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.demo__drop > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.demo__drop--over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ---------------- lista znalezionych plików ---------------- */
+.demo__cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--sp-4);
+}
+.demo__coltitle {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.demo__cand {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-bottom: var(--sp-2);
+  padding: 9px 11px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-inset);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.demo__cand:hover {
+  border-color: var(--accent);
+}
+.demo__cand--on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+/* plik rozpoznany, ale nienadający się do odtwarzania — widoczny, żeby
+   nikt nie szukał go w nieskończoność, ale wyraźnie przygaszony */
+.demo__cand--dim {
+  opacity: 0.72;
+}
+
+.demo__candtop {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.demo__candpath {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.demo__candmeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.demo__candnote {
+  margin-top: 5px;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.demo__roots {
+  margin-top: var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  word-break: break-all;
+}

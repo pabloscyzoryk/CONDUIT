@@ -1,0 +1,38 @@
+{
+  "aktywny": "GOD-X7-SOLO",
+  "lista": [
+    {
+      "nazwa": "GOD-X7-SOLO",
+      "opis": "Example chain: the Synergy format uses GOD-X7; all other formats are listen-only until explicitly configured.",
+      "presety": {
+        "Synergy": "GOD-X7",
+        "ATFX": "",
+        "ZEN": "",
+        "NOVA": "",
+        "PULSEX": "",
+        "TWP": "",
+        "DANGER": "",
+        "CLUB1": "",
+        "STORM": ""
+      },
+      "pulapy": {
+        "maxPozycji": 20,
+        "maxKoszykow": 6,
+        "maxLotow": 0.0,
+        "maxLotowKierunkowo": 0.0,
+        "maxRyzykoPct": 0.0,
+        "maxDdPct": 0.0,
+        "maxDdUsd": 0.0,
+        "podlogaEquityUsd": 0.0,
+        "celDniaUsd": 0.0,
+        "celDniaPct": 0.0,
+        "celDniaZamyka": false,
+        "limitStratyDniaUsd": 0.0,
+        "limitStratyDniaPct": 0.0,
+        "blokujPrzeciwneKierunki": true,
+        "pauzaPoStratachN": 0,
+        "pauzaPoStratachMin": 0.0
+      }
+    }
+  ]
+}
