@@ -82,7 +82,7 @@ impl MarketSource for Mt5Market {
             digits: c.digits,
             point: c.point,
             server_offset_ms: c.server_offset_ms(),
-            server_time: c.server_time_ms,
+            server_time: c.fresh_server_time_ms(),
             market_open: c.market_open(),
             complete: c.last_closed(),
             oldest: c.oldest(),

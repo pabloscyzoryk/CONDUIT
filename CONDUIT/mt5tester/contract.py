@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -72,6 +73,122 @@ GROUPS = [
 
 def fingerprint(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def wire_action_error(action: str, capacity: int) -> str | None:
+    """Validate generated numeric wire fields before permissive MQL conversion."""
+    kind, separator, payload = action.partition(":")
+    fields = payload.split(",")
+    if not separator or not fields[0]:
+        return "missing_action_key"
+
+    def number(index, optional=False):
+        if index >= len(fields) or not fields[index]:
+            return False
+        if optional and fields[index] == "nan":
+            return True
+        try:
+            return math.isfinite(float(fields[index]))
+        except ValueError:
+            return False
+
+    def integer(index, minimum=0):
+        return index < len(fields) and re.fullmatch(r"-?\d+", fields[index]) is not None and int(fields[index]) >= minimum
+
+    def targets(start):
+        values = fields[start:]
+        if values == [""]:
+            values = []
+        return all(number(index) for index in range(start, start + len(values)))
+
+    valid = False
+    if kind in {"ENTRY", "ENTRY2"}:
+        v2 = kind == "ENTRY2"
+        minimum = 13 if v2 else 7
+        booleans = [2, 3, 7, 9, 10, 11] if v2 else [2, 6]
+        valid = (len(fields) >= minimum and fields[1] in {"BUY", "SELL"}
+                 and all(fields[i] in {"0", "1"} for i in booleans)
+                 and all(number(i) for i in ([4, 5] if v2 else [3, 4]))
+                 and all(number(i, True) for i in ([6, 8] if v2 else [5]))
+                 and (not v2 or integer(12)) and targets(minimum))
+        if valid and v2:
+            target_count = len(fields) - minimum
+            if fields[minimum:] == [""]:
+                target_count = 0
+            if int(fields[12]) != target_count:
+                return "malformed_target_count"
+    elif kind in {"TPHIT", "TPHIT2"}:
+        valid = len(fields) == (4 if kind == "TPHIT2" else 2) and integer(1, -1)
+        if kind == "TPHIT2":
+            valid = valid and number(2, True) and fields[3] in {"0", "1"}
+    elif kind == "SPP":
+        valid = len(fields) >= 3 and number(1, True) and number(2, True) and targets(3)
+    elif kind == "RF":
+        valid = len(fields) == 2 and number(1, True)
+    elif kind == "SETSL":
+        valid = len(fields) == 2 and number(1)
+    elif kind == "TPCORR":
+        valid = len(fields) == 3 and integer(1) and number(2)
+        if valid and int(fields[1]) > capacity:
+            return "native_target_capacity"
+    elif kind in {"INFO", "SLHIT", "OAE", "CANCEL", "CLOSEALL", "PARTIALS", "BE"}:
+        valid = len(fields) == 1
+    return None if valid else "malformed_or_unsupported_action"
+
+
+def validate_bridge_capacity(bridge: Path, settings: dict, source: str) -> dict:
+    """Refuse target truncation before launching MT5; no events are filtered.
+
+    Entry target filtering is price dependent, so raw targets plus enabled runner
+    expansion form a conservative bound. SPP does not expand runner targets.
+    """
+    match = re.search(r"^\s*#define\s+MAXTP\s+(\d+)", source, re.M)
+    if not match:
+        raise ValueError("Native target capacity is not declared in the frozen source.")
+    capacity = int(match.group(1))
+    runner = max(0, int(settings.get("runner_cele_n", 0))) if settings.get("runner_cele_krok", 0) > 0 else 0
+    maximum_raw = maximum_effective = entries = spp = 0
+    errors = []
+    for line_number, line in enumerate(bridge.read_text(encoding="utf-8-sig").splitlines(), 1):
+        if not line or line.startswith("#"):
+            continue
+        actions = [action for action in line.split("|")[7:] if action]
+        if len(actions) > 12:
+            errors.append({"line": line_number, "reason": "native_action_capacity"})
+        for action in actions:
+            kind, separator, payload = action.partition(":")
+            error = wire_action_error(action, capacity)
+            if error:
+                errors.append({"line": line_number, "kind": kind, "reason": error})
+                continue
+            if not separator or kind not in {"ENTRY", "ENTRY2", "SPP"}:
+                continue
+            fields = payload.split(",")
+            if kind == "ENTRY2":
+                count = int(fields[12]) if len(fields) >= 13 else -1
+                raw_targets = fields[13:]
+                if count == 0 and raw_targets == [""]:
+                    raw_targets = []
+                if count < 0 or count != len(raw_targets) or any(not value for value in raw_targets):
+                    errors.append({"line": line_number, "kind": kind, "reason": "malformed_target_count"})
+                    continue
+            elif kind == "ENTRY":
+                count = sum(bool(value) for value in fields[7:])
+            else:
+                if settings.get("spp_keep_tp", False):
+                    continue
+                count = sum(bool(value) for value in fields[3:])
+            expansion = runner if kind in {"ENTRY", "ENTRY2"} and count else 0
+            maximum_raw = max(maximum_raw, count)
+            maximum_effective = max(maximum_effective, count + expansion)
+            entries += kind in {"ENTRY", "ENTRY2"}
+            spp += kind == "SPP"
+            if count + expansion > capacity:
+                errors.append({"line": line_number, "kind": kind, "raw_targets": count,
+                               "effective_upper_bound": count + expansion, "reason": "native_target_capacity"})
+    return {"complete": not errors, "capacity": capacity, "entry_actions": entries, "spp_actions": spp,
+            "maximum_raw_targets": maximum_raw, "maximum_effective_target_bound": maximum_effective,
+            "scope": "Preflight conservative bound; price filtering cannot excuse silent truncation.", "errors": errors}
 
 
 def build(defaults: dict, explicit: dict, source: str, bridge: str,

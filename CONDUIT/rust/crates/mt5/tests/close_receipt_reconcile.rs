@@ -116,6 +116,12 @@ impl Fixture {
                     }
                     "open_market" => json!({"retcode":10009,"deal":8888,"order":ID,
                         "position":0,"position_identifier":0,"volume":0.01,"price":4000.5}),
+                    "close_position" if extra_positions.iter().any(|p|p["ticket"]==args["ticket"]) => {
+                        let index=extra_positions.iter().position(|p|p["ticket"]==args["ticket"]).unwrap();
+                        let p=extra_positions.remove(index);
+                        json!({"retcode":10009,"deal":95000,"order":p["ticket"],"position":p["ticket"],
+                            "position_identifier":p["identifier"],"volume":p["volume"],"price":4000.5,"profit":0.5})
+                    }
                     "close_position" | "close_partial" | "probe_sl" | "probe_tp" => {
                         let mut cut = args.get("volume").and_then(Value::as_f64).unwrap_or(volume);
                         if let Some(cap) = partial_cap { cut = cut.min(cap); }
@@ -209,6 +215,7 @@ impl Fixture {
                     "probe_next_close_ack_patch" => {next_close_ack_patch=Some(args.clone());json!({})}
                     "probe_malformed_next_response" => { malformed_next_response=true; json!({}) }
                     "probe_disconnect_next_response" => { disconnect_next_response=true; json!({}) }
+                    "probe_replace_owned_snapshot" => {extra_positions=args["rows"].as_array().unwrap().clone();json!({})}
                     "probe_add_second_slot" => {
                         extra_positions.push(json!({"ticket":ID+1,"identifier":ID+1,
                             "kind":0,"volume":0.04,"price_open":4000.,"time_msc":TS-1000,
@@ -1458,4 +1465,72 @@ fn off_preserves_legacy_lost_full_attribution_and_batched_partial_behavior() {
     assert_eq!(closed.iter().map(|c|c.basket).collect::<Vec<_>>(),vec![Some(1),None,None]);
     assert_eq!(closed.iter().map(|c|c.reason).collect::<Vec<_>>(),vec![CloseReason::Partial,CloseReason::Manual,CloseReason::Manual]);
     near(f.bridge.positions()[0].volume,0.02);
+}
+
+fn sequenced_position(ticket:u64, level:i32, ts:i64, ordinal:Option<u64>) -> Value {
+    let comment=ordinal.and_then(|n|conduit_mt5::comment::encode_ordered("CD",Some(1),level,false,n,"B1"))
+        .unwrap_or_else(||format!("CD1.{level}"));
+    json!({"ticket":ticket,"identifier":ticket,"kind":0,"volume":0.01,"price_open":4000.,
+        "time_msc":ts,"sl":3990.,"tp":4010.,"magic":777,"comment":comment,"symbol":"XAUUSD"})
+}
+#[test]
+fn local_order_permutations_keep_the_same_logical_runner_in_actual_engine() {
+    for reversed in [false,true] {
+        let mut rows=vec![sequenced_position(9902,1,TS-1000,Some(1)),sequenced_position(9901,7,TS-1000,Some(2))];
+        if reversed {rows.reverse();}
+        let mut f=Fixture::new(false,0.);
+        f.call("probe_replace_owned_snapshot",json!({"rows":rows}));
+        f.bridge.refresh_state().unwrap();
+        assert_eq!(f.bridge.positions().iter().map(|p|p.level).collect::<Vec<_>>(),vec![1,7]);
+        let mut e=engine();e.baskets[0].tickets.clear();
+        e.cfg.risk_free_mode=conduit_core::settings::RiskFreeMode::CloseAllKeepNearest;e.cfg.risk_free_runners=1;
+        let q=f.bridge.quote();e.on_tick(&mut f.bridge,&q);
+        e.on_message(&mut f.bridge,&conduit_core::IncomingMessage{ts:TS,source:SourceKey::new(1,None),source_name:"fixture".into(),
+            msg_id:2,reply_to:Some(1),edit_of:None,text:"RISK FREE".into()});
+        assert_eq!(f.bridge.positions().len(),1);
+        assert_eq!(f.bridge.positions()[0].level,1,"keeper is local first unit, even when its broker ticket is numerically larger");
+        assert!(!f.bridge.local_order_sequence_incomplete());
+    }
+}
+#[test]
+fn local_order_fresh_bridge_reconcile_restores_time_order_and_next_submission_ordinal() {
+    let rows=vec![sequenced_position(9901,1,TS-1000,Some(1)),sequenced_position(9902,7,TS-2000,Some(10))];
+    for reversed in [false,true] {
+        let mut f=Fixture::new(false,0.); // fresh adapter: local counters are empty
+        let mut rows=rows.clone();if reversed {rows.reverse();}
+        f.call("probe_replace_owned_snapshot",json!({"rows":rows}));
+        f.bridge.reconcile().unwrap(); // same reconstruction path used by connect/restart
+        assert_eq!(f.bridge.positions().iter().map(|p|p.level).collect::<Vec<_>>(),vec![7,1],"actual earlier fill precedes a lower ordinal");
+        f.call("probe_valid_open",json!({}));
+        f.bridge.open_market(req()).unwrap();
+        let last=f.bridge.positions().last().unwrap();
+        assert_eq!(conduit_mt5::comment::decode("CD",&last.comment).unwrap().order_sequence,Some(11));
+        f.bridge.place_pending(conduit_core::broker::PendingReq{kind:PendingKind::BuyLimit,volume:0.01,price:3999.,
+            sl:Some(3990.),tp:Some(4010.),basket:Some(1),level:2,is_toucher:false,is_topup:false,comment:"B1".into()}).unwrap();
+        assert_eq!(conduit_mt5::comment::decode("CD",&f.bridge.pendings().last().unwrap().comment).unwrap().order_sequence,Some(12));
+    }
+}
+#[test]
+fn local_order_warm_cache_retains_proven_ordinal_when_broker_clips_comment() {
+    let mut f=Fixture::new(false,0.);
+    let ticket=f.bridge.place_pending(conduit_core::broker::PendingReq{kind:PendingKind::BuyLimit,volume:0.01,price:3999.,
+        sl:Some(3990.),tp:Some(4010.),basket:Some(1),level:2,is_toucher:false,is_topup:false,comment:"B1".into()}).unwrap();
+    f.call("cancel_pending",json!({"ticket":ticket})); // server snapshot now reports a fill instead of its old order
+    let mut row=sequenced_position(ticket,2,TS,Some(1));row["comment"]=json!("CD1.2~");
+    f.call("probe_replace_owned_snapshot",json!({"rows":[row,sequenced_position(9902,7,TS,Some(2))]}));
+    f.bridge.refresh_state().unwrap();
+    assert_eq!(conduit_mt5::comment::decode("CD",&f.bridge.positions()[0].comment).unwrap().order_sequence,Some(1));
+    assert!(!f.bridge.local_order_sequence_incomplete());
+}
+#[test]
+fn local_order_cold_legacy_or_clipped_cohort_reports_its_limit_without_guessing_ticket_order() {
+    for clipped in [false,true] {
+        let mut rows=vec![sequenced_position(9902,7,TS,None),sequenced_position(9901,1,TS,None)];
+        if clipped {rows[0]["comment"]=json!("CD1.7~2");rows[1]["comment"]=json!("CD1.1~1");}
+        let mut f=Fixture::new(false,0.);
+        f.call("probe_replace_owned_snapshot",json!({"rows":rows}));f.bridge.reconcile().unwrap();
+        assert_eq!(f.bridge.positions().iter().map(|p|p.level).collect::<Vec<_>>(),vec![7,1]);
+        assert!(f.bridge.local_order_sequence_incomplete());
+        assert!(f.bridge.close_receipt_issue().is_none(),"missing ordinal is not a fake broker receipt fault or protective trading halt");
+    }
 }

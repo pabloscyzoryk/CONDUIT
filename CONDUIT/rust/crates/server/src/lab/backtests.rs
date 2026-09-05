@@ -57,6 +57,12 @@ pub struct BacktestReq {
     pub walk_forward: i64,
     #[serde(default)]
     pub four_modes: bool,
+    /// Explicit replay of listener dedup/age; false preserves ordinary Lab history.
+    #[serde(default)]
+    pub live_telegram_ingress: bool,
+    /// None inherits the current live signal_max_age_min at job creation.
+    #[serde(default)]
+    pub live_ingress_max_age_min: Option<f64>,
 }
 
 fn domyslny_okres() -> String {
@@ -78,6 +84,8 @@ impl Default for BacktestReq {
             daily_reset: false,
             walk_forward: 0,
             four_modes: false,
+            live_telegram_ingress: false,
+            live_ingress_max_age_min: None,
         }
     }
 }
@@ -353,7 +361,17 @@ fn wczytaj_presety(dir: &Path, tylko: &str) -> anyhow::Result<Vec<Preset>> {
 }
 
 /// Publiczne wejście: startuje zadanie i wraca z jego identyfikatorem.
-pub fn start(st: &StateHandle, req: BacktestReq) -> anyhow::Result<String> {
+fn resolve_ingress_settings(req: &mut BacktestReq, settings: &serde_json::Value) -> anyhow::Result<()> {
+    if req.live_ingress_max_age_min.is_some_and(|x| !x.is_finite() || x < 0.0) {
+        anyhow::bail!("liveIngressMaxAgeMin requires finite minutes >=0 (0=off)");
+    }
+    req.live_ingress_max_age_min = Some(conduit_core::telegram_ingress::normalized_max_entry_age_min(
+        req.live_ingress_max_age_min.or_else(|| settings.get("signal_max_age_min").and_then(|x| x.as_f64()))));
+    Ok(())
+}
+
+pub fn start(st: &StateHandle, mut req: BacktestReq) -> anyhow::Result<String> {
+    resolve_ingress_settings(&mut req, &st.read(|s|s.settings.clone()))?;
     // wszystko, co da się sprawdzić PRZED uruchomieniem wątku, sprawdzamy
     // teraz — żeby błąd konfiguracji wrócił jako odpowiedź HTTP, a nie jako
     // zadanie, które zaraz padnie
@@ -558,6 +576,12 @@ impl Postep<'_> {
 
 fn licz(ctx: &JobCtx, req: BacktestReq, presety: Vec<Preset>) -> anyhow::Result<String> {
     let (ticks_path, signals_path) = super::data_paths(ctx.workspace());
+    zapisz_json(&ctx.out_dir, "ingress_contract.json", &serde_json::json!({
+        "live_telegram_ingress":req.live_telegram_ingress,
+        "live_ingress_max_age_min":req.live_ingress_max_age_min.unwrap_or(conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN),
+        "live_setting_key":"signal_max_age_min",
+        "scope":"NEW entry age only; EDIT/management and strategy pending TTL unchanged"
+    }))?;
 
     ctx.edit(true, |j| j.label = "wczytywanie ticków…".into());
     let ticks = TickData::open(&ticks_path)?;
@@ -680,6 +704,8 @@ fn licz(ctx: &JobCtx, req: BacktestReq, presety: Vec<Preset>) -> anyhow::Result<
                     super::ustaw_compounding(&mut settings, c, req.balance);
                 }
                 let cfg = RunConfig {
+                    live_telegram_ingress: req.live_telegram_ingress,
+                    live_ingress_max_age_min: req.live_ingress_max_age_min.unwrap_or(conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN),
                     from,
                     to,
                     start_balance: req.balance,
@@ -786,6 +812,8 @@ fn licz(ctx: &JobCtx, req: BacktestReq, presety: Vec<Preset>) -> anyhow::Result<
                 .map(|pr| {
                     p.results.begin(&pr.name)?;
                     let cfg = RunConfig {
+                        live_telegram_ingress: req.live_telegram_ingress,
+                        live_ingress_max_age_min: req.live_ingress_max_age_min.unwrap_or(conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN),
                         from: ta,
                         to: tb,
                         start_balance: req.balance,
@@ -819,6 +847,8 @@ fn licz(ctx: &JobCtx, req: BacktestReq, presety: Vec<Preset>) -> anyhow::Result<
                 continue;
             };
             let cfg = RunConfig {
+                live_telegram_ingress: req.live_telegram_ingress,
+                live_ingress_max_age_min: req.live_ingress_max_age_min.unwrap_or(conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN),
                 from: va,
                 to: vb,
                 start_balance: req.balance,
@@ -1625,5 +1655,28 @@ mod source_telemetry_tests {
         assert!(serialized.get("knownEntrySources").is_none());
         let cell: LabCell = serde_json::from_value(serde_json::to_value(LabCell::default()).unwrap()).unwrap();
         assert_eq!(cell.known_entry_sources, None);
+    }
+}
+
+#[cfg(test)]
+mod ingress_configuration_tests {
+    use super::*;
+    #[test]
+    fn lab_inherits_exact_live_listener_value_and_explicit_override_is_recordable() {
+        for limit in [0.,5.,30.] {
+            let mut req:BacktestReq=serde_json::from_str(r#"{"liveTelegramIngress":true}"#).unwrap();
+            resolve_ingress_settings(&mut req,&serde_json::json!({"signal_max_age_min":limit})).unwrap();
+            assert!(req.live_telegram_ingress);
+            assert_eq!(req.live_ingress_max_age_min,Some(limit));
+            assert_eq!(serde_json::to_value(&req).unwrap()["liveIngressMaxAgeMin"],limit);
+        }
+        let mut req=BacktestReq::default();
+        resolve_ingress_settings(&mut req,&serde_json::json!({})).unwrap();
+        assert!(!req.live_telegram_ingress);assert_eq!(req.live_ingress_max_age_min,Some(5.));
+        req.live_ingress_max_age_min=Some(0.);
+        resolve_ingress_settings(&mut req,&serde_json::json!({"signal_max_age_min":30})).unwrap();
+        assert_eq!(req.live_ingress_max_age_min,Some(0.));
+        req.live_ingress_max_age_min=Some(-1.);
+        assert!(resolve_ingress_settings(&mut req,&serde_json::json!({})).is_err());
     }
 }

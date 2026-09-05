@@ -61,6 +61,8 @@ pub struct RunConfig {
     /// by the VPS Telegram listener before they reach the parser/Engine.
     /// False preserves the ordinary export backtest bit-for-bit.
     pub live_telegram_ingress: bool,
+    /// Same listener max NEW age as UI signal_max_age_min; 0 disables age only.
+    pub live_ingress_max_age_min: f64,
     /// Explicitly approximate replay: raw rows are grouped into blocks of N
     /// and represented by causal BID/ASK extrema.  `1` is the exact legacy
     /// path.  This is a search/screening control, never a strategy axis.
@@ -178,6 +180,7 @@ impl Default for RunConfig {
             sim_native_swap_cash_digits: None,
             sim_trade_sessions: None,
             live_telegram_ingress: false,
+            live_ingress_max_age_min: conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN,
             quick_tick_stride: 1,
             settings: Settings::default(),
             formaty: Vec::new(),
@@ -1374,7 +1377,8 @@ pub fn run_with_progress(
                 // five-minute opening gate as `app/live.rs`.  Ordinary export
                 // replays have no publication timestamp and remain untouched.
                 if let Some(published_at) = m.telegram_published_ts {
-                    let stale = stale_entry_age_minutes(m.ts, published_at, 5.0)
+                    let stale = stale_entry_age_minutes(m.ts, published_at,
+                        conduit_core::telegram_ingress::normalized_max_entry_age_min(Some(cfg.live_ingress_max_age_min)))
                         .filter(|_| opens_basket(&m.text, m.edit_of));
                     if stale.is_some() {
                         continue;
@@ -1710,12 +1714,13 @@ pub fn run_with_progress(
         cfg.settings.stat_be_prog_usd,
     );
     metrics.qualify_fixed_lot_daily_exclusion(&daily, cfg.settings.lot_max);
+    // Final positions can remain open: Balance is not Equity. Reporting only.
+    metrics.end_balance = broker.balance;
     if reporting_credit > 0.0 {
         metrics.reporting_equity_basis = Some("own_equity_excluding_constant_credit".into());
         metrics.initial_credit = Some(reporting_credit);
         metrics.raw_broker_end_equity = Some(broker.equity());
         metrics.raw_broker_min_equity = Some(broker.min_equity);
-        metrics.end_balance = broker.balance;
         // daily_reset below intentionally replaces end_balance/end_equity by
         // the existing aggregate of independent days; raw_* stays final day.
     }
@@ -3271,6 +3276,41 @@ SL 2990"
         drop(ticks);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn configured_live_ingress_age_and_open_final_balance_are_independent() {
+        let path = std::env::temp_dir().join(format!("conduit_ingress_age_final_balance_{}.bin", std::process::id()));
+        let t0 = 1_800_000_000_000;
+        zapisz_ticki(&path, &[(t0,4005.,4005.2),(t0+1000,4005.,4005.2),
+            (t0+2000,3998.5,3998.7),(t0+3000,4001.,4001.2)]);
+        let ticks = TickData::open(&path).unwrap();
+        let mut cfg = RunConfig {from:t0,to:t0+4000,start_balance:600.,live_telegram_ingress:true,
+            curve_interval_ms:1,..Default::default()};
+        cfg.settings.msg_clock_offset_ms=Some(0);cfg.settings.server_tz_offset_ms=0;
+        cfg.settings.exec_latency_ms=0;cfg.settings.session_filter=false;
+        cfg.settings.entry_units=1;cfg.settings.market_entry_units=0;
+        cfg.settings.lot_max=0.01;cfg.settings.edycja_sieroty_nie_otwiera=false;
+        let entry=ReplayMessage {ts:t0+500,telegram_published_ts:Some(t0-10*60_000),msg_id:771,
+            reply_to:None,edit_of:None,text:"BUY LIMITS GOLD @ 3999/3998\nTP 4050\nSL 3980".into(),kanal:"Synergy".into()};
+        assert_eq!(cfg.live_ingress_max_age_min,5.0);
+        let rejected=run(&ticks,&[entry.clone()],&cfg);
+        assert_eq!(rejected.metrics.known_entry_sources,0);
+        for limit in [0.,30.] {
+            cfg.live_ingress_max_age_min=limit;
+            let accepted=run(&ticks,&[entry.clone()],&cfg);
+            assert_eq!(accepted.metrics.known_entry_sources,1,"max age {limit}");
+            assert!(accepted.metrics.max_open_positions>0,"must actually fill a broker position");
+            assert!(accepted.trades.is_empty(),"end of window does not force a close");
+            assert_eq!(accepted.metrics.end_balance,600.0);
+            assert_eq!(accepted.metrics.end_balance,accepted.balance_curve.last().unwrap().1);
+            assert!(accepted.metrics.end_equity>accepted.metrics.end_balance,"floating profit stays separate");
+            assert_eq!(accepted.metrics.end_equity,accepted.equity_curve.last().unwrap().1);
+        }
+        cfg.live_ingress_max_age_min=5.;
+        let mut edit=entry;edit.edit_of=Some(edit.msg_id);
+        assert_eq!(run(&ticks,&[edit],&cfg).metrics.known_entry_sources,1,"EDIT bypass remains unchanged");
+        drop(ticks);std::fs::remove_file(path).unwrap();
     }
 
     #[test]

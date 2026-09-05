@@ -12,6 +12,54 @@ import tick_compare
 
 
 class MappingContractTests(unittest.TestCase):
+    def test_wire_numeric_schema_preserves_none_and_rejects_accidental_zero(self):
+        for action in ['SPP:key,nan,nan,', 'SPP:key,nan,100,110,120', 'RF:key,nan', 'SETSL:key,0',
+                       'TPHIT2:key,-1,nan,1', 'TPHIT2:key,0,100,0', 'TPCORR:key,32,130',
+                       'ENTRY2:key,BUY,1,0,100,101,nan,1,nan,0,0,0,0,',
+                       'ENTRY:key,BUY,1,100,101,nan,1,']:
+            self.assertIsNone(contract.wire_action_error(action, 32), action)
+        for action in ['SPP:key,,nan,', 'RF:key,', 'SETSL:key,nan', 'SETSL:key,', 'SETSL:key,inf',
+                       'TPHIT2:key,-2,nan,0', 'TPCORR:key,33,130', 'BE:key,100',
+                       'ENTRY2:key,BUY,1,0,100,101,nan,1,nan,0,0,0,1,',
+                       'SPP:key,nan,nan,110,,120']:
+            self.assertIsNotNone(contract.wire_action_error(action, 32), action)
+
+    def test_explicit_g8i_profit_basis_never_adds_swap_twice(self):
+        self.assertEqual(compare.rust_net({'profit': 7, 'commission': -1, 'swap': -3,
+                                          'profit_basis': 'PricePlusSwap', 'net_profit': 6}), 6)
+        self.assertEqual(compare.rust_net({'profit': 10, 'commission': -1, 'swap': -3,
+                                          'profit_basis': 'PriceOnlyGross', 'net_profit': 6}), 6)
+        with self.assertRaises(ValueError):
+            compare.rust_net({'profit': 7, 'commission': -1, 'swap': -3,
+                              'profit_basis': 'PricePlusSwap', 'net_profit': 3})
+        with self.assertRaises(ValueError):
+            compare.rust_net({'profit': 7, 'commission': float('nan'), 'swap': -3,
+                              'profit_basis': 'PricePlusSwap'})
+
+    def test_native_target_preflight_bound_without_truncation(self):
+        def entry(count):
+            return 'M|1000|1|0|0||synthetic|ENTRY2:key,BUY,1,0,100,101,90,0,nan,0,0,0,' + str(count) + ',' + ','.join(str(110+i) for i in range(count))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'bridge.csv'
+            path.write_text(entry(30))
+            result = contract.validate_bridge_capacity(path, {'runner_cele_n': 2, 'runner_cele_krok': 1}, '#define MAXTP 32')
+            self.assertTrue(result['complete'])
+            self.assertEqual(result['maximum_effective_target_bound'], 32)
+            result = contract.validate_bridge_capacity(path, {'runner_cele_n': 3, 'runner_cele_krok': 1}, '#define MAXTP 32')
+            self.assertFalse(result['complete'])
+            self.assertEqual(result['errors'][0]['reason'], 'native_target_capacity')
+            path.write_text(entry(33))
+            self.assertFalse(contract.validate_bridge_capacity(path, {}, '#define MAXTP 32')['complete'])
+
+    def test_native_target_preflight_rejects_malformed_count_and_respects_inactive_spp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'bridge.csv'
+            path.write_text('M|1000|1|0|0||synthetic|ENTRY2:key,BUY,1,0,100,101,90,0,nan,0,0,0,2,110')
+            self.assertEqual(contract.validate_bridge_capacity(path, {}, '#define MAXTP 32')['errors'][0]['reason'], 'malformed_target_count')
+            path.write_text('M|1000|1|0|0||synthetic|SPP:key,nan,nan,' + ','.join(str(100+i) for i in range(33)))
+            self.assertFalse(contract.validate_bridge_capacity(path, {}, '#define MAXTP 32')['complete'])
+            self.assertTrue(contract.validate_bridge_capacity(path, {'spp_keep_tp': True}, '#define MAXTP 32')['complete'])
+
     def baseline(self):
         values = {name: False if convert is bool else "" if convert is str else 0
                   for name, _, convert in MAP}

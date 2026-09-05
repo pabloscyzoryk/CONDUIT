@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, Empty, Icon, MultiSelect } from "@/components/ui";
 import { useApp } from "@/store/AppStore";
 import { useT } from "@/i18n";
-import { time } from "@/lib/format";
+import { time, brokerTime, brokerDateTime } from "@/lib/format";
 import { SIGNAL_LABEL, SIGNAL_TONE } from "@/engine/parser";
 import type { ChatMessage, SignalType } from "@/types";
 
@@ -208,7 +208,9 @@ function Message({ m }: { m: ChatMessage }) {
           ) : (
             m.format && <span className="msg__topic">{m.format}</span>
           )}
-          <span className="msg__time num">{time(m.time)}</span>
+          <span className="msg__time num" title={m.receivedTimeUtc ? `${tt("clock.received")} ${brokerDateTime(m.receivedTimeUtc)} UTC` : undefined}>
+            {app.live ? `${brokerTime(m.time)} · ${m.timeBasis === "utc" ? "UTC" : m.timeBasis === "broker_wall" ? tt("clock.server") : tt("clock.unknown")}` : `${time(m.time)} · ${tt("clock.local")}`}
+          </span>
           {m.basketId !== null && <Badge tone="accent">B{m.basketId}</Badge>}
           {m.edited && <span className="hint">{tt("chat.edited")}</span>}
         </header>

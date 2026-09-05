@@ -5,6 +5,7 @@ import { Icon, Tooltip } from "@/components/ui";
 import { useApp } from "@/store/AppStore";
 import { useT, wiek } from "@/i18n";
 import "./cofnij.css";
+import { quoteUtcTime, quoteState } from "@/lib/clock";
 
 /** Powyżej tego wieku kwotowanie przestaje być „teraz". */
 export const PROG_ZOLTY_MS = 20_000;
@@ -23,14 +24,10 @@ export function useTykanie(ms = 5000): number {
   return teraz;
 }
 
-export type StanKwotowania = "brak" | "swieze" | "stare" | "martwe";
+export type StanKwotowania = "brak" | "nieznane" | "swieze" | "stare" | "martwe";
 
-export function stanKwotowania(czasKwotowania: number, teraz: number): StanKwotowania {
-  if (!czasKwotowania || !Number.isFinite(czasKwotowania)) return "brak";
-  const w = teraz - czasKwotowania;
-  if (w > PROG_CZERWONY_MS) return "martwe";
-  if (w > PROG_ZOLTY_MS) return "stare";
-  return "swieze";
+export function stanKwotowania(czasKwotowania: number | null, teraz: number): StanKwotowania {
+  return quoteState(czasKwotowania, teraz);
 }
 
 /** Znacznik wieku obok ceny. Przy świeżym kwotowaniu nie zajmuje miejsca. */
@@ -39,21 +36,22 @@ export function WiekKwotowania() {
   const tt = useT();
   const teraz = useTykanie();
   const q = app.primary;
-  const stan = stanKwotowania(q.time, teraz);
+  const utc = quoteUtcTime(q, app.live);
+  const stan = !q.time ? "brak" : stanKwotowania(utc, teraz);
   if (stan === "swieze") return null;
 
   const tresc =
-    stan === "brak"
+    stan === "nieznane" ? tt("clock.ageUnknown") : stan === "brak"
       ? tt("puls.quoteNone")
       : stan === "martwe"
-        ? tt("puls.quoteStale", { v: wiek(teraz - q.time) })
-        : tt("puls.quoteAge", { v: wiek(teraz - q.time) });
+        ? tt("puls.quoteStale", { v: utc === null ? tt("clock.ageUnknown") : wiek(teraz - utc) })
+        : tt("puls.quoteAge", { v: utc === null ? tt("clock.ageUnknown") : wiek(teraz - utc) });
 
   return (
     <Tooltip content={tresc}>
       <span className="puls" data-stan={stan}>
         <Icon name="clock" size={11} />
-        {stan === "brak" ? "—" : wiek(teraz - q.time)}
+        {stan === "brak" ? "—" : utc === null ? tt("clock.ageUnknown") : wiek(teraz - utc)}
       </span>
     </Tooltip>
   );
@@ -72,18 +70,19 @@ export function ZdrowieMT5() {
   const teraz = useTykanie();
   const c = app.connection;
   const q = app.primary;
-  const stan = stanKwotowania(q.time, teraz);
+  const utc = quoteUtcTime(q, app.live);
+  const stan = !q.time ? "brak" : stanKwotowania(utc, teraz);
 
   const polaczony = c.mt5 === "connected";
-  const ton = !polaczony ? "off" : stan === "martwe" || stan === "brak" ? "dead" : stan === "stare" ? "warn" : "ok";
+  const ton = !polaczony ? "off" : stan === "martwe" || stan === "brak" ? "dead" : stan === "stare" || stan === "nieznane" ? "warn" : "ok";
 
   const tresc = !polaczony
     ? tt("puls.mt5.off")
-    : ton === "dead"
-      ? tt("puls.mt5.stale", { v: stan === "brak" ? "—" : wiek(teraz - q.time) })
+    : stan === "nieznane" ? tt("clock.ageUnknown") : ton === "dead"
+      ? tt("puls.mt5.stale", { v: stan === "brak" ? "—" : utc === null ? tt("clock.ageUnknown") : wiek(teraz - utc) })
       : tt("puls.mt5.ok", {
           v: c.latencyMs,
-          q: stan === "brak" ? "—" : wiek(teraz - q.time),
+          q: stan === "brak" ? "—" : utc === null ? tt("clock.ageUnknown") : wiek(teraz - utc),
         });
 
   return (

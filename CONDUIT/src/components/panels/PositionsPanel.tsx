@@ -3,7 +3,7 @@ import { Badge, Button, Card, Checkbox, Empty, Icon, NumberInput, Tooltip } from
 import { usePotwierdzenie } from "@/components/ui/Potwierdzenie";
 import { useApp } from "@/store/AppStore";
 import { useT, t } from "@/i18n";
-import { money, num, time, toneOf } from "@/lib/format";
+import { money, num, brokerTime, time, toneOf } from "@/lib/format";
 import { potentialAt } from "@/engine/bot";
 import { isManaged, type Position, type PositionSource } from "@/types";
 import "./panels.css";
@@ -311,7 +311,7 @@ export function PositionsPanel() {
                       <div className="cell-stack">
                         <span className="num cell-strong">#{p.ticket}</span>
                         <span className="cell-sub">
-                          {time(p.openTime)}
+                          {app.live ? brokerTime(p.openTime) : time(p.openTime)}<span className="hint"> · {tt(app.live ? "clock.server" : "clock.local")}</span>
                           {p.basketId !== null && ` · B${p.basketId}`}
                           {p.toucher && " · TOUCH"}
                           {/* Symbol pokazujemy tylko tam, gdzie moze byc INNY niz

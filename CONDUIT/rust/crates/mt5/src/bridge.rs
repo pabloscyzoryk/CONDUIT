@@ -223,6 +223,40 @@ pub struct Mt5Bridge {
     pub send_failures: u64,
     /// wysłania, których wynik jest NIEZNANY (timeout) — wymagają rekoncyliacji
     pub unknown_sends: u64,
+    /// Restored from complete machine comments, never from broker ticket magnitude.
+    local_order_sequences: HashMap<Option<u32>, u64>,
+    local_order_sequence_incomplete: bool,
+}
+
+/// Within one owned basket: actual fill/placement time first, then a proven
+/// local submission ordinal for exact time ties. Missing/duplicate ordinals
+/// preserve the cohort's input order and surface an explicit migration limit.
+fn sort_local_order_cohorts<T: Clone>(rows: &mut [T], key: impl Fn(&T) -> Option<(Option<u32>, i64, Option<u64>)>) -> bool {
+    let mut groups: std::collections::BTreeMap<Option<u32>, Vec<usize>> = Default::default();
+    for (index, row) in rows.iter().enumerate() {
+        if let Some((basket, _, _)) = key(row) { groups.entry(basket).or_default().push(index); }
+    }
+    let mut incomplete = false;
+    for indices in groups.values() {
+        let mut cohort: Vec<_> = indices.iter().map(|i| rows[*i].clone()).collect();
+        if cohort.iter().any(|row|key(row).unwrap().1 <= 0) { incomplete = true; continue; }
+        cohort.sort_by_key(|row| key(row).unwrap().1);
+        let mut start = 0;
+        while start < cohort.len() {
+            let ts = key(&cohort[start]).unwrap().1;
+            let mut end = start + 1;
+            while end < cohort.len() && key(&cohort[end]).unwrap().1 == ts { end += 1; }
+            if end - start > 1 {
+                let ordinals: Option<std::collections::HashSet<_>> = cohort[start..end].iter().map(|row| key(row).unwrap().2).collect();
+                if ordinals.as_ref().is_some_and(|set|set.len() == end - start) {
+                    cohort[start..end].sort_by_key(|row|key(row).unwrap().2.unwrap());
+                } else { incomplete = true; }
+            }
+            start = end;
+        }
+        for (index, row) in indices.iter().zip(cohort) { rows[*index] = row; }
+    }
+    incomplete
 }
 
 #[derive(Default)]
@@ -347,6 +381,8 @@ impl Mt5Bridge {
             market_instead_of_limit: 0,
             send_failures: 0,
             unknown_sends: 0,
+            local_order_sequences: HashMap::new(),
+            local_order_sequence_incomplete: false,
         };
         b.refresh_quote()?;
         b.refresh_account()?;
@@ -354,6 +390,86 @@ impl Mt5Bridge {
         info!(?rep, "MT5: stan odtworzony z konta");
         b.subscribe_ticks()?;
         Ok(b)
+    }
+
+    /// True when a legacy/truncated comment prevents reconstruction of a tied
+    /// local-order cohort. Protective management remains available.
+    pub fn local_order_sequence_incomplete(&self) -> bool { self.local_order_sequence_incomplete }
+
+    fn order_sequence_warning(&mut self) {
+        if !self.local_order_sequence_incomplete {
+            warn!("MT5: local order sequence unavailable; tied legacy fills retain observed order");
+        }
+        self.local_order_sequence_incomplete = true;
+    }
+
+    fn observe_order_comment(&mut self, text: &str) {
+        if let Some(tagged) = comment::decode(&self.tag, text) {
+            if let Some(sequence) = tagged.order_sequence {
+                let current = self.local_order_sequences.entry(tagged.basket).or_insert(0);
+                *current = (*current).max(sequence);
+            }
+        }
+    }
+
+    fn ordered_comment(&mut self, basket: Option<u32>, level: i32, toucher: bool, note: &str) -> String {
+        let previous = *self.local_order_sequences.get(&basket).unwrap_or(&0);
+        if let Some(sequence) = previous.checked_add(1) {
+            self.local_order_sequences.insert(basket, sequence);
+            if let Some(text) = comment::encode_ordered(&self.tag, basket, level, toucher, sequence, note) { return text; }
+        }
+        self.order_sequence_warning();
+        comment::encode(&self.tag, basket, level, toucher, note)
+    }
+
+    fn order_position_snapshot(&mut self, raw: &mut [RawPosition], only_new: bool) {
+        for row in raw.iter_mut() {
+            if !self.is_ours(row.magic, &row.symbol) { continue; }
+            let Some(current) = comment::decode(&self.tag, &row.comment) else { continue; };
+            if current.order_sequence.is_some() { continue; }
+            // Equality here proves cached object identity; ticket magnitude never
+            // determines ordering. A cold clipped comment has no such proof.
+            let cached = self.positions.iter().find(|p|p.ticket == row.ticket).map(|p|&p.comment)
+                .or_else(||self.pendings.iter().find(|p|p.ticket == row.ticket).map(|p|&p.comment))
+                .or_else(||self.receipts.positions.get(&row.identifier).map(|p|&p.comment));
+            if let Some(text) = cached {
+                if comment::decode(&self.tag, text).is_some_and(|old|old.basket == current.basket && old.level == current.level && old.is_toucher == current.is_toucher && old.order_sequence.is_some()) {
+                    row.comment = text.clone();
+                }
+            }
+        }
+        for row in raw.iter().filter(|r| self.is_ours(r.magic, &r.symbol)).cloned().collect::<Vec<_>>() {
+            self.observe_order_comment(&row.comment);
+        }
+        let known: std::collections::HashSet<_> = if only_new { self.positions.iter().map(|p|p.ticket).collect() } else { Default::default() };
+        let incomplete = sort_local_order_cohorts(raw, |row| {
+            if !self.is_ours(row.magic, &row.symbol) || known.contains(&row.ticket) { return None; }
+            let tagged = comment::decode(&self.tag, &row.comment)?;
+            Some((tagged.basket, row.time_msc, tagged.order_sequence))
+        });
+        if incomplete { self.order_sequence_warning(); }
+    }
+
+    fn order_pending_snapshot(&mut self, raw: &mut [RawOrder]) {
+        for row in raw.iter_mut() {
+            if !self.is_ours(row.magic, &row.symbol) { continue; }
+            let Some(current) = comment::decode(&self.tag, &row.comment) else { continue; };
+            if current.order_sequence.is_some() { continue; }
+            if let Some(old) = self.pendings.iter().find(|p|p.ticket == row.ticket) {
+                if comment::decode(&self.tag, &old.comment).is_some_and(|tagged|tagged.basket == current.basket && tagged.level == current.level && tagged.is_toucher == current.is_toucher && tagged.order_sequence.is_some()) {
+                    row.comment = old.comment.clone();
+                }
+            }
+        }
+        for row in raw.iter().filter(|r| self.is_ours(r.magic, &r.symbol)).cloned().collect::<Vec<_>>() {
+            self.observe_order_comment(&row.comment);
+        }
+        let incomplete = sort_local_order_cohorts(raw, |row| {
+            if !self.is_ours(row.magic, &row.symbol) { return None; }
+            let tagged = comment::decode(&self.tag, &row.comment)?;
+            Some((tagged.basket, row.time_msc, tagged.order_sequence))
+        });
+        if incomplete { self.order_sequence_warning(); }
     }
 
     pub fn transport(&self) -> &Transport {
@@ -970,7 +1086,8 @@ impl Mt5Bridge {
 
     /// Scalenie faktów brokera z pamięcią bota. Pola bota przeżywają; pola
     /// brokera (wolumen, SL, TP, cena otwarcia) są nadpisywane, bo to on ma rację.
-    fn merge_positions(&mut self, raw: Vec<RawPosition>) {
+    fn merge_positions(&mut self, mut raw: Vec<RawPosition>) {
+        self.order_position_snapshot(&mut raw, true);
         self.remember_live_positions();
         self.observe_receipt_volumes(&raw);
         let mut seen: Vec<Ticket> = Vec::with_capacity(raw.len());
@@ -1055,7 +1172,8 @@ impl Mt5Bridge {
         self.reconcile_unknown_opens();
     }
 
-    fn merge_pendings(&mut self, raw: Vec<RawOrder>) {
+    fn merge_pendings(&mut self, mut raw: Vec<RawOrder>) {
+        self.order_pending_snapshot(&mut raw);
         let mut fresh = Vec::with_capacity(raw.len());
         let mut obce: Vec<ForeignOrder> = Vec::new();
         for r in raw {
@@ -1109,13 +1227,14 @@ impl Mt5Bridge {
         let mut rep = ReconcileReport::default();
         self.remember_live_positions();
 
-        let raw: Vec<RawPosition> = self
+        let mut raw: Vec<RawPosition> = self
             .tr
             .call_as(
                 "positions",
                 json!({ "symbol": self.sym.symbol, "all": true }),
             )
             .map_err(|e| anyhow::anyhow!("rekoncyliacja pozycji: {e}"))?;
+        self.order_position_snapshot(&mut raw, false);
         self.observe_receipt_volumes(&raw);
         self.positions.clear();
         if self.tr.config().close_receipt_reconcile { self.foreign_pos.clear(); }
@@ -1165,10 +1284,11 @@ impl Mt5Bridge {
             rep.positions += 1;
         }
 
-        let orders: Vec<RawOrder> = self
+        let mut orders: Vec<RawOrder> = self
             .tr
             .call_as("orders", json!({ "symbol": self.sym.symbol, "all": true }))
             .map_err(|e| anyhow::anyhow!("rekoncyliacja zleceń: {e}"))?;
+        self.order_pending_snapshot(&mut orders);
         self.pendings.clear();
         for r in orders {
             if !self.is_ours(r.magic, &r.symbol) {
@@ -1716,7 +1836,7 @@ impl Broker for Mt5Bridge {
         r.tp = r.tp.map(|p| self.sym.round_price(p));
         let vol = self.norm_volume(r.volume)?;
         self.precheck_stops(r.side, r.sl, r.tp)?;
-        let cm = comment::encode(&self.tag, r.basket, r.level, r.is_toucher, &r.comment);
+        let cm = self.ordered_comment(r.basket, r.level, r.is_toucher, &r.comment);
         let args = json!({
             "symbol": self.sym.symbol,
             "side": if r.side == Side::Buy { "buy" } else { "sell" },
@@ -1834,7 +1954,7 @@ impl Broker for Mt5Bridge {
             });
         }
 
-        let cm = comment::encode(&self.tag, r.basket, r.level, r.is_toucher, &r.comment);
+        let cm = self.ordered_comment(r.basket, r.level, r.is_toucher, &r.comment);
         let args = json!({
             "symbol": self.sym.symbol,
             "kind": pending_kind_code(r.kind),
@@ -2111,5 +2231,34 @@ mod tests {
             "{}",
             m.opis()
         );
+    }
+}
+
+#[cfg(test)]
+mod local_order_cohort_tests {
+    use super::*;
+    #[test]
+    fn timestamp_precedes_local_sequence_and_ties_ignore_snapshot_permutation() {
+        let key=|row:&(u64,u32,i64,Option<u64>)|Some((Some(row.1),row.2,row.3));
+        let original=vec![(99,1,20,Some(1)),(2,1,10,Some(9)),(1,1,20,Some(2))];
+        for rows in [original.clone(),original.into_iter().rev().collect()] {
+            let mut rows=rows;
+            assert!(!sort_local_order_cohorts(&mut rows,key));
+            assert_eq!(rows.iter().map(|r|r.0).collect::<Vec<_>>(),vec![2,99,1]);
+        }
+    }
+    #[test]
+    fn missing_duplicate_and_invalid_time_preserve_unproven_cohort_order() {
+        let key=|r:&(u64,i64,Option<u64>)|Some((Some(1),r.1,r.2));
+        for mut rows in [vec![(9,10,Some(2)),(1,10,None)],vec![(9,10,Some(2)),(1,10,Some(2))],
+            vec![(9,10,Some(2)),(1,0,Some(1))]] {
+            let before=rows.clone();assert!(sort_local_order_cohorts(&mut rows,key));assert_eq!(rows,before);
+        }
+    }
+    #[test]
+    fn sorting_one_basket_does_not_relocate_other_basket_or_unowned_rows() {
+        let mut rows=vec![(9,Some(1),20,2),(7,None,1,1),(8,Some(2),20,1),(1,Some(1),20,1)];
+        assert!(!sort_local_order_cohorts(&mut rows,|r|r.1.map(|b|(Some(b),r.2,Some(r.3)))));
+        assert_eq!(rows.iter().map(|r|r.0).collect::<Vec<_>>(),vec![1,7,8,9]);
     }
 }

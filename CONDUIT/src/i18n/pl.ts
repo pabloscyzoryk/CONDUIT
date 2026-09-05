@@ -2581,4 +2581,13 @@ export const PL: Record<keyof typeof EN, string> = {
   "logs.category.email": "poczta",
   "logs.category.backtests": "backtesty",
   "logs.category.logs": "logi",
+
+  "clock.server": "Czas serwera",
+  "clock.source": "Czas źródła",
+  "clock.local": "Czas lokalny",
+  "clock.unknown": "Nieznana podstawa czasu",
+  "clock.received": "Odebrano",
+  "clock.ageUnknown": "Wiek kwotowania nieznany",
+  "clock.historyAnchor": "Okres kończy się na ostatnim kwotowaniu (czas źródła).",
+  "clock.noAnchor": "Brak zegara źródła: wybierz całą historię.",
 };

@@ -133,7 +133,7 @@ fn n(v: Option<f64>) -> String {
 /// Exactly the runner's pre-engine LIVE gate, before Info records are removed.
 /// The memory key namespace is arbitrary for this single-source bridge; all
 /// messages use the same namespace, as the single-preset replay runner does.
-fn pass_live_ingress(m: &ReplayMessage, memory: &mut ContentMemory) -> bool {
+fn pass_live_ingress(m: &ReplayMessage, memory: &mut ContentMemory, max_age_min: f64) -> bool {
     if m.kanal == "__CONDUIT_CONTROL__"
         && m.text == "__CONDUIT_LIVEBACKTEST_INGRESS_RESTART__"
     {
@@ -153,7 +153,7 @@ fn pass_live_ingress(m: &ReplayMessage, memory: &mut ContentMemory) -> bool {
         return false;
     }
     !m.telegram_published_ts.is_some_and(|published| {
-        stale_entry_age_minutes(m.ts, published, 5.0).is_some()
+        stale_entry_age_minutes(m.ts, published, max_age_min).is_some()
             && opens_basket(&m.text, m.edit_of)
     })
 }
@@ -172,6 +172,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut preset = String::new();
     let mut live_telegram_ingress = false;
+    let mut live_ingress_max_age_min = conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN;
     let mut trade_sessions = None;
     let mut exec_latency_ms = conduit_core::settings::Settings::default().exec_latency_ms;
     let mut i = 0;
@@ -190,6 +191,12 @@ fn main() -> Result<()> {
             "--kanal" => tylko_kanal = next(),
             "--preset" => preset = next(),
             "--live-telegram-ingress" => live_telegram_ingress = true,
+            "--live-ingress-max-age-min" => {
+                live_ingress_max_age_min = next().parse()?;
+                if !live_ingress_max_age_min.is_finite() || live_ingress_max_age_min < 0.0 {
+                    anyhow::bail!("--live-ingress-max-age-min requires finite minutes >=0 (0=off)");
+                }
+            },
             "--sim-trade-sessions" => {
                 trade_sessions = Some(conduit_backtest::trade_sessions::TradeSessionProfile::load(std::path::Path::new(&next()))?);
             }
@@ -237,10 +244,10 @@ fn main() -> Result<()> {
     )?;
     writeln!(
         f,
-        "# CONTRACT schema={} dedup_value={} live_telegram_ingress={}",
+        "# CONTRACT schema={} dedup_value={} live_telegram_ingress={} live_ingress_max_age_min={}",
         wire_schema.number(),
         if dedup_value_aware { 1 } else { 0 },
-        if live_telegram_ingress { 1 } else { 0 }
+        if live_telegram_ingress { 1 } else { 0 }, live_ingress_max_age_min
     )?;
     writeln!(f, "# zrodlo={signals}")?;
     if let Some(profile) = &trade_sessions {
@@ -286,7 +293,7 @@ fn main() -> Result<()> {
         if effective_ts < from || effective_ts >= to {
             continue;
         }
-        if live_telegram_ingress && !pass_live_ingress(m, &mut ingress) {
+        if live_telegram_ingress && !pass_live_ingress(m, &mut ingress, live_ingress_max_age_min) {
             ingress_dropped += 1;
             continue;
         }
@@ -411,17 +418,17 @@ mod tests {
             text: "TP1 HIT".into(), kanal: "Synergy".into(),
             ..Default::default()
         };
-        assert!(pass_live_ingress(&m, &mut memory));
-        assert!(!pass_live_ingress(&m, &mut memory));
+        assert!(pass_live_ingress(&m, &mut memory, 5.0));
+        assert!(!pass_live_ingress(&m, &mut memory, 5.0));
         m.edit_of = None;
-        assert!(pass_live_ingress(&m, &mut memory));
+        assert!(pass_live_ingress(&m, &mut memory, 5.0));
         let restart = ReplayMessage {
             kanal: "__CONDUIT_CONTROL__".into(),
             text: "__CONDUIT_LIVEBACKTEST_INGRESS_RESTART__".into(),
             ..Default::default()
         };
-        assert!(!pass_live_ingress(&restart, &mut memory));
-        assert!(pass_live_ingress(&m, &mut memory));
+        assert!(!pass_live_ingress(&restart, &mut memory, 5.0));
+        assert!(pass_live_ingress(&m, &mut memory, 5.0));
     }
 
     #[test]
@@ -433,10 +440,10 @@ mod tests {
             ..Default::default()
         };
         assert!(opens_basket(&m.text, None));
-        assert!(!pass_live_ingress(&m, &mut memory));
+        assert!(!pass_live_ingress(&m, &mut memory, 5.0));
         m.edit_of = Some(101);
         m.text = "MOVE SL TO 2088".into();
-        assert!(pass_live_ingress(&m, &mut memory));
+        assert!(pass_live_ingress(&m, &mut memory, 5.0));
     }
 
     fn parsed_entry(text: &str) -> EntrySignal {
@@ -513,5 +520,21 @@ mod tests {
         assert!(!key.contains('|'));
         assert!(!key.contains(','));
         assert_eq!(key, wire_action_key(&s, true));
+    }
+}
+
+#[cfg(test)]
+mod configurable_age_tests {
+    use super::*;
+    #[test]
+    fn bridge_listener_age_matches_zero_five_thirty_and_old_edit() {
+        let base=1_800_000_000_000;
+        let mut m=ReplayMessage {ts:base,telegram_published_ts:Some(base-600000),msg_id:7,
+            text:"BUY LIMIT GOLD @ 2000/1999 SL 1990 TP 2020".into(),kanal:"Synergy".into(),..Default::default()};
+        for (limit,expected) in [(0.,true),(5.,false),(30.,true)] {
+            assert_eq!(pass_live_ingress(&m,&mut ContentMemory::new(),limit),expected);
+        }
+        m.edit_of=Some(7);
+        assert!(pass_live_ingress(&m,&mut ContentMemory::new(),5.));
     }
 }

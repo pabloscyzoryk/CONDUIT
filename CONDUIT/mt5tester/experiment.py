@@ -43,6 +43,7 @@ def main():
                         help="Optional immutable MQ5 source snapshot; defaults to the canonical expert.")
     parser.add_argument("--native-detail-from-ms", type=int, default=0)
     parser.add_argument("--native-detail-to-ms", type=int, default=0)
+    parser.add_argument("--tester-port", type=int, help="Local agent port; parallel runs require separate portable sandboxes.")
     parser.add_argument("--timeout", type=int, default=10800,
                         help="Per-process ceiling in seconds; full native windows can exceed 30 minutes.")
     args = parser.parse_args()
@@ -89,6 +90,10 @@ def main():
     if args.trade_sessions:
         command.extend(["--sim-trade-sessions", str(args.trade_sessions.resolve(strict=True))])
     invoke(command, output, "bridge", args.timeout)
+    capacity = contract.validate_bridge_capacity(bridge, settings, source_bytes.decode("utf-8-sig"))
+    (output / "target_capacity.json").write_text(json.dumps(capacity, indent=2), encoding="utf-8")
+    if not capacity["complete"]:
+        raise ValueError("Native target capacity is insufficient; no tester execution was started.")
     (common / "bridge.csv").write_bytes(bridge.read_bytes())
     native = output / "native"
     native.mkdir()
@@ -114,7 +119,7 @@ def main():
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(invoke, rust_command, output, "rust", args.timeout)
             portable.run_test(sandbox, native, "CONDUIT_XT", args.symbol, args.start, args.end,
-                              args.deposit, args.leverage, parameters, args.timeout)
+                              args.deposit, args.leverage, parameters, args.timeout, args.tester_port)
             future.result()
     ledger = native / "diagnostics.csv"
     ledger.write_bytes((common / "diagnostics.csv").read_bytes())
@@ -134,6 +139,7 @@ def main():
                   "symbol": args.symbol, "deposit": args.deposit, "leverage": args.leverage,
                   "live_telegram_ingress": args.live_telegram_ingress,
                   "native_swap_cash_digits": args.native_swap_cash_digits,
+                  "tester_port": args.tester_port,
                   "new_pending_sl_next_tick": args.new_pending_sl_next_tick,
                   "limit_price_improvement": args.limit_price_improvement, "price_digits": args.price_digits,
                   "clock_offset_ms": offset, "settings": contract.fingerprint(effective),

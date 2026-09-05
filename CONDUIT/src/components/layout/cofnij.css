@@ -199,3 +199,5 @@
 
 
 
+
+.puls[data-stan="nieznane"] { color: var(--warn); }

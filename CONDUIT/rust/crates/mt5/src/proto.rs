@@ -425,8 +425,8 @@ impl Bar {
 /// `Bar::t` jest w czasie SERWERA BROKERA (Vantage: UTC+3), podanym jako
 /// epoka w milisekundach — DOKŁADNIE tak samo jak `RawTick::ts`. To nie jest
 /// przeoczenie, tylko warunek tego, żeby świeca bieżąca i kwotowanie trafiały
-/// do tego samego kubełka czasu. Kto potrzebuje UTC, odejmuje
-/// `server_time_ms - utc_time_ms`.
+/// do tego samego kubełka czasu. Metadane offsetu wymagają świeżej pary
+/// zaobserwowanego postępu ticka i UTC; stary tick nie określa czasu teraz.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Candles {
     pub symbol: String,
@@ -437,19 +437,44 @@ pub struct Candles {
     pub bar_ms: i64,
     pub digits: u32,
     pub point: f64,
-    /// czas serwera brokera w chwili odpowiedzi; `None`, gdy nie było kwotowania
+    /// Surowy czas ostatniego ticka; może pochodzić z poprzedniej sesji.
     #[serde(default)]
     pub server_time_ms: Option<i64>,
-    /// czas UTC maszyny w tej samej chwili — różnica daje przesunięcie zegara
+    /// UTC przygotowania odpowiedzi, nie chwili powstania starego ticka.
     pub utc_time_ms: i64,
+    /// UTC obserwacji postępu time_msc w bieżącym kontekście konta/symbolu.
+    /// Pierwszy cached tick i starszy sidecar nie dostarczają tego dowodu.
+    #[serde(default)]
+    pub quote_observed_utc_ms: Option<i64>,
+    /// Wiek tego postępu zmierzony zegarem monotonicznym sidecara.
+    #[serde(default)]
+    pub quote_observation_age_ms: Option<i64>,
     pub bars: Vec<Bar>,
 }
 
 impl Candles {
-    /// Przesunięcie zegara brokera wobec UTC, w ms. `None`, gdy nie znamy
-    /// czasu serwera (brak kwotowania — rynek zamknięty albo martwy symbol).
+    /// Ostatni tick tylko z dowodem postępu nie starszym niż30s.
+    /// Obie domeny czasu muszą być spójne: skok zegara UTC unieważnia dowód.
+    pub fn fresh_server_time_ms(&self) -> Option<i64> {
+        let age = self.quote_observation_age_ms?;
+        let wall_age = self.utc_time_ms.checked_sub(self.quote_observed_utc_ms?)?;
+        if !(0..=30_000).contains(&age) || !(0..=30_000).contains(&wall_age) {
+            return None;
+        }
+        self.server_time_ms
+    }
+
+    /// Przesunięcie wyłącznie ze świeżej, sparowanej obserwacji tick/UTC.
+    /// Nie odejmujemy obecnego UTC od ticka sprzed zamknięcia rynku.
     pub fn server_offset_ms(&self) -> Option<i64> {
-        self.server_time_ms.map(|s| s - self.utc_time_ms)
+        self.fresh_server_time_ms()?.checked_sub(self.quote_observed_utc_ms?)
+    }
+
+    /// Czas spędzony w cache również postarza dowód świeżości.
+    pub(crate) fn age_clock_by(&mut self, elapsed: std::time::Duration) {
+        let ms = elapsed.as_millis().min(i64::MAX as u128) as i64;
+        self.utc_time_ms = self.utc_time_ms.saturating_add(ms);
+        self.quote_observation_age_ms = self.quote_observation_age_ms.map(|a| a.saturating_add(ms));
     }
 
     /// Czas otwarcia najstarszej zwróconej świecy — kursor do doładowania.
@@ -480,8 +505,9 @@ impl Candles {
     /// potrafi się nie utworzyć przy braku ticków — a „rynek zamknięty"
     /// wyświetlone w środku sesji jest gorsze niż spóźnione o trzy minuty.
     pub fn market_open(&self) -> bool {
-        match (self.newest(), self.server_time_ms) {
-            (Some(t), Some(now)) => now - t < 3 * self.bar_ms,
+        match (self.newest(), self.fresh_server_time_ms()) {
+            (Some(t), Some(now)) if self.bar_ms > 0 => now.checked_sub(t)
+                .map(|age| age >= 0 && age < self.bar_ms.saturating_mul(3)).unwrap_or(false),
             _ => false,
         }
     }
@@ -845,6 +871,7 @@ mod tests {
         let v: Candles = serde_json::from_str(
             r#"{"symbol":"XAUUSD","tf":"M5","bar_ms":300000,"digits":2,"point":0.01,
                 "server_time_ms":1785338162980,"utc_time_ms":1785327361425,
+                "quote_observed_utc_ms":1785327361425,"quote_observation_age_ms":0,
                 "bars":[[1785337800000,4029.93,4030.95,4026.18,4027.0,1594,23],
                         [1785338100000,4027.01,4027.48,4025.83,4027.12,510,23]]}"#,
         )
@@ -870,6 +897,8 @@ mod tests {
             point: 0.01,
             server_time_ms: Some(teraz),
             utc_time_ms: 0,
+            quote_observed_utc_ms: Some(0),
+            quote_observation_age_ms: Some(0),
             bars: vec![Bar(ostatnia, 1.0, 1.0, 1.0, 1.0, 1, 1)],
         };
         // świeca zaczęta minutę temu: żyje i nie jest domknięta
@@ -884,6 +913,55 @@ mod tests {
         let mut n = mk(1_000_000, 0);
         n.server_time_ms = None;
         assert!(!n.market_open());
+    }
+
+    #[test]
+    fn cached_or_legacy_quote_never_claims_a_current_clock() {
+        let legacy = r#"{"symbol":"SYN","tf":"M1","bar_ms":60000,"digits":2,"point":0.01,
+            "server_time_ms":10861000,"utc_time_ms":86461000,
+            "bars":[[10860000,100,101,99,100,1,1]]}"#;
+        let mut c: Candles = serde_json::from_str(legacy).unwrap();
+        // Previously this Friday quote on Saturday yielded -21h and open=true.
+        assert_eq!(c.server_offset_ms(), None);
+        assert!(!c.market_open());
+        c.quote_observed_utc_ms = Some(61_000);
+        c.quote_observation_age_ms = Some(86_400_000);
+        assert_eq!(c.fresh_server_time_ms(), None);
+        assert!(!c.market_open());
+    }
+
+    #[test]
+    fn observed_quote_offset_uses_paired_utc_and_cache_age_expires_it() {
+        let mut c: Candles = serde_json::from_str(r#"{
+            "symbol":"SYN","tf":"M1","bar_ms":60000,"digits":2,"point":0.01,
+            "server_time_ms":10861000,"utc_time_ms":62000,
+            "quote_observed_utc_ms":61000,"quote_observation_age_ms":1000,
+            "bars":[[10860000,100,101,99,100,1,1]]}"#).unwrap();
+        assert_eq!(c.server_offset_ms(), Some(10_800_000));
+        assert!(c.market_open());
+        c.age_clock_by(std::time::Duration::from_secs(29));
+        assert_eq!(c.server_offset_ms(), Some(10_800_000));
+        c.age_clock_by(std::time::Duration::from_millis(1));
+        assert_eq!(c.server_offset_ms(), None);
+        assert!(!c.market_open());
+        // This applies equally to 10-minute history cache and 800ms current cache.
+        assert_eq!(c.server_time_ms, Some(10_861_000), "raw time is never rewritten");
+    }
+
+    #[test]
+    fn clock_discontinuity_and_future_bar_fail_closed_in_metadata() {
+        let mut c: Candles = serde_json::from_str(r#"{
+            "symbol":"SYN","tf":"M1","bar_ms":60000,"digits":2,"point":0.01,
+            "server_time_ms":10861000,"utc_time_ms":60000,
+            "quote_observed_utc_ms":61000,"quote_observation_age_ms":0,
+            "bars":[[10860000,100,101,99,100,1,1]]}"#).unwrap();
+        assert_eq!(c.server_offset_ms(), None);
+        assert!(!c.market_open());
+        c.utc_time_ms = 61_000;
+        c.bars[0].0 = 10_862_000;
+        assert!(!c.market_open(), "bar from future is not a market-open proof");
+        c.quote_observation_age_ms = Some(-1);
+        assert_eq!(c.server_offset_ms(), None);
     }
 
     #[test]

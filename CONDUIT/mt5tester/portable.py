@@ -103,10 +103,13 @@ def compile_expert(sandbox: Path, expert: str, output: Path, source_bytes: bytes
 
 
 def run_test(sandbox: Path, output: Path, expert: str, symbol: str, start: str, end: str,
-             deposit: float, leverage: int, parameters: dict, timeout: int) -> dict:
+             deposit: float, leverage: int, parameters: dict, timeout: int,
+             tester_port: int | None = None) -> dict:
     context = validate_sandbox(sandbox)
     if deposit <= 0 or leverage <= 0:
         raise ValueError("Deposit and leverage must be positive.")
+    if tester_port is not None and (type(tester_port) is not int or not 1 <= tester_port <= 65535):
+        raise ValueError("Local tester port must be an integer from 1 to 65535.")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", symbol):
         raise ValueError("Invalid symbol name.")
     if date.fromisoformat(start) >= date.fromisoformat(end):
@@ -153,6 +156,7 @@ Report={report_name}
 ReplaceReport=0
 ShutdownTerminal=1
 Visual=0
+{('Port=' + str(tester_port)) if tester_port is not None else ''}
 UseLocal=1
 UseRemote=0
 UseCloud=0
@@ -190,6 +194,7 @@ UseCloud=0
                 "deposit": deposit, "leverage": leverage, "elapsed_seconds": time.time() - started,
                 "terminal_exit_code": result.returncode, "report": fingerprint(report) if fresh_report else None,
                 "broker_specs": list(dict.fromkeys(specs)), "model": "every_tick_based_on_real_ticks"}
+    manifest["tester_port"] = tester_port
     (output / "native_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if not fresh_report:
         raise RuntimeError("Tester produced no fresh report. Inspect private tester diagnostics and sandbox logs.")
@@ -209,6 +214,7 @@ def main():
     parser.add_argument("--leverage", type=int, default=500)
     parser.add_argument("--parameters", type=Path, help="JSON object of explicit expert inputs.")
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--tester-port", type=int, help="Distinct local agent port for a separate portable sandbox.")
     args = parser.parse_args()
     sandbox = args.sandbox.resolve(strict=True)
     output = args.out.resolve()
@@ -221,7 +227,7 @@ def main():
         if not args.compile_only:
             parameters = json.loads(args.parameters.read_text(encoding="utf-8")) if args.parameters else {}
             print(json.dumps(run_test(sandbox, output, args.expert, args.symbol, args.start, args.end,
-                                     args.deposit, args.leverage, parameters, args.timeout)), flush=True)
+                                     args.deposit, args.leverage, parameters, args.timeout, args.tester_port)), flush=True)
 
 
 if __name__ == "__main__":

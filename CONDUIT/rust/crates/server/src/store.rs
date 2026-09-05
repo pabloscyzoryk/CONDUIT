@@ -1024,6 +1024,7 @@ mod tests {
             source: ui::Origin::Bot,
         });
         s.messages.push(ui::ChatMessage {
+            time_basis: None, received_time_utc: None,
             id: "m1".into(),
             time: 1_700_000_000_000,
             channel_id: -100123,

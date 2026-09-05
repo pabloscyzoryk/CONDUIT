@@ -83,6 +83,10 @@ pub struct DemoConfig {
     pub signals_to: String,
     /// `false` = graj wyłącznie na sygnałach wysyłanych ręcznie z panelu
     pub use_file_signals: bool,
+    /// Opt-in listener replay for file messages; manual injection is current.
+    pub live_telegram_ingress: bool,
+    /// None inherits the live signal_max_age_min at demo start.
+    pub live_ingress_max_age_min: Option<f64>,
 
     /// mnożnik odtwarzania: 1, 10, 60… `0` = maksymalna prędkość
     pub speed: f64,
@@ -113,6 +117,8 @@ impl Default for DemoConfig {
             signals_from: String::new(),
             signals_to: String::new(),
             use_file_signals: true,
+            live_telegram_ingress: false,
+            live_ingress_max_age_min: None,
             speed: 60.0,
             seed: 1,
             synth_start_price: 4118.0,
@@ -132,6 +138,9 @@ impl DemoConfig {
     /// („saldo poza zakresem, wziąłem 200") byłaby gorsza niż odmowa: człowiek
     /// zobaczyłby wynik przebiegu, którego nie zamawiał.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.live_ingress_max_age_min.is_some_and(|x| !x.is_finite() || x < 0.0) {
+            anyhow::bail!("liveIngressMaxAgeMin requires finite minutes >=0 (0=off)");
+        }
         if !self.balance.is_finite() || self.balance < 0.0 {
             anyhow::bail!("saldo startowe musi być liczbą ≥ 0");
         }
@@ -711,9 +720,22 @@ pub fn try_command(st: &StateHandle, cmd: &crate::proto::Command) -> Option<anyh
 //  PĘTLA ODTWARZANIA
 // ============================================================
 
+fn demo_file_ingress(m: &conduit_backtest::ReplayMessage, im: &IncomingMessage,
+    memory: &mut conduit_core::telegram_ingress::ContentMemory, max_age: f64) -> bool {
+    use conduit_core::telegram_ingress::{ContentMemory, opens_basket, stale_entry_age_minutes};
+    if m.kanal == "__CONDUIT_CONTROL__" && m.text == "__CONDUIT_LIVEBACKTEST_INGRESS_RESTART__" {
+        *memory=ContentMemory::new();return false;
+    }
+    !memory.duplikat_tresci(im) && !m.telegram_published_ts.is_some_and(|published|
+        stale_entry_age_minutes(m.ts,published,max_age).is_some() && opens_basket(&m.text,m.edit_of))
+}
+
 fn petla(st: &StateHandle, cfg: &DemoConfig, cancel: &Arc<AtomicBool>) -> anyhow::Result<String> {
     // ---------- konfiguracja silnika: dokładnie ta z panelu ----------
     let (doc, lot) = st.read(|s| (s.settings.clone(), s.lot.clone()));
+    let max_entry_age = conduit_core::telegram_ingress::normalized_max_entry_age_min(
+        cfg.live_ingress_max_age_min.or_else(|| doc.get("signal_max_age_min").and_then(|x|x.as_f64())));
+    let mut ingress_memory = conduit_core::telegram_ingress::ContentMemory::new();
     let mut core = settings_map::core_from_ui(&doc);
     core.lot_mode_percent = lot.mode == "percent";
     core.lot_fixed = lot.fixed;
@@ -941,6 +963,9 @@ fn petla(st: &StateHandle, cfg: &DemoConfig, cancel: &Arc<AtomicBool>) -> anyhow
                     edit_of: m.edit_of,
                     text: m.text.clone(),
                 };
+                if cfg.live_telegram_ingress && !demo_file_ingress(m, &im, &mut ingress_memory, max_entry_age) {
+                    continue;
+                }
                 engine.on_message(&mut broker, &im);
                 bufor.push(wiadomosc_ui(
                     q.ts,
@@ -1152,6 +1177,7 @@ fn opublikuj(
         .collect();
 
     let kwotowanie = ui::Quote {
+        time_basis: None, time_utc: None,
         symbol: SYMBOL.into(),
         bid: q.bid,
         ask: q.ask,
@@ -1274,7 +1300,7 @@ pub fn wiadomosc_ui(
     let parsed = parsuj(text);
     let types: Vec<String> = parsed.iter().map(|p| p.kind.clone()).collect();
     ui::ChatMessage {
-        id,
+        time_basis: None, received_time_utc: None,        id,
         time: ts,
         channel_id,
         channel_name: channel.to_string(),
@@ -1849,5 +1875,26 @@ mod tests {
         ] {
             assert!(s.contains(x), "sekcja {x:?} nie jest publikowana");
         }
+    }
+}
+
+#[cfg(test)]
+mod listener_age_tests {
+    use super::*;
+    #[test]
+    fn demo_file_gate_uses_configured_age_and_preserves_edit_and_dedup_rules() {
+        let base=1_800_000_000_000;
+        let mut m=conduit_backtest::ReplayMessage {ts:base,telegram_published_ts:Some(base-600000),msg_id:7,
+            text:"BUY LIMIT GOLD @ 2000/1999 SL 1990 TP 2020".into(),kanal:"Synergy".into(),..Default::default()};
+        let mut im=IncomingMessage {ts:base+10800000,source:SourceKey::new(-100,None),source_name:"Synthetic".into(),
+            msg_id:7,reply_to:None,edit_of:None,text:m.text.clone()};
+        for (limit,passes) in [(0.,true),(5.,false),(30.,true)] {
+            let mut memory=conduit_core::telegram_ingress::ContentMemory::new();
+            assert_eq!(demo_file_ingress(&m,&im,&mut memory,limit),passes);
+            assert!(!demo_file_ingress(&m,&im,&mut memory,limit));
+        }
+        m.edit_of=Some(7);im.edit_of=Some(7);
+        assert!(demo_file_ingress(&m,&im,&mut conduit_core::telegram_ingress::ContentMemory::new(),5.));
+        assert!(!DemoConfig::default().live_telegram_ingress,"legacy demo remains opt-in");
     }
 }

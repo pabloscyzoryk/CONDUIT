@@ -763,23 +763,16 @@ function niceEvery(x: number): number {
   return Math.ceil(x / 1440) * 1440;
 }
 
-/**
- * Data do PODPISU osi czasu.
- *
- * `clockOffsetMs` to roznica miedzy zegarem swiec a zegarem przegladarki.
- * Swiece z MT5 ida w czasie serwera brokera (dzis UTC+3); `Date` czyta epoke
- * w strefie uzytkownika i dokladalby ja PONOWNIE, wiec bez korekty podpis
- * „14:35" oznaczalby zupelnie inna swiece niz ta, na ktora patrzysz.
- */
+/** UTC getters preserve broker wall-clock labels; explicit offsets never depend on browser DST. */
 export const labelDate = (t: number, clockOffsetMs = 0) => new Date(t + clockOffsetMs);
 
 const TF_LABEL: Record<Timeframe, (d: Date) => string> = {
-  "1m": (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
-  "5m": (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
-  "15m": (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
-  "1h": (d) => `${String(d.getHours()).padStart(2, "0")}:00`,
-  "4h": (d) => `${d.getDate()}.${d.getMonth() + 1} ${String(d.getHours()).padStart(2, "0")}h`,
-  "1d": (d) => `${d.getDate()}.${String(d.getMonth() + 1).padStart(2, "0")}`,
+  "1m": (d) => `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`,
+  "5m": (d) => `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`,
+  "15m": (d) => `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`,
+  "1h": (d) => `${String(d.getUTCHours()).padStart(2, "0")}:00`,
+  "4h": (d) => `${d.getUTCDate()}.${d.getUTCMonth() + 1} ${String(d.getUTCHours()).padStart(2, "0")}h`,
+  "1d": (d) => `${d.getUTCDate()}.${String(d.getUTCMonth() + 1).padStart(2, "0")}`,
 };
 
 /**
@@ -799,7 +792,7 @@ function timeAxis(
   // przy bardzo szerokich swiecach warto dolozyc date — inaczej „14:35" wisi bez kontekstu
   const wide = g.barW > 130 && (tf === "1m" || tf === "5m" || tf === "15m" || tf === "1h");
   const base = TF_LABEL[tf];
-  const fmt = wide ? (d: Date) => `${d.getDate()}.${String(d.getMonth() + 1).padStart(2, "0")} ${base(d)}` : base;
+  const fmt = wide ? (d: Date) => `${d.getUTCDate()}.${String(d.getUTCMonth() + 1).padStart(2, "0")} ${base(d)}` : base;
   const sample = fmt(labelDate(candles[Math.max(0, g.last - 1)]?.t ?? Date.now(), clockOffsetMs));
   const need = measure(sample) + 26;
   return { every: niceEvery(need / Math.max(0.01, g.barW)), slotMs, fmt };

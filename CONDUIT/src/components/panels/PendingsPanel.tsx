@@ -3,7 +3,7 @@ import { Badge, Button, Card, Empty, Icon, NumberInput, Tooltip } from "@/compon
 import { usePotwierdzenie } from "@/components/ui/Potwierdzenie";
 import { useApp } from "@/store/AppStore";
 import { useT } from "@/i18n";
-import { money, num, time } from "@/lib/format";
+import { money, num, brokerTime, time } from "@/lib/format";
 import { potentialAt } from "@/engine/bot";
 import { isManaged } from "@/types";
 import { odmiana, SourceTag } from "./PositionsPanel";
@@ -102,7 +102,7 @@ export function PendingsPanel() {
                       <div className="cell-stack">
                         <span className="num cell-strong">#{o.ticket}</span>
                         <span className="cell-sub">
-                          {time(o.placedTime)}
+                          {app.live ? brokerTime(o.placedTime) : time(o.placedTime)}<span className="hint"> · {tt(app.live ? "clock.server" : "clock.local")}</span>
                           {o.basketId !== null && ` · B${o.basketId}`}
                           {o.comment.includes("TOUCH") && " · TOUCH"}
                           {!managed && o.symbol && ` · ${o.symbol}`}

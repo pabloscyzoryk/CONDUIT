@@ -27,6 +27,19 @@ def rust_net(trade: dict) -> float:
     if not math.isfinite(profit):
         raise ValueError("Non-finite Rust closed profit.")
     basis = trade.get("profit_basis")
+    if basis in {"PricePlusSwap", "PriceOnlyGross"}:
+        # Explicit producer contract in the G8i reporting schema. Swap is already
+        # included only for PricePlusSwap; never infer the basis from its sign.
+        commission, swap = trade.get("commission", 0), trade.get("swap", 0)
+        if any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
+               for value in (commission, swap)) or trade.get("cost_receipt") is not None:
+            raise ValueError("Invalid explicit Rust price/cost basis.")
+        net = profit + commission + (swap if basis == "PriceOnlyGross" else 0)
+        reported = trade.get("net_profit", net)
+        if not isinstance(reported, (int, float)) or isinstance(reported, bool) or not math.isfinite(net) \
+                or not math.isfinite(reported) or abs(reported-net) > max(abs(net), 1.0)*1e-12:
+            raise ValueError("Explicit Rust net export does not reconcile with its producer basis.")
+        return net
     if basis in {None, "LegacySourceDefined"}:
         if trade.get("cost_receipt") is not None or trade.get("commission", 0) != 0:
             raise ValueError("Unsupported legacy SimBroker cost schema; explicit receipt is required.")

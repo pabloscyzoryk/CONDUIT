@@ -1106,6 +1106,7 @@ export function TradingChart({
           </span>
         )}
 
+        <span className="hint">{zrodlo === "MT5" ? t("clock.server") : "UTC"}</span>
         <div className="chart__tfs">
           {TIMEFRAMES.map((t) => (
             <button key={t} className="chart__tf" data-active={t === tf} onClick={() => setTf(t)}>

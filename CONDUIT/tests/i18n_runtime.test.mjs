@@ -118,6 +118,8 @@ test('existing dynamic notifications also follow the current display language', 
   assert.equal(tSilnik('Brak połączenia z MT5'), 'No connection to MT5');
   i18n.setLanguage('pl');
   assert.equal(tSilnik('No connection to MT5'), 'Brak połączenia z MT5');
+  assert.equal(tSilnik('MT5: local order sequence unavailable; tied legacy fills retain observed order'),
+    'MT5: kolejność lokalnych zleceń niedostępna; remisy starych filli zachowują kolejność obserwacji');
   assert.equal(tSilnik('FAST ADDON: TP 3994.00 is beyond the market; no order sent and capacity remains available'),
     'DOKŁADKA TEMPOWA: TP 3994.00 jest już za rynkiem; zlecenie nie zostało wysłane, slot pozostaje dostępny');
   assert.equal(tSilnik('ENTRY EDIT: first complete protected source evaluated at receive time'),

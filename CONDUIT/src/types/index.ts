@@ -49,6 +49,8 @@ export interface Candle {
 export type Timeframe = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 
 export interface Quote {
+  timeBasis?: "broker_wall" | "utc" | null;
+  timeUtc?: number | null;
   symbol: string;
   bid: number;
   ask: number;
@@ -406,6 +408,8 @@ export interface ParsedSignal {
 }
 
 export interface ChatMessage {
+  timeBasis?: "broker_wall" | "utc" | null;
+  receivedTimeUtc?: number | null;
   id: string;
   time: number;
   channelId: number;

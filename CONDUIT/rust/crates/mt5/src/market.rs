@@ -138,7 +138,9 @@ impl MarketData {
         if let Some(w) = self.pam.lock().biezace.get(&klucz) {
             if w.kiedy.elapsed() < TTL_BIEZACE && w.dane.bars.len() >= count {
                 self.trafienie();
-                return Ok(przytnij(&w.dane, count));
+                let mut cached = przytnij(&w.dane, count);
+                cached.age_clock_by(w.kiedy.elapsed());
+                return Ok(cached);
             }
         }
         self.pudlo();
@@ -170,7 +172,9 @@ impl MarketData {
         if let Some(w) = self.pam.lock().historia.get(&klucz) {
             if w.kiedy.elapsed() < TTL_HISTORIA {
                 self.trafienie();
-                return Ok(w.dane.clone());
+                let mut cached = w.dane.clone();
+                cached.age_clock_by(w.kiedy.elapsed());
+                return Ok(cached);
             }
         }
         self.pudlo();
@@ -281,6 +285,8 @@ mod tests {
             point: 0.01,
             server_time_ms: Some(1_000_000),
             utc_time_ms: 0,
+            quote_observed_utc_ms: None,
+            quote_observation_age_ms: None,
             bars: (0..n)
                 .map(|i| Bar(1000 * i as i64, 1.0, 2.0, 0.5, 1.5, 10, 23))
                 .collect(),

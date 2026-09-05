@@ -10,6 +10,13 @@ use crate::parser::{self, Signal};
 use crate::types::{SourceKey, Ts};
 use std::collections::{HashMap, VecDeque};
 
+/// Listener setting, independent of strategy pending-order lifetime.
+pub const DEFAULT_MAX_ENTRY_AGE_MIN: f64 = 5.0;
+
+pub fn normalized_max_entry_age_min(value: Option<f64>) -> f64 {
+    value.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(DEFAULT_MAX_ENTRY_AGE_MIN)
+}
+
 /// Memory of the latest exact text observed for each Telegram message.
 ///
 /// Telegram emits edit updates for reaction/view/link-preview changes even
@@ -135,6 +142,21 @@ pub fn stale_entry_age_minutes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_age_configuration_matches_live_default_zero_and_custom_minutes() {
+        for (input,expected) in [(None,5.),(Some(0.),0.),(Some(5.),5.),(Some(30.),30.),(Some(-1.),5.),(Some(f64::NAN),5.)] {
+            assert_eq!(normalized_max_entry_age_min(input),expected);
+        }
+        let receipt=1_800_000_000_000;
+        for text in ["GOLD BUY NOW","BUY LIMIT GOLD @ 2000/1999 SL 1990 TP 2020"] {
+            assert!(opens_basket(text,None));
+            assert!(!opens_basket(text,Some(7)),"EDIT has no NEW-age gate");
+            assert!(stale_entry_age_minutes(receipt,receipt-10*60_000,5.).is_some());
+            assert!(stale_entry_age_minutes(receipt,receipt-10*60_000,0.).is_none());
+            assert!(stale_entry_age_minutes(receipt,receipt-10*60_000,30.).is_none());
+        }
+    }
 
     fn message(source: SourceKey, id: i64, edit: Option<i64>, text: &str) -> IncomingMessage {
         IncomingMessage {

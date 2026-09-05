@@ -81,8 +81,8 @@ function sekundy(s: number): string {
 function czasKrotki(ms: number): string {
   if (!ms) return "—";
   const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(
-    d.getSeconds(),
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}:${String(
+    d.getUTCSeconds(),
   ).padStart(2, "0")}`;
 }
 
@@ -681,7 +681,7 @@ function Wiersz({ w }: { w: KronikaWpis }) {
   if (znacznik) {
     return (
       <div className="kron__wiersz kron__wiersz--sesja">
-        <span className="kron__czas mono">{czasKrotki(w.odebrano_ms)}</span>
+        <span className="kron__czas mono">{czasKrotki(w.odebrano_ms)} UTC</span>
         <Badge tone="muted">{w.rodzaj === "start" ? tt("kron.row.start") : tt("kron.row.stop")}</Badge>
         <span className="hint truncate">{w.uwaga}</span>
       </div>
@@ -695,7 +695,7 @@ function Wiersz({ w }: { w: KronikaWpis }) {
 
   return (
     <div className="kron__wiersz" data-rodzaj={w.rodzaj}>
-      <span className="kron__czas mono">{czasKrotki(w.odebrano_ms)}</span>
+      <span className="kron__czas mono">{czasKrotki(w.odebrano_ms)} UTC</span>
       <span className="kron__znak">
         <Badge tone={w.rodzaj === "edycja" ? "warn" : w.rodzaj === "skasowana" ? "short" : "long"}>
           {w.rodzaj === "edycja"
@@ -1146,8 +1146,8 @@ function Przerwy({ stat }: { stat: KronikaStatystyki }) {
               <tr key={`${p.od_ms}-${p.do_ms}`}>
                 {/* format daty bierze locale ze słownika (`kron.locale`) —
                     sztywne „pl-PL" pokazywało polską datę w angielskim panelu */}
-                <td className="mono">{new Date(p.od_ms).toLocaleString(tt("kron.locale"))}</td>
-                <td className="mono">{new Date(p.do_ms).toLocaleString(tt("kron.locale"))}</td>
+                <td className="mono">{new Date(p.od_ms).toLocaleString(tt("kron.locale"), { timeZone: "UTC", hourCycle: "h23" }) + " UTC"}</td>
+                <td className="mono">{new Date(p.do_ms).toLocaleString(tt("kron.locale"), { timeZone: "UTC", hourCycle: "h23" }) + " UTC"}</td>
                 <td className="num">{sekundy(p.sekund)}</td>
                 <td>
                   {p.nagle ? (

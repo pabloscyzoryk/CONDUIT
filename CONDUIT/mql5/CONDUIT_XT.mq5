@@ -514,6 +514,21 @@ string   g_most_channel = "";
 //====================================================================
 //  KOSZYK
 //====================================================================
+// Raw accepted EntrySignal, before target filtering, runner expansion or SL
+// management. Mirrors core entry_edit::same_source, including optional fields.
+struct NativeEntryPlanSource
+  {
+   bool known;
+   int side;
+   bool is_limit,is_stop;
+   double lo,hi,sl;
+   bool has_sl,tp_open;
+   double warstwy_offset;
+   bool has_warstwy_offset;
+   int ntp;
+   double tps[MAXTP];
+  };
+
 struct Basket
   {
    int      id;
@@ -524,6 +539,7 @@ struct Basket
    bool     source_explicit;
    bool     source_withdrawn;
    bool     entry_review; // session-retained: unresolved legacy edit may not add risk
+   NativeEntryPlanSource entry_source;
    double   review_requested_lo, review_requested_hi;
    double   entry_lo, entry_hi;   // strefa Z SYGNAŁU (przed offsetami)
    double   zone_lo,  zone_hi;    // strefa po offsetach
@@ -1700,6 +1716,25 @@ double PozZysk(ulong t)
    return (ExitPx(side)-PositionGetDouble(POSITION_PRICE_OPEN))*SideSign(side)
           *XAU_CONTRACT*PositionGetDouble(POSITION_VOLUME);
   }
+// Stable like Rust slice::sort_by: equal strategy keys retain the receipt
+// order. Non-adjacent swaps can silently reverse ties after a smaller key.
+void NativeStableSortTickets(ulong &tickets[], double &keys[], int count, bool descending)
+  {
+   for(int i=1;i<count;i++)
+     {
+      ulong ticket=tickets[i];double key=keys[i];int j=i;
+      while(j>0 && (descending ? key>keys[j-1] : key<keys[j-1]))
+        {tickets[j]=tickets[j-1];keys[j]=keys[j-1];j--;}
+      tickets[j]=ticket;keys[j]=key;
+     }
+  }
+void NativeSortProfit(ulong &tickets[], int count, bool descending)
+  {
+   double keys[MAXTK];
+   for(int i=0;i<count;i++)keys[i]=PozZysk(tickets[i]);
+   NativeStableSortTickets(tickets,keys,count,descending);
+  }
+
 double PozPunkty(ulong t)
   {
    if(!PositionSelectByTicket(t)) return 0.0;
@@ -3097,14 +3132,14 @@ int CancelPendingsKeep(int bi, int keep_n)
       idx[i] = i;
       px[i] = OrderSelect(g_b[bi].pend[i]) ? OrderGetDouble(ORDER_PRICE_OPEN) : 0.0;
      }
-   for(int a = 0; a < n - 1; a++)
-      for(int b2 = a + 1; b2 < n; b2++)
-        {
-         bool sw = (g_b[bi].side == 0) ? (px[b2] > px[a]) : (px[b2] < px[a]);
-         if(sw)
-           { double t = px[a]; px[a] = px[b2]; px[b2] = t;
-             int ti = idx[a]; idx[a] = idx[b2]; idx[b2] = ti; }
-        }
+   // Stable insertion order for equal pending prices.
+   for(int i=1;i<n;i++)
+     {
+      int index=idx[i],j=i;double price=px[i];
+      while(j>0 && (g_b[bi].side==0 ? price>px[j-1] : price<px[j-1]))
+        {idx[j]=idx[j-1];px[j]=px[j-1];j--;}
+      idx[j]=index;px[j]=price;
+     }
    // kasujemy od najgłębszych (pozycje keep_n..n-1 w rankingu płytkości)
    int do_kasacji[MAXTK]; int nk = 0;
    for(int i = keep_n; i < n; i++) { do_kasacji[nk] = idx[i]; nk++; }
@@ -3392,11 +3427,13 @@ void OdswiezBilety()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(g_b[bi].state == ST_DONE && !In_ConfirmedExitRetry) continue;
-      // pendingi -> pozycje
-      for(int i = g_b[bi].npend - 1; i >= 0; i--)
+      // Preserve order submission order for fills observed in one snapshot.
+      // Rust appends those receipts in this order; reversing them changes the
+      // retained grid level when RiskFree compares identical fill prices.
+      for(int i = 0; i < g_b[bi].npend; )
         {
          ulong t = g_b[bi].pend[i];
-         if(OrderSelect(t)) continue;              // wciąż czeka
+         if(OrderSelect(t)) { i++; continue; }     // still pending
          int lv = g_b[bi].pend_lv[i];
          bool stal_sie_pozycja = PositionSelectByTicket(t);
          for(int j = i; j < g_b[bi].npend - 1; j++)
@@ -3569,7 +3606,7 @@ double ZoneOverlap(double lo1, double hi1, double lo2, double hi2)
 //====================================================================
 void HandleEntry(long msg_id, int side, bool is_limit, bool is_stop, double lo, double hi,
                  double sl, bool has_sl, bool tp_open, double warstwy_offset,
-                 bool has_warstwy_offset, double &tps[], int ntp)
+                 bool has_warstwy_offset, double &tps[], int ntp, const NativeEntryPlanSource &source)
   {
    g_cnt_sig++;
    // exit_on_opposite_signal — engine.rs:1671: w dispatch, PRZED wszystkimi
@@ -3706,8 +3743,7 @@ void HandleEntry(long msg_id, int side, bool is_limit, bool is_stop, double lo, 
          if(!Alive(bi2) || g_b[bi2].side != side) continue;
          if(g_now < g_b[bi2].created_ts || g_now - g_b[bi2].created_ts > okno) continue;
          if(ZoneOverlap(g_b[bi2].zone_lo, g_b[bi2].zone_hi, zlo, zhi) < In_MergeMinOverlap) continue;
-         ApplyEntryEdit(bi2, side, is_limit, is_stop, lo, hi, sl, has_sl,
-                        warstwy_offset, has_warstwy_offset, tps, ntp);
+         ApplySourceEntryEdit(bi2, source, tps, ntp);
          MapPut(msg_id, g_b[bi2].id);
          NativeSourceAccept(msg_id,g_b[bi2].id);
          g_merges++;
@@ -3734,6 +3770,7 @@ void HandleEntry(long msg_id, int side, bool is_limit, bool is_stop, double lo, 
    g_b[bi].is_stop = is_stop;
    g_b[bi].source_explicit = In_ExplicitPendingUntilCancel && (is_limit || is_stop);
    g_b[bi].source_withdrawn = false;
+   g_b[bi].entry_source = source;
    g_b[bi].entry_lo = lo; g_b[bi].entry_hi = hi;
    g_b[bi].zone_lo = zlo; g_b[bi].zone_hi = zhi;
    g_b[bi].sl = slv; g_b[bi].has_sl = has;
@@ -3985,14 +4022,8 @@ void BankOnTp(int bi, int stage)
    else if(In_TpSchedule == 5) pct = In_ScaleOutPct;
    if(pct <= 0.0) return;
 
-   // kolejność inkasa
-   for(int a = 0; a < n - 1; a++)
-      for(int b2 = a + 1; b2 < n; b2++)
-        {
-         double pa = PozZysk(live[a]), pb = PozZysk(live[b2]);
-         bool sw = (In_BankFrom == 0) ? (pb < pa) : (pb > pa);
-         if(sw) { ulong t = live[a]; live[a] = live[b2]; live[b2] = t; }
-        }
+   // Stable bank order, including equal gross-profit legs.
+   NativeSortProfit(live,n,In_BankFrom!=0);
 
    // partiale z wolumenu?
    bool part_ok = In_PartialClose;
@@ -4205,13 +4236,7 @@ void ApplySmartSl(int bi)
       tk[n] = t; op[n] = PositionGetDouble(POSITION_PRICE_OPEN); n++;
      }
    if(n == 0) return;
-   for(int a = 0; a < n - 1; a++)
-      for(int b2 = a + 1; b2 < n; b2++)
-        {
-         bool sw = (side == 0) ? (op[b2] < op[a]) : (op[b2] > op[a]);
-         if(sw) { double t2 = op[a]; op[a] = op[b2]; op[b2] = t2;
-                  ulong t3 = tk[a]; tk[a] = tk[b2]; tk[b2] = t3; }
-        }
+   NativeStableSortTickets(tk,op,n,side!=0);
    bool use_be = (In_SmartSlMode == 1 || In_SmartSlMode == 3);
    bool use_ladder = (In_SmartSlMode == 2 || In_SmartSlMode == 3);
    int moved = 0;
@@ -4298,6 +4323,27 @@ bool ApplySppTargetPlan(int bi, const double &targets[], int count)
       for(int i = 0; i < MAXTP; i++) g_b[bi].tp_touch_ts[i] = 0;
      }
    return changed;
+  }
+
+int NativeReadSppTargets(const string &fields[],int count,double &targets[])
+  {
+   int written=0;
+   for(int i=3;i<count && written<MAXTP;i++)
+     {
+      // Empty targets serialize as a trailing comma in the bridge. They are
+      // an empty Vec, not the numeric target zero returned by StringToDouble("").
+      if(StringLen(fields[i])==0)continue;
+      targets[written]=StringToDouble(fields[i]);written++;
+     }
+   return written;
+  }
+
+bool NativeCorrectionPendingTarget(int bi,double &target)
+  {
+   if(g_b[bi].ntp<=0)return false;
+   int index=g_b[bi].tp_stage;
+   if(index<0 || index>=g_b[bi].ntp)index=g_b[bi].ntp-1;
+   target=g_b[bi].tps[index];return true;
   }
 
 // Pure state regression executed before any trading state is loaded.
@@ -4547,19 +4593,14 @@ void HandleRiskFree(int bi, double level, bool has_level)
    ulong order[MAXTK];
    for(int i = 0; i < n; i++) order[i] = live[i];
    if(In_RiskFreeMode == 1)            // CloseAllKeepNearest
-      for(int a = 0; a < n - 1; a++)
-         for(int b2 = a + 1; b2 < n; b2++)
-           {
-            double da = 1e18, db = 1e18;
-            if(PositionSelectByTicket(order[a])) da = MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - reference);
-            if(PositionSelectByTicket(order[b2])) db = MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - reference);
-            if(db < da) { ulong t = order[a]; order[a] = order[b2]; order[b2] = t; }
-           }
+     {
+      double distance[MAXTK];
+      for(int i=0;i<n;i++)
+        {distance[i]=1e18;if(PositionSelectByTicket(order[i]))distance[i]=MathAbs(PositionGetDouble(POSITION_PRICE_OPEN)-reference);}
+      NativeStableSortTickets(order,distance,n,false);
+     }
    else if(In_RiskFreeMode == 5)       // CloseAllKeepBest
-      for(int a = 0; a < n - 1; a++)
-         for(int b2 = a + 1; b2 < n; b2++)
-            if(PozZysk(order[b2]) > PozZysk(order[a]))
-              { ulong t = order[a]; order[a] = order[b2]; order[b2] = t; }
+      NativeSortProfit(order,n,true);
 
    ulong keepers[MAXTK]; int nk = 0;
    if(In_RiskFreeMode == 1 || In_RiskFreeMode == 5)
@@ -4793,6 +4834,68 @@ void PrzygotujCele(int side, double &tps[], int &ntp)
      }
   }
 
+// Basket::zeruj_postep: native stores target timestamps, while price/SL touch
+// histories are not retained by this adapter. Signal delivery memory is separate.
+void NativeResetEntryProgress(int bi)
+  {
+   g_b[bi].tp_stage = 0;
+   g_b[bi].plan_observed_stage = 0;
+   g_b[bi].zone_touched = false;
+   g_b[bi].drop_armed = false;
+   g_b[bi].drop_po_ts = 0;
+   g_b[bi].last_tp_ts = 0;
+   for(int i = 0; i < MAXTP; i++) g_b[bi].tp_touch_ts[i] = 0;
+  }
+
+bool NativeEntryPlanChanged(const Basket &previous, const Basket &current)
+  {
+   if(previous.zone_lo != current.zone_lo || previous.zone_hi != current.zone_hi
+      || previous.has_sl != current.has_sl
+      || (current.has_sl && previous.sl != current.sl) || previous.ntp != current.ntp) return true;
+   for(int i = 0; i < current.ntp; i++)
+      if(previous.tps[i] != current.tps[i]) return true;
+   return false;
+  }
+
+bool NativeEntryGridUnchanged(const Basket &previous, const Basket &current)
+  {
+   if(MathAbs(previous.zone_lo-current.zone_lo)>=1e-9 || MathAbs(previous.zone_hi-current.zone_hi)>=1e-9
+      || previous.has_sl!=current.has_sl || previous.ntp!=current.ntp) return false;
+   if(current.has_sl && (long)(previous.sl*1e9)!=(long)(current.sl*1e9)) return false;
+   for(int i=0;i<current.ntp;i++)if(previous.tps[i]!=current.tps[i])return false;
+   return true;
+  }
+
+bool NativeSameEntrySource(const NativeEntryPlanSource &previous, const NativeEntryPlanSource &current)
+  {
+   if(!previous.known || !current.known || previous.side!=current.side
+      || previous.is_limit!=current.is_limit || previous.is_stop!=current.is_stop
+      || previous.lo!=current.lo || previous.hi!=current.hi
+      || previous.has_sl!=current.has_sl || (current.has_sl && previous.sl!=current.sl)
+      || previous.tp_open!=current.tp_open || previous.has_warstwy_offset!=current.has_warstwy_offset
+      || (current.has_warstwy_offset && previous.warstwy_offset!=current.warstwy_offset)
+      || previous.ntp!=current.ntp) return false;
+   for(int i=0;i<current.ntp;i++)if(previous.tps[i]!=current.tps[i])return false;
+   return true;
+  }
+
+bool ApplySourceEntryEdit(int bi,const NativeEntryPlanSource &source,double &targets[],int count)
+  {
+   if(!ExitRiskAllowed(bi) || SourceWithdrawn(bi) || EntryReviewBlocked(bi))return false;
+   // The source snapshot, not the current tightened stop/target plan, decides
+   // whether a repeated source delivery is an exact no-op. No broker RPC here.
+   if(NativeSameEntrySource(g_b[bi].entry_source,source))return true;
+   if(source.side!=g_b[bi].side)return false;
+   for(int i=1;i<source.ntp;i++)
+      if((source.side==0 && source.tps[i]<source.tps[i-1])
+         || (source.side==1 && source.tps[i]>source.tps[i-1]))return false;
+   ApplyEntryEdit(bi,source.side,source.is_limit,source.is_stop,source.lo,source.hi,
+                  source.sl,source.has_sl,source.warstwy_offset,source.has_warstwy_offset,targets,count);
+   if(EntryReviewBlocked(bi))return false;
+   g_b[bi].entry_source=source;
+   return true;
+  }
+
 void ApplyEntryEdit(int bi, int side, bool is_limit, bool is_stop,
                     double lo, double hi, double sl, bool has_sl,
                     double warstwy_offset, bool has_warstwy_offset,
@@ -4805,6 +4908,15 @@ void ApplyEntryEdit(int bi, int side, bool is_limit, bool is_stop,
    ulong before_positions[]; ulong before_orders[];
    bool before_complete = true;
    if(rebuild) before_complete = ExitOwnedSnapshot(bi, before_positions, before_orders);
+   if(rebuild && !before_complete)
+     {
+      g_b[bi].entry_review=true;
+      g_b[bi].review_requested_lo=lo;g_b[bi].review_requested_hi=hi;
+      if(In_Diag && g_handle_diag!=INVALID_HANDLE)
+         FileWrite(g_handle_diag,"ENTRY_REVIEW",(string)g_now,(string)g_b[bi].id,
+                   "LegacyEditReceiptBarrier",DoubleToString(lo,8),DoubleToString(hi,8));
+      return;
+     }
    double deep = AdaptiveDeepOffset(MathAbs(hi - lo));
    double zlo = lo, zhi = hi;
    if(In_ZoneOffsetMode == 1) { zhi += In_EntryHiOffset; zlo += In_EntryLoOffset; }
@@ -4833,10 +4945,15 @@ void ApplyEntryEdit(int bi, int side, bool is_limit, bool is_stop,
         }
       SetBasketSl(bi, slv);   // dociera do otwartych pozycji (i pendingów Z-5)
      }
+   else { g_b[bi].has_sl=false;g_b[bi].sl=0.0; } // compute_sl(None): no broker stop removal
    g_b[bi].ntp = MathMin(ntp, MAXTP);
    for(int i = 0; i < g_b[bi].ntp; i++) g_b[bi].tps[i] = tps[i];
+   bool plan_changed = NativeEntryPlanChanged(committed, g_b[bi]);
+   // Full ENTRY edits reset effective-plan progress even for Working baskets.
+   // This is independent of the separate SPP target-plan compatibility switch.
+   if(plan_changed) NativeResetEntryProgress(bi);
    // przestawienie siatki TYLKO w stanie Armed bez pozycji
-   if(rebuild)
+   if(rebuild && !NativeEntryGridUnchanged(committed,g_b[bi]))
      {
       int removed = 0;
       if(before_complete)
@@ -4937,17 +5054,21 @@ void WykonajWiadomosc(int mi)
            }
          else
             for(int i = 7; i < nf && ntp < MAXTP; i++)
-              { tps[ntp] = StringToDouble(f[i]); ntp++; }
+              { if(StringLen(f[i])==0)continue;tps[ntp] = StringToDouble(f[i]); ntp++; }
          bool complete_recovery=NativeCompleteRecovery(side,is_limit,is_stop,lo,hi,sl,has_sl,tp_open,
                                                        warstwy_offset,has_warstwy_offset,tps,ntp);
+         NativeEntryPlanSource source;ZeroMemory(source);source.known=true;
+         source.side=side;source.is_limit=is_limit;source.is_stop=is_stop;
+         source.lo=lo;source.hi=hi;source.sl=sl;source.has_sl=has_sl;source.tp_open=tp_open;
+         source.warstwy_offset=warstwy_offset;source.has_warstwy_offset=has_warstwy_offset;
+         source.ntp=ntp;for(int i=0;i<ntp;i++)source.tps[i]=tps[i];
          PrzygotujCele(side, tps, ntp);
 
          if(g_msg[mi].edit_of==0 && In_EntryIdempotency && MapGet(key_msg)>=0)
            {
             int known=BIdx(MapGet(key_msg));
-            if(known>=0)ApplyEntryEdit(known,side,is_limit,is_stop,lo,hi,sl,has_sl,
-                                     warstwy_offset,has_warstwy_offset,tps,ntp);
-            ZapamietajPoStatusie(key_msg,akey,known>=0);continue;
+            bool handled=known>=0 && ApplySourceEntryEdit(known,source,tps,ntp);
+            ZapamietajPoStatusie(key_msg,akey,handled);continue;
            }
 
          if(g_msg[mi].edit_of != 0)
@@ -4959,11 +5080,10 @@ void WykonajWiadomosc(int mi)
                  if(bx >= 0)
                  {
                   if(!ExitRiskAllowed(bx) || SourceWithdrawn(bx) || EntryReviewBlocked(bx)) { ZapamietajPoStatusie(key_msg, akey, false); continue; }
-                  ApplyEntryEdit(bx, side, is_limit, is_stop, lo, hi, sl, has_sl,
-                                 warstwy_offset, has_warstwy_offset, tps, ntp);
-                  if(!EntryReviewBlocked(bx)) {int source=NativeSourceEnsure(key_msg);g_sources[source].had_edit=true;}
-                  DiagKoszyk(bx, "EDYCJA");
-                  ZapamietajPoStatusie(key_msg, akey, true);
+                  bool handled=ApplySourceEntryEdit(bx,source,tps,ntp);
+                  if(handled) {int source_index=NativeSourceEnsure(key_msg);g_sources[source_index].had_edit=true;}
+                  DiagKoszyk(bx, handled ? "EDYCJA" : "EDYCJA_ODRZUC");
+                  ZapamietajPoStatusie(key_msg, akey, handled);
                   if(!In_EditRest) return;
                   continue;
                  }
@@ -4984,7 +5104,7 @@ void WykonajWiadomosc(int mi)
            }
          long rej0 = g_cnt_reject, risk0 = g_rej_risk;
          HandleEntry(g_msg[mi].msg_id, side, is_limit, is_stop, lo, hi, sl, has_sl,
-                     tp_open, warstwy_offset, has_warstwy_offset, tps, ntp);
+                     tp_open, warstwy_offset, has_warstwy_offset, tps, ntp,source);
          // JEDYNE miejsce gaszenia flagi miekkiego rezimu — engine.rs:1755.
          // Gaszenie przy kazdym `return` w HandleEntry zabiloby dzialanie
          // regime_soft_risk_mult (CapBasketRisk/MarketRiskCap czytaja ja pozniej).
@@ -5063,6 +5183,7 @@ void WykonajWiadomosc(int mi)
          if(In_TpSource == 0)
            { ZapamietajPoStatusie(key_msg, akey, false); continue; }
          int idx = (nf > 1) ? (int)StringToInteger(f[1]) : -1;
+         if(idx==0)idx=1; // Some(0).max(1), not None / advance-current-stage
          bool has_hit_level = (kind == "TPHIT2" && nf > 2 && f[2] != "nan");
          double hit_level = has_hit_level ? StringToDouble(f[2]) : 0.0;
          bool unindexed_pips = (kind == "TPHIT2" && nf > 3
@@ -5145,11 +5266,8 @@ void WykonajWiadomosc(int mi)
                  {
                   ulong t = g_b[bi].pend[i];
                   if(!OrderSelect(t)) continue;
-                  int lv = g_b[bi].pend_lv[i];
-                  double tp2 = 0.0; bool htp2 = false;
-                  if(lv >= 0 && lv < g_b[bi].nlv)
-                    { htp2 = TargetForEx(bi, lv, MathMax(g_b[bi].nlv, 1), tp2); }
-                  if(!htp2) continue;
+                  double tp2 = 0.0;
+                  if(!NativeCorrectionPendingTarget(bi,tp2))continue;
                   MqlTradeRequest r; MqlTradeResult res;
                   ZeroMemory(r); ZeroMemory(res);
                   r.action = TRADE_ACTION_MODIFY;
@@ -5173,8 +5291,7 @@ void WykonajWiadomosc(int mi)
            { ZapamietajPoStatusie(key_msg, akey, false); continue; }
          if(nf > 3 && !In_SppKeepTp)
            {
-            int ntp = 0; double tt[MAXTP];
-            for(int i = 3; i < nf && ntp < MAXTP; i++) { tt[ntp] = StringToDouble(f[i]); ntp++; }
+            double tt[MAXTP];int ntp=NativeReadSppTargets(f,nf,tt);
             if(ntp > 0) ApplySppTargetPlan(bi, tt, ntp);
            }
          if(nf > 1 && f[1] != "nan") SetBasketSl(bi, StringToDouble(f[1]));
@@ -5872,11 +5989,8 @@ void RiskfreePass()
       bool prog_r = In_RfTriggerR > 0.0 && ryzyko > 0.0 && wynik >= ryzyko * In_RfTriggerR;
       if(!prog_kwota && !prog_r) continue;
 
-      // 2. zostają NAJZYSKOWNIEJSZE (keep_units)
-      for(int a = 0; a < n - 1; a++)
-         for(int b2 = a + 1; b2 < n; b2++)
-            if(PozZysk(zywe[b2]) > PozZysk(zywe[a]))
-              { ulong t = zywe[a]; zywe[a] = zywe[b2]; zywe[b2] = t; }
+      // 2. Stable gross-profit ranking (keep_units).
+      NativeSortProfit(zywe,n,true);
       int ile_run = (int)MathMin(MathMax(In_RfKeepUnits, 1), n);
 
       // 3. uczciwość: zabankowana suma pokrywa straty
@@ -6113,13 +6227,7 @@ bool JestRunneremWgGlebokosci(int bi, ulong t)
       if(!PositionSelectByTicket(x)) continue;
       tk[m] = x; op[m] = PositionGetDouble(POSITION_PRICE_OPEN); m++;
      }
-   for(int a = 0; a < m - 1; a++)
-      for(int b2 = a + 1; b2 < m; b2++)
-        {
-         bool sw = (g_b[bi].side == 0) ? (op[b2] < op[a]) : (op[b2] > op[a]);
-         if(sw) { double t2 = op[a]; op[a] = op[b2]; op[b2] = t2;
-                  ulong t3 = tk[a]; tk[a] = tk[b2]; tk[b2] = t3; }
-        }
+   NativeStableSortTickets(tk,op,m,g_b[bi].side!=0);
    for(int i = 0; i < MathMin(n, m); i++) if(tk[i] == t) return true;
    return false;
   }
@@ -6795,6 +6903,7 @@ void EditReviewScenarioTick()
       g_b[0].lv_price[i] = price; g_b[0].lv_units[i] = 1; g_b[0].lv_vol[i] = 0.01;
      }
    double old_lo = g_b[0].zone_lo, old_hi = g_b[0].zone_hi;
+   g_b[0].tp_stage = 2; g_b[0].plan_observed_stage = 3; g_b[0].tp_touch_ts[0] = 123;
    double requested_lo = g_bid - 61.0, requested_hi = g_bid - 60.0;
    double targets[1]; targets[0] = g_ask + 10.0;
    g_test_cancel_reject = In_TestExitScenario == 7 ? 1 : 0;
@@ -6804,6 +6913,8 @@ void EditReviewScenarioTick()
      {
       if(!ExitTestRequire(EntryReviewBlocked(0) && g_b[0].zone_lo == old_lo && g_b[0].zone_hi == old_hi,
                          "edit failure committed geometry or lost review")) return;
+      if(!ExitTestRequire(g_b[0].tp_stage == 2 && g_b[0].plan_observed_stage == 3
+                         && g_b[0].tp_touch_ts[0] == 123,"edit failure lost committed progress")) return;
       if(!ExitTestRequire(OrdersTotal() == 1 && g_b[0].npend == 1,
                          "partial cancellation lost broker truth or created duplicate grid")) return;
       ulong ticket;
@@ -7031,7 +7142,7 @@ void BasketCapacityScenarioTick()
    if(!ExitTestRequire(g_nb==2 && BIdx(9000)==0 && PositionSelectByTicket(kept)
                       && MapGet(900000)==9000 && PositionsTotal()==2
                       && g_open_request_count==sent+1,"MarketOpen lost live basket or failed compaction"))return;
-   if(!ExitTestRequire(g_b[1].exit_reason=="" && g_b[1].review_requested_lo==0.0,"reused market slot retained old metadata"))return;
+   if(!ExitTestRequire(StringLen(g_b[1].exit_reason)==0 && g_b[1].review_requested_lo==0.0,"reused market slot retained old metadata"))return;
    SourceFixtureMessage(777777,0,0,"MKT:market,BUY");
    if(!ExitTestRequire(g_nb==2 && PositionsTotal()==2 && g_open_request_count==sent+1,"MarketOpen source duplicated"))return;
    for(int i=2;i<MAXB;i++){ZeroMemory(g_b[i]);g_b[i].id=20000+i;g_b[i].state=ST_DONE;}
@@ -7040,7 +7151,7 @@ void BasketCapacityScenarioTick()
    string entry=StringFormat("ENTRY2:entry,BUY,1,0,%.5f,%.5f,%.5f,0,nan,0,0,0,1,%.5f",lo,hi,sl,tp);
    SourceFixtureMessage(888888,0,0,entry);
    if(!ExitTestRequire(g_nb==3 && PositionsTotal()==2 && OrdersTotal()>0
-                      && g_b[2].exit_reason=="" && g_b[2].review_requested_hi==0.0,"Entry compaction lost live exposure or reused stale metadata"))return;
+                      && StringLen(g_b[2].exit_reason)==0 && g_b[2].review_requested_hi==0.0,"Entry compaction lost live exposure or reused stale metadata"))return;
    int orders=OrdersTotal();SourceFixtureMessage(888888,0,0,entry);
    if(!ExitTestRequire(g_nb==3 && PositionsTotal()==2 && OrdersTotal()==orders,"Entry source duplicated"))return;
    for(int i=3;i<MAXB;i++){ZeroMemory(g_b[i]);g_b[i].id=30000+i;g_b[i].state=ST_PENDING;}
@@ -7054,6 +7165,203 @@ void BasketCapacityScenarioTick()
    ExitTestFinish(true,"HISTORY_IDS_LIVE_CAPACITY_SOURCE_IDEMPOTENCY_AND_FRESH_SLOTS");
   }
 
+void FillReceiptOrderScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0
+                      && In_RiskFreeMode==1 && In_RiskFreeRunners==1
+                      && In_ProfitBudgetArmPct==0.0 && In_MaxPortfolioRisk==0.0,
+                      "fill receipt fixture inputs"))return;
+   ulong tie_tickets[3];double tie_keys[3];
+   tie_tickets[0]=101;tie_tickets[1]=102;tie_tickets[2]=103;
+   tie_keys[0]=2.0;tie_keys[1]=2.0;tie_keys[2]=1.0;
+   NativeStableSortTickets(tie_tickets,tie_keys,3,false);
+   if(!ExitTestRequire(tie_tickets[0]==103 && tie_tickets[1]==101 && tie_tickets[2]==102,"ascending equal-key order changed"))return;
+   tie_tickets[0]=101;tie_tickets[1]=102;tie_tickets[2]=103;
+   tie_keys[0]=1.0;tie_keys[1]=1.0;tie_keys[2]=2.0;
+   NativeStableSortTickets(tie_tickets,tie_keys,3,true);
+   if(!ExitTestRequire(tie_tickets[0]==103 && tie_tickets[1]==101 && tie_tickets[2]==102,"descending equal-key order changed"))return;
+   g_nb=1;ExitTestBasket(0);g_b[0].nlv=3;
+   ulong tickets[3];
+   double price=0.0;
+   for(int i=0;i<3;i++)
+     {
+      if(!ExitTestRequire(ExitTestOpen(0,0.01,tickets[i]),"receipt fixture position open failed"))return;
+      if(i==0)price=PositionGetDouble(POSITION_PRICE_OPEN);
+      if(!ExitTestRequire(PositionGetDouble(POSITION_PRICE_OPEN)==price,"receipt fixture prices differ"))return;
+      g_b[0].lv_price[i]=price+i;g_b[0].lv_filled[i]=false;g_b[0].lv_fill_ts[i]=0;
+     }
+   // Actual tester positions provide a confirmed broker snapshot. Only the
+   // pre-reconciliation pending cache is synthetic, ordered by submission.
+   g_b[0].npos=0;g_b[0].npend=3;
+   for(int i=0;i<3;i++){g_b[0].pend[i]=tickets[i];g_b[0].pend_lv[i]=i;}
+   OdswiezBilety();
+   if(!ExitTestRequire(g_b[0].npos==3 && g_b[0].npend==0,"receipt count changed"))return;
+   for(int i=0;i<3;i++)
+      if(!ExitTestRequire(g_b[0].pos[i]==tickets[i] && g_b[0].pos_lv[i]==i,"receipt registration reversed submission order"))return;
+   OdswiezBilety();
+   if(!ExitTestRequire(g_b[0].npos==3,"receipt replay duplicated exposure"))return;
+   HandleRiskFree(0,price,true);
+   if(!ExitTestRequire(PositionsTotal()==1 && PositionSelectByTicket(tickets[0]),"equal-price RiskFree retained a different grid level"))return;
+   PrintFormat("CEXIT_TEST_EVENT|fill_receipt_order|positions=3|equal_price=1|retained_level=0|duplicate_receipts=0");
+   ExitTestFinish(true,"SIMULTANEOUS_RECEIPT_ORDER_AND_RISKFREE_TIE");
+  }
+
+void EntryProgressScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0
+                      && In_ZoneOffsetMode==0 && In_SlMaxDist==0.0,
+                      "entry progress fixture inputs"))return;
+   g_nb=1;ExitTestBasket(0);
+   ulong ticket=0;
+   if(!ExitTestRequire(ExitTestOpen(0,0.01,ticket),"entry progress position open failed"))return;
+   double lo=g_bid-2.0,hi=g_bid-1.0,sl=g_bid-100.0;
+   double targets[2];targets[0]=g_ask+100.0;targets[1]=g_ask+200.0;
+   ApplyEntryEdit(0,0,false,false,lo,hi,sl,true,0.0,false,targets,2);
+   for(int mutation=0;mutation<4;mutation++)
+     {
+      g_b[0].tp_stage=2;g_b[0].plan_observed_stage=3;
+      g_b[0].zone_touched=true;g_b[0].drop_armed=true;
+      g_b[0].drop_po_ts=123;g_b[0].last_tp_ts=456;
+      for(int i=0;i<MAXTP;i++)g_b[0].tp_touch_ts[i]=789;
+      g_b[0].secured=true;g_b[0].fast_addons=1;
+      if(mutation==1)targets[0]+=1.0;
+      if(mutation==2)lo-=1.0;
+      if(mutation==3)sl-=1.0;
+      ApplyEntryEdit(0,0,false,false,lo,hi,sl,true,0.0,false,targets,2);
+      bool unchanged=mutation==0;
+      bool progress_ok=unchanged ? (g_b[0].tp_stage==2 && g_b[0].plan_observed_stage==3
+                        && g_b[0].zone_touched && g_b[0].drop_armed && g_b[0].drop_po_ts==123
+                        && g_b[0].last_tp_ts==456)
+                        : (g_b[0].tp_stage==0 && g_b[0].plan_observed_stage==0
+                        && !g_b[0].zone_touched && !g_b[0].drop_armed && g_b[0].drop_po_ts==0
+                        && g_b[0].last_tp_ts==0);
+      for(int i=0;i<MAXTP;i++)progress_ok=progress_ok && g_b[0].tp_touch_ts[i]==(unchanged?789:0);
+      if(!ExitTestRequire(progress_ok && g_b[0].secured && g_b[0].fast_addons==1
+                         && PositionsTotal()==1 && PositionSelectByTicket(ticket),"ENTRY reset/no-op touched wrong state"))return;
+     }
+   g_b[0].tp_stage=2;g_b[0].tp_touch_ts[0]=789;targets[0]+=1.0;
+   if(!ExitTestRequire(ApplySppTargetPlan(0,targets,2)
+                      && (In_ResetTpOnTargetEdit ? g_b[0].tp_stage==0 : g_b[0].tp_stage==2),
+                      "ENTRY reset changed separate SPP switch"))return;
+   Print("CEXIT_TEST_EVENT|entry_progress|unchanged_preserved=1|tp_zone_sl_reset=1|working_position_preserved=1|spp_separate=1");
+   ExitTestFinish(true,"FULL_ENTRY_EFFECTIVE_PLAN_PROGRESS_AND_NOOP");
+  }
+
+void EntrySourceNoopScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0
+                      && In_ZoneOffsetMode==0 && In_SlMaxDist==0.0,
+                      "source no-op fixture inputs"))return;
+   g_nb=1;ExitTestBasket(0);MapPut(500,1);
+   ulong ticket=0;
+   if(!ExitTestRequire(ExitTestOpen(0,0.01,ticket),"source no-op position open failed"))return;
+   double lo=g_bid-2.0,hi=g_bid-1.0,sl=g_bid-100.0,tp1=g_ask+100.0,tp2=g_ask+200.0;
+   string entry=StringFormat("ENTRY2:entry,BUY,0,0,%.8f,%.8f,%.8f,0,nan,0,0,0,2,%.8f,%.8f",lo,hi,sl,tp1,tp2);
+   SourceFixtureMessage(501,500,0,entry);
+   if(!ExitTestRequire(g_b[0].entry_source.known && g_b[0].entry_source.ntp==2,"raw source snapshot missing"))return;
+   // Actual confirmed stop management after the source was accepted.
+   double protected_sl=NormPx(g_bid-1.0);SetBasketSl(0,protected_sl);
+   if(!ExitTestRequire(PositionSelectByTicket(ticket)
+                      && PositionGetDouble(POSITION_SL)==protected_sl,"managed stop unconfirmed"))return;
+   g_b[0].tp_stage=2;g_b[0].plan_observed_stage=3;g_b[0].tp_touch_ts[0]=123;
+   g_b[0].secured=true;
+   SourceFixtureMessage(502,500,0,entry);
+   if(!ExitTestRequire(g_b[0].tp_stage==2 && g_b[0].plan_observed_stage==3
+                      && g_b[0].tp_touch_ts[0]==123 && g_b[0].sl==protected_sl
+                      && PositionSelectByTicket(ticket) && PositionGetDouble(POSITION_SL)==protected_sl,
+                      "same raw source overwrote managed stop or reset progress"))return;
+   // A genuinely changed raw TP must be accepted and retain its new snapshot.
+   string changed=StringFormat("ENTRY2:entry,BUY,0,0,%.8f,%.8f,%.8f,0,nan,0,0,0,2,%.8f,%.8f",lo,hi,sl,tp1+1.0,tp2);
+   SourceFixtureMessage(503,500,0,changed);
+   if(!ExitTestRequire(g_b[0].tp_stage==0 && g_b[0].plan_observed_stage==0
+                      && MathAbs(g_b[0].entry_source.tps[0]-(tp1+1.0))<1e-7,
+                      "changed source failed to commit/reset"))return;
+   g_b[0].tp_stage=1;SourceFixtureMessage(504,500,0,changed);
+   if(!ExitTestRequire(g_b[0].tp_stage==1,"accepted changed source repeated reset"))return;
+   Print("CEXIT_TEST_EVENT|entry_source_noop|raw_source_before_runner=1|managed_sl_preserved=1|progress_preserved=1|changed_source_committed=1");
+   ExitTestFinish(true,"RAW_SOURCE_NOOP_AFTER_CONFIRMED_STOP_MANAGEMENT");
+  }
+
+void EntryReceiptBarrierScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0,"entry barrier fixture account"))return;
+   g_nb=1;ExitTestBasket(0);g_b[0].state=ST_PENDING;
+   double old_sl=NormPx(g_bid-100.0);ulong known=0,unknown=0;
+   if(!ExitTestRequire(WyslijLimit(0,g_bid-50.0,0.01,old_sl,true,0.0,false,"B1",ORDER_TYPE_BUY_LIMIT,known),"known fixture pending failed"))return;
+   g_b[0].pend[0]=known;g_b[0].pend_lv[0]=0;g_b[0].npend=1;
+   // Deliberately outside the strategy's ownership registry, but still inside
+   // this isolated tester and known to this bounded fixture by its receipt.
+   MqlTradeRequest request;MqlTradeResult receipt;ZeroMemory(request);ZeroMemory(receipt);
+   request.action=TRADE_ACTION_PENDING;request.symbol=_Symbol;request.magic=In_Magic;
+   request.type=ORDER_TYPE_BUY_LIMIT;request.type_time=ORDER_TIME_GTC;request.type_filling=g_fill_pending;
+   request.volume=0.01;request.price=NormPx(g_bid-60.0);request.sl=old_sl;request.comment="unresolved_fixture";
+   if(!ExitTestRequire(OrderSend(request,receipt) && (receipt.retcode==TRADE_RETCODE_DONE
+                      || receipt.retcode==TRADE_RETCODE_PLACED),"unknown fixture pending failed"))return;
+   unknown=receipt.order;
+   g_b[0].sl=old_sl;g_b[0].has_sl=true;g_b[0].tp_stage=2;
+   double original_lo=g_b[0].zone_lo,original_hi=g_b[0].zone_hi;
+   double targets[1];targets[0]=g_ask+100.0;
+   ApplyEntryEdit(0,0,true,false,g_bid-62.0,g_bid-61.0,g_bid-110.0,true,0.0,false,targets,1);
+   if(!ExitTestRequire(EntryReviewBlocked(0) && g_b[0].tp_stage==2
+                      && g_b[0].zone_lo==original_lo && g_b[0].zone_hi==original_hi
+                      && OrdersTotal()==2 && OrderSelect(known) && OrderGetDouble(ORDER_SL)==old_sl,
+                      "uncertain snapshot changed committed progress or broker stop"))return;
+   Print("CEXIT_TEST_EVENT|entry_receipt_barrier|unknown_owner=1|known_stop_unchanged=1|orders_preserved=2|review_before_mutation=1");
+   ExitTestFinish(true,"UNCERTAIN_ENTRY_SNAPSHOT_BEFORE_BROKER_MUTATION");
+  }
+
+void EmptySppScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0 && In_BankAllAtStage==0
+                      && !In_BankCloseLast && In_SmartSlMode==2 && !In_SmartSlFloorBeRf,
+                      "empty SPP fixture inputs"))return;
+   g_nb=1;ExitTestBasket(0);MapPut(700,1);
+   ulong ticket=0;if(!ExitTestRequire(ExitTestOpen(0,0.01,ticket),"empty SPP position open failed"))return;
+   g_b[0].has_sl=false;g_b[0].ntp=3;
+   for(int i=0;i<3;i++)g_b[0].tps[i]=NormPx(g_bid-3.0+i);
+   g_b[0].tp_stage=2;g_b[0].plan_observed_stage=2;
+   double expected_sl=g_b[0].tps[2];
+   SourceFixtureMessage(701,0,700,"SPP:empty,nan,nan,");
+   if(!ExitTestRequire(g_b[0].ntp==3 && g_b[0].tps[2]==expected_sl
+                      && g_b[0].tp_stage==3 && g_b[0].plan_observed_stage==3
+                      && PositionSelectByTicket(ticket) && PositionGetDouble(POSITION_SL)==expected_sl,
+                      "empty SPP became TP0 or lost the stage-dependent broker stop"))return;
+   Print("CEXIT_TEST_EVENT|empty_spp|targets_preserved=3|stage_before=2|stage_after=3|actual_ladder_stop=1");
+   ExitTestFinish(true,"EMPTY_SPP_TARGETS_RETAIN_PLAN_AND_ADVANCE_EXISTING_STAGE");
+  }
+
+void CorrectionWireScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0 && In_TpCorrToBroker
+                      && In_BankAllAtStage==0 && !In_BankCloseLast && In_TpSource==2,
+                      "correction fixture inputs"))return;
+   g_nb=1;ExitTestBasket(0);MapPut(800,1);
+   ulong position=0,pending=0;
+   if(!ExitTestRequire(ExitTestOpen(0,0.01,position),"correction position open failed"))return;
+   g_b[0].ntp=3;for(int i=0;i<3;i++)g_b[0].tps[i]=NormPx(g_ask+10.0*(i+1));
+   g_b[0].tp_stage=1;g_b[0].plan_observed_stage=1;
+   double sl=NormPx(g_bid-100.0),price=NormPx(g_bid-50.0);
+   if(!ExitTestRequire(WyslijLimit(0,price,0.01,sl,true,g_b[0].tps[2],true,"B1",ORDER_TYPE_BUY_LIMIT,pending),"correction pending open failed"))return;
+   g_b[0].pend[0]=pending;g_b[0].pend_lv[0]=-2;g_b[0].npend=1;
+   double desired=NormPx(g_ask+21.0);
+   SourceFixtureMessage(801,0,800,StringFormat("TPCORR:correct,2,%.8f",desired));
+   if(!ExitTestRequire(OrderSelect(pending) && OrderGetDouble(ORDER_TP)==desired
+                      && OrderGetDouble(ORDER_PRICE_OPEN)==price && OrderGetDouble(ORDER_SL)==sl,
+                      "correction pending used final/per-grid TP or changed other fields"))return;
+   g_b[0].tp_stage=2;g_b[0].plan_observed_stage=2;
+   SourceFixtureMessage(802,0,800,"TPHIT2:zero,0,nan,0");
+   if(!ExitTestRequire(g_b[0].tp_stage==2 && g_b[0].plan_observed_stage==2
+                      && PositionSelectByTicket(position),"TP0 advanced an already reached stage"))return;
+   Print("CEXIT_TEST_EVENT|correction_wire|pending_current_stage_tp=1|price_sl_preserved=1|explicit_zero_index_not_none=1");
+   ExitTestFinish(true,"TP_CORRECTION_PENDING_STAGE_AND_ZERO_INDEX");
+  }
+
 void ExitFaultScenarioTick()
   {
    if(!MQLInfoInteger(MQL_TESTER) || In_TestExitScenario == 0 || g_test_exit_finished) return;
@@ -7061,6 +7369,12 @@ void ExitFaultScenarioTick()
    if(In_TestExitScenario == 10) { ProfitBudgetScenarioTick(); return; }
    if(In_TestExitScenario == 13) { PortfolioBudgetScenarioTick(); return; }
    if(In_TestExitScenario == 14) { BasketCapacityScenarioTick(); return; }
+   if(In_TestExitScenario == 15) { FillReceiptOrderScenarioTick(); return; }
+   if(In_TestExitScenario == 16) { EntryProgressScenarioTick(); return; }
+   if(In_TestExitScenario == 17) { EntrySourceNoopScenarioTick(); return; }
+   if(In_TestExitScenario == 18) { EntryReceiptBarrierScenarioTick(); return; }
+   if(In_TestExitScenario == 19) { EmptySppScenarioTick(); return; }
+   if(In_TestExitScenario == 20) { CorrectionWireScenarioTick(); return; }
    if(In_TestExitScenario == 11 || In_TestExitScenario == 12) { SourceRecoveryScenarioTick(); return; }
    if(In_TestExitScenario == 6) { PartialReceiptScenarioTick(); return; }
    if(In_TestExitScenario == 7 || In_TestExitScenario == 8) { EditReviewScenarioTick(); return; }
@@ -7160,7 +7474,7 @@ int OnInit()
      }
    if(!TestSppTargetPlanReset()) return INIT_FAILED;
    if(!TestBeRetargetContract()) return INIT_FAILED;
-   if(In_TestExitScenario < 0 || In_TestExitScenario > 14) return INIT_PARAMETERS_INCORRECT;
+   if(In_TestExitScenario < 0 || In_TestExitScenario > 20) return INIT_PARAMETERS_INCORRECT;
    if(In_TestExitScenario > 0
       && (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       return INIT_PARAMETERS_INCORRECT;

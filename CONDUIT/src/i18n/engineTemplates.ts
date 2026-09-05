@@ -1533,4 +1533,5 @@ export const ENGINE_TEMPLATES: readonly (readonly [string, string])[] = [
   ["BUDŻET RYZYKA: {reason:?}; żadna legalna siatka nie mieści się w bieżącej rezerwie", "RISK BUDGET: {reason:?}; no legal grid fits the current reserve"],
   ["Okno natywne niedostępne ({error}). CONDUIT nadal działa pod {adres}; otwieram przeglądarkę.", "Native window unavailable ({error}). CONDUIT keeps running at {adres}; opening the browser."],
   ["Przeglądarka niedostępna ({error}). CONDUIT nadal działa; otwórz ręcznie {adres}.", "Browser unavailable ({error}). CONDUIT keeps running; open {adres} manually."],
+  ["MT5: kolejność lokalnych zleceń niedostępna; remisy starych filli zachowują kolejność obserwacji", "MT5: local order sequence unavailable; tied legacy fills retain observed order"],
 ];

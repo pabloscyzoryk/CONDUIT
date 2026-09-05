@@ -47,7 +47,7 @@ const CISZA_KWOTOWAN_MIN: f64 = 5.0;
 /// — zwykła przerwa w notowaniach kasowałaby połączenie bez potrzeby.
 const CISZA_ODBUDOWA_MIN: f64 = 12.0;
 
-const SYGNAL_MAX_WIEK_MIN: f64 = 5.0;
+const SYGNAL_MAX_WIEK_MIN: f64 = conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN;
 
 /// Czy o tej porze notowania W OGÓLE powinny płynąć.
 ///
@@ -665,13 +665,11 @@ fn wiek_ponad_prog(teraz_ms: i64, wyslano_ms: i64, prog_min: f64) -> Option<f64>
 
 /// Próg wieku sygnału z dokumentu panelu. Brak klucza = [`SYGNAL_MAX_WIEK_MIN`].
 fn prog_wieku_sygnalu(st: &StateHandle) -> f64 {
-    st.read(|s| {
+    conduit_core::telegram_ingress::normalized_max_entry_age_min(st.read(|s| {
         s.settings
             .get("signal_max_age_min")
             .and_then(|v| v.as_f64())
-    })
-    .filter(|v| v.is_finite() && *v >= 0.0)
-    .unwrap_or(SYGNAL_MAX_WIEK_MIN)
+    }))
 }
 
 /// Co ile zapisujemy zrzut koszyków, gdy się zmieniły. Zapis jest atomowy
@@ -3068,7 +3066,7 @@ fn handel(
                                 wiek,
                                 prog_wieku,
                             );
-                            let mut m = wiadomosc_ui(st, &im);
+                            let mut m = wiadomosc_ui(st, &im, Some(received_utc));
                             m.pending_action = Some("dismissed".into());
                             st.log(
                                 "telegram",
@@ -3088,10 +3086,10 @@ fn handel(
                             dopisz(&mut bufor, m);
                             continue;
                         }
-                        im.ts = ostatni_ts;
+                        // UI retains Telegram UTC; only the engine receives broker time.
+                        let mut m = wiadomosc_ui_przed_zegarem_brokera(st, &mut im, received_utc, ostatni_ts);
                         ostrzez_o_nieczytelnym_sygnale(st, &im);
                         let auto = tryb_automatyczny(st);
-                        let mut m = wiadomosc_ui(st, &im);
                         if auto {
                             m.pending_action = None;
                             // „Wykonany" TYLKO wtedy, gdy silnik naprawdę go wziął.
@@ -3143,9 +3141,9 @@ fn handel(
                     // kliknął „wyślij", więc pytanie „czy na pewno" byłoby
                     // pytaniem o to samo drugi raz.
                     LiveCmd::Reczny(mut im) => {
-                        im.ts = ostatni_ts;
+                        let received_utc = conduit_server::now_ms();
+                        let mut m = wiadomosc_ui_przed_zegarem_brokera(st, &mut im, received_utc, ostatni_ts);
                         let powod = skieruj(st, &mut silniki, &mut broker, &im, conduit_server::now_ms());
-                        let mut m = wiadomosc_ui(st, &im);
                         match powod {
                             WynikSygnalu::Odroczony(status) => {
                                 m.pending_action = Some("deferred".into());
@@ -5969,6 +5967,8 @@ fn opublikuj(
             ask: q.ask,
             spread: q.spread(),
             time: q.ts,
+            time_basis: Some("broker_wall".into()),
+            time_utc: None,
             change: 0.0,
             change_pct: 0.0,
             day_high: q.bid,
@@ -6188,7 +6188,13 @@ fn oznacz(bufor: &mut [ui::ChatMessage], id: &str, stan: &str) {
     }
 }
 
-fn wiadomosc_ui(st: &StateHandle, im: &IncomingMessage) -> ui::ChatMessage {
+fn wiadomosc_ui_przed_zegarem_brokera(st: &StateHandle, im: &mut IncomingMessage, received_utc: i64, broker_ts: i64) -> ui::ChatMessage {
+    let message = wiadomosc_ui(st, im, Some(received_utc));
+    im.ts = broker_ts;
+    message
+}
+
+fn wiadomosc_ui(st: &StateHandle, im: &IncomingMessage, received_utc: Option<i64>) -> ui::ChatMessage {
     let parsed = conduit_server::demo::parsuj(&im.text);
     let types: Vec<String> = parsed.iter().map(|p| p.kind.clone()).collect();
     // Format przypisany do ŹRÓDŁA (kanał + temat), nie do samego czatu.
@@ -6209,6 +6215,8 @@ fn wiadomosc_ui(st: &StateHandle, im: &IncomingMessage) -> ui::ChatMessage {
         // Ten sam kontrakt, co klucz dedupu w silniku (Pakiet A).
         id: format!("live-{}-{}", im.source.as_string(), im.msg_id),
         time: im.ts,
+        time_basis: Some("utc".into()),
+        received_time_utc: received_utc,
         channel_id: im.source.chat_id,
         channel_name: im.source_name.clone(),
         topic_id: im.source.topic_id,
@@ -6233,6 +6241,26 @@ mod tests {
     use conduit_backtest::sim::SimBroker;
     use conduit_core::journal::{EventKind, RejectCode};
     use conduit_core::settings::Settings;
+
+    #[test]
+    fn chat_ui_preserves_utc_while_engine_receives_broker_quote_clock() {
+        let st = stan("chat-clock-domain");
+        let published_utc = 1_800_000_000_000;
+        let received_utc = published_utc + 2000;
+        let mut im = IncomingMessage {
+            ts: published_utc,
+            source: conduit_core::SourceKey { chat_id: -100, topic_id: None },
+            source_name: "Synthetic".into(), msg_id: 7, reply_to: None, edit_of: None,
+            text: "GOLD BUY 2000 SL 1990 TP 2010".into(),
+        };
+        let stale_ui = wiadomosc_ui(&st, &im, Some(received_utc));
+        let active_ui = wiadomosc_ui_przed_zegarem_brokera(&st, &mut im, received_utc, received_utc + 10_800_000);
+        assert_eq!(active_ui.time, published_utc);
+        assert_eq!(active_ui.time, stale_ui.time);
+        assert_eq!(active_ui.time_basis.as_deref(), Some("utc"));
+        assert_eq!(active_ui.received_time_utc, Some(received_utc));
+        assert_eq!(im.ts, received_utc + 10_800_000);
+    }
 
     fn sr_research_config() -> Settings {
         let mut c=Settings::default();c.sr_warmup_exact_ticks=true;
@@ -6478,7 +6506,8 @@ mod tests {
             s.baskets = engines.koszyki().iter().map(|b| ui::basket_from_core(b,"XAUUSD.s")).collect();
             s.closed = closed.iter().map(|c| ui::closed_from_core(c,"XAUUSD.s")).collect();
             s.quotes.insert("XAUUSD.s".into(), ui::Quote { symbol: "XAUUSD.s".into(), bid: 4000.0,
-                ask: 4000.2, spread: 0.2, time: 1_700_000_000_000, change_pct: 0.0, change: 0.0, day_high: 5000.0, day_low: 3000.0 });
+                ask: 4000.2, spread: 0.2, time: 1_700_000_000_000, time_basis: Some("broker_wall".into()), time_utc: None,
+                change_pct: 0.0, change: 0.0, day_high: 5000.0, day_low: 3000.0 });
             s.foreign.positions = 9;
             s.connection.account_session = "B-generation".into();
             s.connection.resolved_symbol = "XAUUSD.s".into();

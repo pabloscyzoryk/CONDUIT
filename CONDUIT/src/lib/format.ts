@@ -69,6 +69,12 @@ export const dateTime = (t: number) =>
     second: "2-digit",
   }).format(t);
 
+/** Broker wall-clock fields: UTC is a rendering convention, not an inferred broker offset. */
+export const brokerTime = (value: number) => Number.isFinite(value) && value > 0
+  ? fmtDaty("broker-time", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(value) : BRAK;
+export const brokerDateTime = (value: number) => Number.isFinite(value) && value > 0
+  ? fmtDaty("broker-full", { timeZone: "UTC", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(value) : BRAK;
+
 export function ago(czas: number): string {
   const s = Math.max(0, (Date.now() - czas) / 1000);
   if (s < 45) return t("fmt.ago.now");

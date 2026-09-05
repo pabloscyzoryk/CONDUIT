@@ -4,7 +4,7 @@ import { Badge, Button, Card, Empty, Icon, NumberInput, TextInput } from "@/comp
 import { usePotwierdzenie } from "@/components/ui/Potwierdzenie";
 import { useApp } from "@/store/AppStore";
 import { useT } from "@/i18n";
-import { ago, num, time } from "@/lib/format";
+import { ago, num, time, brokerTime, brokerDateTime } from "@/lib/format";
 import type { Basket } from "@/types";
 
 export function BasketsPanel({ limit }: { limit?: number }) {
@@ -99,7 +99,7 @@ function BasketCard({ b }: { b: Basket }) {
           SL {b.sl ? num(b.sl, 2) : "—"}
         </span>
         <span className="spacer" />
-        <span className="cell-sub">{ago(b.createdAt)}</span>
+        <span className="cell-sub">{app.live ? `${brokerDateTime(b.createdAt)} · ${tt("clock.source")}` : ago(b.createdAt)}</span>
       </div>
 
       <div className="basket__tps">
@@ -165,7 +165,7 @@ function BasketCard({ b }: { b: Basket }) {
               .slice(0, 8)
               .map((e, i) => (
                 <li key={i} className={`basket__ev basket__ev--${e.kind}`}>
-                  <span className="num">{time(e.t)}</span>
+                  <span className="num">{app.live ? brokerTime(e.t) : time(e.t)}</span>
                   {tSilnik(e.text)}
                 </li>
               ))}

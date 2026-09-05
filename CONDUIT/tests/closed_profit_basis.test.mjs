@@ -91,7 +91,7 @@ const textOf = tree => Array.isArray(tree) ? tree.map(textOf).join('') : tree &&
 
 test('actual HistoryView rows and summary render the same net as chart, including unknowns', () => {
   const closed = [record({ profitBasis: 'PriceOnlyGross', swap: -3 }), record({ profitBasis: 'PricePlusSwap', profit: 23, swap: 3, closeTime: 2000 })];
-  app = { settings: { display_currency: 'USD' }, stats: { sessionStart: 0 }, snapshot: { closed, pendingHistory: [] } };
+  app = { primary: { time: 3000 }, live: false, settings: { display_currency: 'USD' }, stats: { sessionStart: 0 }, snapshot: { closed, pendingHistory: [] } };
   let tree = HistoryView();
   const rows = nodes(tree, x => x.type === 'td' && x.props.className?.startsWith('num cell-strong')).map(textOf);
   assert.deepEqual(rows, ['+$21.00', '+$15.00']);

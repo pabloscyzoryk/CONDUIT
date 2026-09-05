@@ -43,20 +43,8 @@ const COUNT = 500;
 /** Co ile odpytujemy backend o świeże świece. */
 const POLL_MS = 3000;
 
-/**
- * Ile trzeba dodać do znacznika świecy, żeby lokalne `getHours()` pokazało
- * godzinę SERWERA BROKERA.
- *
- * Znaczniki z MT5 są w czasie serwera (dziś UTC+3) zapisanym jako epoka, a
- * `Date` czyta epokę w strefie przeglądarki i dokłada JESZCZE RAZ jej własne
- * przesunięcie. Bez tej korekty podpis pokazywałby czas brokera powiększony
- * o strefę użytkownika — ani czas brokera, ani UTC, ani czas lokalny.
- *
- * `getTimezoneOffset()` zwraca minuty, które trzeba dodać do czasu lokalnego,
- * żeby dostać UTC (dla UTC+2 jest to −120), więc mnożenie przez 60 000 daje
- * dokładnie wartość znoszącą strefę przeglądarki.
- */
-const brokerClockOffset = () => new Date().getTimezoneOffset() * 60000;
+/** Broker wall-clock timestamps are rendered with UTC getters, independently of browser DST. */
+const brokerClockOffset = () => 0; // Labels use UTC getters: no browser-zone or DST correction.
 
 interface Odpowiedz {
   source?: string;

@@ -50,6 +50,7 @@
 pub mod badanie;
 pub mod kolejka;
 pub mod language;
+mod rate;
 /// Przeglądarka presetów już policzonych w trwającym przemiataniu.
 pub mod przesiane;
 pub mod zbiorczy;
@@ -581,21 +582,10 @@ pub struct Raport {
     dir: PathBuf,
     stan: Postep,
     ostatni_zapis: Instant,
-    /// (chwila, zrobione) z poprzedniej próbki — do liczenia prędkości
-    poprzednia_probka: (Instant, f64),
-    /// wygładzona prędkość (średnia wykładnicza)
-    szybkosc_wygl: f64,
+    rate: rate::ProgressRate,
     /// czy zauważyliśmy już plik stop
     stop: bool,
 }
-
-/// Współczynnik wygładzania prędkości.
-///
-/// Surowa prędkość liczona z 250-milisekundowej próbki skacze o kilkadziesiąt
-/// procent (harmonogram wątków, cache dysku) i jest nieczytelna. 0,25 przy
-/// próbce 250 ms daje stałą czasową ~1 s: liczba stoi spokojnie, a na realną
-/// zmianę tempa reaguje w sekundę.
-const ALFA: f64 = 0.25;
 
 impl Raport {
     /// Zakłada zadanie i — jeśli trzeba — podnosi okno.
@@ -622,8 +612,7 @@ impl Raport {
             dir,
             stan,
             ostatni_zapis: Instant::now(),
-            poprzednia_probka: (Instant::now(), 0.0),
-            szybkosc_wygl: 0.0,
+            rate: rate::ProgressRate::new(Instant::now()),
             stop: false,
         };
         let _ = zapisz_atomowo(&r.dir, &r.stan);
@@ -686,30 +675,13 @@ impl Raport {
         }
         self.ostatni_zapis = teraz;
 
-        // --- prędkość (średnia wykładnicza) ---
-        let odstep = teraz.duration_since(self.poprzednia_probka.0).as_secs_f64();
-        if odstep > 0.01 {
-            let chwilowa = ((zrobione - self.poprzednia_probka.1) / odstep).max(0.0);
-            self.szybkosc_wygl = if self.szybkosc_wygl <= 0.0 {
-                chwilowa
-            } else {
-                ALFA * chwilowa + (1.0 - ALFA) * self.szybkosc_wygl
-            };
-            self.poprzednia_probka = (teraz, zrobione);
-        }
-
         self.stan.zrobione = zrobione;
         self.stan.postep = if self.stan.calosc > 0.0 {
             (zrobione / self.stan.calosc).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        self.stan.szybkosc = self.szybkosc_wygl;
-        self.stan.eta_s = if self.szybkosc_wygl > 1e-9 && self.stan.calosc > 0.0 {
-            ((self.stan.calosc - zrobione).max(0.0) / self.szybkosc_wygl).min(30.0 * 86_400.0)
-        } else {
-            -1.0
-        };
+        (self.stan.szybkosc, self.stan.eta_s) = self.rate.update(teraz, zrobione, self.stan.calosc);
         self.stan.co_teraz = co_teraz.into();
         self.stan.statystyki = staty;
         self.stan.aktualizacja_ts = teraz_ms();

@@ -811,9 +811,9 @@ pub fn zmienne_tematu(
     };
 
     // ---------- doba handlowa ----------
-    // Ta sama definicja, co w `live.rs`: doba liczona w zegarze SERWERA
-    // BROKERA (`server_tz_offset_h`), nie maszyny. Przy offsecie +3 h doba
-    // kalendarzowa Windows przestawiałaby liczniki trzy godziny za wcześnie.
+    // `day_key` i `ClosedPosition.close_time` są już w tej samej domenie
+    // zegara brokera, tak jak w live.rs. Offset dotyczy wyłącznie awaryjnego
+    // przeliczenia `now_ms` (UTC), zanim dostaniemy dzień z kwotowania.
     let offset_ms = snap
         .settings
         .get("server_tz_offset_h")
@@ -827,7 +827,7 @@ pub fn zmienne_tematu(
     } else {
         (now_ms + offset_ms).div_euclid(86_400_000)
     };
-    let dzis = |ts: i64| (ts + offset_ms).div_euclid(86_400_000) == doba;
+    let dzis = |ts: i64| ts.div_euclid(86_400_000) == doba;
 
     // ---------- transakcje bota z dzisiaj ----------
     // Tylko `Origin::Bot`: na rachunku bywają pozycje z terminala i ze starego
@@ -1566,7 +1566,7 @@ mod tests {
         s.quotes.insert(
             "XAUUSD".into(),
             Quote {
-                symbol: "XAUUSD".into(),
+                time_basis: None, time_utc: None,                symbol: "XAUUSD".into(),
                 bid: 4665.32,
                 ask: 4665.61,
                 spread: 0.29,
@@ -1676,6 +1676,47 @@ mod tests {
         assert_eq!(v.get("skutecznosc"), Some("66.7%"));
         // (12 + 6) / 4
         assert_eq!(v.get("profit_factor"), Some("4.50"));
+    }
+
+    #[test]
+    fn mail_daily_close_times_are_already_in_broker_clock_for_both_offsets() {
+        use crate::ui::Origin;
+        const DAY: i64 = 86_400_000;
+        const HOUR: i64 = 3_600_000;
+        for offset in [2, 3] {
+            let mut snap = migawka();
+            snap.settings = serde_json::json!({"server_tz_offset_h": offset});
+            let start = snap.stats.day_key * DAY;
+            snap.closed = vec![
+                zamknieta(3.0, start, Origin::Bot),
+                zamknieta(11.0, start + 23 * HOUR, Origin::Bot),
+                zamknieta(99.0, start - HOUR, Origin::Bot),
+                zamknieta(17.0, start + DAY, Origin::Bot),
+                zamknieta(500.0, start + 23 * HOUR, Origin::External),
+            ];
+            let vars = zmienne_tematu(&snap, MailCategory::Summary, "report", start - 5 * DAY);
+            assert_eq!(vars.get("transakcje"), Some("2"), "offset {offset}");
+            assert_eq!(vars.get("zysk_dzis"), Some("+$14.00"), "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn mail_day_fallback_offsets_only_wall_utc_not_broker_deal_times() {
+        use crate::ui::Origin;
+        const DAY: i64 = 86_400_000;
+        const HOUR: i64 = 3_600_000;
+        let mut snap = migawka();
+        let broker_start = snap.stats.day_key * DAY;
+        snap.stats.day_key = 0;
+        snap.settings = serde_json::json!({"server_tz_offset_h": 3});
+        snap.closed = vec![
+            zamknieta(7.0, broker_start + 60_000, Origin::Bot),
+            zamknieta(-13.0, broker_start - 60_000, Origin::Bot),
+        ];
+        let utc_now = broker_start - 3 * HOUR + 30 * 60_000;
+        let vars = zmienne_tematu(&snap, MailCategory::Summary, "report", utc_now);
+        assert_eq!(vars.get("transakcje"), Some("1"));
+        assert_eq!(vars.get("zysk_dzis"), Some("+$7.00"));
     }
 
     #[test]

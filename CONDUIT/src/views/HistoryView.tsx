@@ -3,10 +3,12 @@ import { Badge, Button, Card, Empty, Select } from "@/components/ui";
 import { EksportHistorii } from "@/components/panels/ExportPanel";
 import { useApp } from "@/store/AppStore";
 import { useT } from "@/i18n";
-import { dateTime, duration, money, num, toneOf } from "@/lib/format";
+import { dateTime, brokerDateTime, duration, money, num, toneOf } from "@/lib/format";
 import { closedNetProfit, closedProfitSummary } from "@/lib/tradeProfit";
 import { isManaged, type CloseReason, type PositionSource } from "@/types";
 import "./views.css";
+import { historyFrom } from "@/lib/clock";
+import { useTykanie } from "@/components/layout/PulsRynku";
 
 /** Okresy: wartość jest LICZBĄ MINUT (albo `session`/`all`), etykieta
  *  mieszka w słowniku pod `hist.period.<wartość>`. */
@@ -64,17 +66,16 @@ export function HistoryView() {
   const app = useApp();
   const t = useT();
   const cur = app.settings.display_currency;
-  const [period, setPeriod] = useState("session");
+  const [period, setPeriod] = useState("all");
   const [reason, setReason] = useState("all");
   const [sort, setSort] = useState<SortKey>("closeTime");
   const [dir, setDir] = useState<1 | -1>(-1);
   const [scope, setScope] = useState<Scope>("all");
 
-  const from = useMemo(() => {
-    if (period === "all") return 0;
-    if (period === "session") return app.stats.sessionStart;
-    return Date.now() - Number(period) * 60000;
-  }, [period, app.stats.sessionStart]);
+  const nowUtc = useTykanie();
+  const from = historyFrom(period, app.stats.sessionStart, nowUtc, app.live, app.primary.time);
+  const stamp = app.live ? brokerDateTime : dateTime;
+  const to = period !== "all" && app.live && from !== null ? app.primary.time : undefined;
 
   /* Ile w historii jest transakcji spoza bota — decyduje, czy w ogole
      pokazujemy przelacznik zakresu. */
@@ -86,7 +87,7 @@ export function HistoryView() {
   const closed = useMemo(() => {
     const arr = app.snapshot.closed.filter(
       (c) =>
-        c.closeTime >= from &&
+        from !== null && c.closeTime >= from && (to === undefined || c.closeTime <= to) &&
         (reason === "all" || c.reason === reason) &&
         (scope === "all" || (scope === "bot") === isManaged(c.source)),
     );
@@ -98,11 +99,11 @@ export function HistoryView() {
       return (va - vb) * dir;
     });
     return arr;
-  }, [app.snapshot.closed, from, reason, sort, dir, scope]);
+  }, [app.snapshot.closed, from, to, reason, sort, dir, scope]);
 
   const pendHist = useMemo(
-    () => app.snapshot.pendingHistory.filter((p) => p.endTime >= from),
-    [app.snapshot.pendingHistory, from],
+    () => app.snapshot.pendingHistory.filter((p) => from !== null && p.endTime >= from && (to === undefined || p.endTime <= to)),
+    [app.snapshot.pendingHistory, from, to],
   );
 
   const summary = useMemo(() => closedProfitSummary(closed), [closed]);
@@ -159,7 +160,7 @@ export function HistoryView() {
           <Select
             value={period}
             onChange={setPeriod}
-            options={PERIODS.map((p) => ({ value: p, label: t(`hist.period.${p}`) }))}
+            options={PERIODS.filter((p) => !(app.live && p === "session")).map((p) => ({ value: p, label: t(`hist.period.${p}`) }))}
             size="sm"
             style={{ minWidth: 200 }}
           />
@@ -174,19 +175,21 @@ export function HistoryView() {
           />
           {/* Eksport bierze DOKŁADNIE te filtry, które widać na ekranie —
               plik z innym zakresem niż tabela nad nim byłby pułapką. */}
-          <EksportHistorii
+          {from !== null && <EksportHistorii
             ile={closed.length}
             filtr={{
-              from: period === "all" ? undefined : from,
+              from: period === "all" ? undefined : from ?? undefined,
+              to,
               scope: scope === "all" ? undefined : scope,
               reason: reason === "all" ? undefined : reason,
             }}
-          />
+          />}
         </div>
       </div>
 
       {/* Etykieta zakresu przy statystykach: bez niej „profit factor" milczaco
           zmienialby znaczenie po przelaczeniu filtra. */}
+      {app.live && <div className="hint">{t("clock.server")}{period !== "all" && ` · ${t(from === null ? "clock.noAnchor" : "clock.historyAnchor")}`}</div>}
       <div className="hscope">
         {t("hist.scopeNote")} <b>{t(SCOPE_LABEL[scope])}</b>
         {obceCount > 0 && scope === "all" && t("hist.scopeNote.mixed")}
@@ -280,9 +283,9 @@ export function HistoryView() {
                       <Badge tone={c.direction === "BUY" ? "long" : "short"}>{c.direction}</Badge>
                     </td>
                     <td className="num">{c.volume.toFixed(2)}</td>
-                    <td className="num cell-sub">{dateTime(c.openTime)}</td>
+                    <td className="num cell-sub">{stamp(c.openTime)}</td>
                     <td className="num">{num(c.openPrice, 2)}</td>
-                    <td className="num cell-sub">{dateTime(c.closeTime)}</td>
+                    <td className="num cell-sub">{stamp(c.closeTime)}</td>
                     <td className="num">{num(c.closePrice, 2)}</td>
                     <td className="num cell-sub">{duration(c.closeTime - c.openTime)}</td>
                     <td style={{ textAlign: "left" }}>
@@ -348,8 +351,8 @@ export function HistoryView() {
                     <td className="num">{num(p.price, 2)}</td>
                     <td className="num down">{p.sl ? num(p.sl, 2) : "—"}</td>
                     <td className="num up">{p.tp ? num(p.tp, 2) : "—"}</td>
-                    <td className="num cell-sub">{dateTime(p.placedTime)}</td>
-                    <td className="num cell-sub">{dateTime(p.endTime)}</td>
+                    <td className="num cell-sub">{stamp(p.placedTime)}</td>
+                    <td className="num cell-sub">{stamp(p.endTime)}</td>
                     <td style={{ textAlign: "left" }}>
                       <Badge tone={p.status === "FILLED" ? "long" : p.status === "EXPIRED" ? "warn" : "muted"}>
                         {p.status === "FILLED"

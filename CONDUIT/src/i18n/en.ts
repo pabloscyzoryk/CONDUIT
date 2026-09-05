@@ -2601,4 +2601,13 @@ export const EN = {
   "logs.category.email": "email",
   "logs.category.backtests": "backtests",
   "logs.category.logs": "logs",
+
+  "clock.server": "Server time",
+  "clock.source": "Source time",
+  "clock.local": "Local time",
+  "clock.unknown": "Time basis unknown",
+  "clock.received": "Received",
+  "clock.ageUnknown": "Quote age unknown",
+  "clock.historyAnchor": "Period ends at the last quote (source time).",
+  "clock.noAnchor": "No source clock: choose all history.",
 };

@@ -248,6 +248,10 @@ impl From<conduit_core::CloseReason> for CloseReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Quote {
+    #[serde(default)]
+    pub time_basis: Option<String>,
+    #[serde(default)]
+    pub time_utc: Option<i64>,
     pub symbol: String,
     pub bid: f64,
     pub ask: f64,
@@ -746,6 +750,10 @@ pub struct ParsedSignal {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
+    #[serde(default)]
+    pub time_basis: Option<String>,
+    #[serde(default)]
+    pub received_time_utc: Option<i64>,
     pub id: String,
     pub time: i64,
     pub channel_id: i64,

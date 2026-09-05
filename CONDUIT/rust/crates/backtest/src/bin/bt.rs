@@ -190,6 +190,7 @@ struct Args {
     sim_trade_sessions: Option<conduit_backtest::trade_sessions::TradeSessionProfile>,
     /// Raw Telegram replay uses the exact VPS content-dedup ingress.
     live_telegram_ingress: bool,
+    live_ingress_max_age_min: f64,
     /// Explicit approximate screening stride; 1 is the exact legacy path.
     quick_tick_stride: usize,
     sim_price_digits: Option<u32>,
@@ -379,6 +380,7 @@ fn main_run_config(a: &Args, p: &Wariant, from: i64, to: i64,
         sim_native_swap_cash_digits: a.sim_native_swap_cash_digits,
         sim_trade_sessions: a.sim_trade_sessions.clone(),
         live_telegram_ingress: a.live_telegram_ingress,
+        live_ingress_max_age_min: a.live_ingress_max_age_min,
         quick_tick_stride: a.quick_tick_stride,
         settings: p.settings.clone(),
         ea_konfig: p.ea.clone(),
@@ -441,6 +443,7 @@ fn parse_args() -> Result<Args> {
         sim_native_swap_cash_digits: None,
         sim_trade_sessions: None,
         live_telegram_ingress: false,
+        live_ingress_max_age_min: conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN,
         quick_tick_stride: 1,
         sim_price_digits: None,
         from: None,
@@ -498,6 +501,12 @@ fn parse_args() -> Result<Args> {
                 a.sim_native_swap_cash_digits = Some(digits);
             }
             "--live-telegram-ingress" => a.live_telegram_ingress = true,
+            "--live-ingress-max-age-min" => {
+                a.live_ingress_max_age_min = next()?.parse()?;
+                if !a.live_ingress_max_age_min.is_finite() || a.live_ingress_max_age_min < 0.0 {
+                    bail!("--live-ingress-max-age-min requires finite minutes >=0 (0=off)");
+                }
+            },
             "--quick-tick-stride" => {
                 a.quick_tick_stride = next()?.parse()?;
                 if a.quick_tick_stride == 0 {
@@ -577,6 +586,7 @@ fn parse_args() -> Result<Args> {
                      --sim-native-swap-cash-digits <0..8>  jawny model: swap w equity, w saldzie przy close\n\
                      \x20                     Precyzja waluty rachunku; brak flagi zachowuje legacy.\n\
                      --live-telegram-ingress  raw replay przechodzi przez te sama bramke odbiorcza\n\
+                     --live-ingress-max-age-min <min>  signal_max_age_min z LIVE (domyslnie5;0=bez bramki wieku NEW)\n\
                      \x20                     Telegrama co aplikacja LIVE (zwykly backtest: OFF).\n\
                      --quick-tick-stride <N>  PRZYBLIŻONE sito: bloki N ticków zachowują\n\
                      \x20                     first/last + min/max BID/ASK i granice zdarzeń.\n\
@@ -1300,7 +1310,7 @@ fn main() -> Result<()> {
             "enabled": true,
             "content_dedup": "conduit_core::telegram_ingress::ContentMemory",
             "stale_entry_gate": "conduit_core::telegram_ingress::stale_entry_age_minutes",
-            "stale_entry_max_age_min": 5.0,
+            "stale_entry_max_age_min": a.live_ingress_max_age_min,
             "stale_entry_scope": "fresh opening messages only; edits and management always pass",
             "telegram_publication_time_source": "telegram_published_ts or ts-latency_ms",
             "engine_timestamp_after_gate": "latest causal market tick, matching LIVE",
@@ -1743,9 +1753,9 @@ fn main() -> Result<()> {
                             ocena: oc,
                             zysk: r.metrics.total_profit,
                             pf: r.metrics.profit_factor,
-                            najgorszy_dzien: r.metrics.worst_day,
+                            najgorszy_dzien: r.metrics.worst_market_day,
                             dno_equity: r.metrics.min_equity,
-                            dni_plus: r.metrics.win_days_pct,
+                            dni_plus: r.metrics.positive_market_days_pct,
                             trejdy: r.metrics.trades,
                         });
                     }
@@ -2788,6 +2798,7 @@ mod testy_konfiguracji_walk_forward {
         sim_native_swap_cash_digits: None,
         sim_trade_sessions: None,
         live_telegram_ingress: false,
+        live_ingress_max_age_min: conduit_core::telegram_ingress::DEFAULT_MAX_ENTRY_AGE_MIN,
         quick_tick_stride: 1,
         sim_price_digits: None,
         from: None,
@@ -2826,6 +2837,7 @@ mod testy_konfiguracji_walk_forward {
         a.sim_new_pending_sl_next_tick = true;
         a.sim_native_swap_cash_digits = Some(2);
         a.live_telegram_ingress = true;
+        a.live_ingress_max_age_min = 30.0;
         a.sim_price_digits = Some(2);
         a.daily_reset = true;
         a.auto_ea = true;
@@ -2872,7 +2884,7 @@ mod testy_konfiguracji_walk_forward {
         let RunConfig {
             from,to,start_balance,sim_limit_price_improvement,
             sim_new_pending_sl_next_tick,sim_native_swap_cash_digits,sim_trade_sessions,
-            live_telegram_ingress,quick_tick_stride,
+            live_telegram_ingress,live_ingress_max_age_min,quick_tick_stride,
             settings,formaty,pulapy,daily_reset,source_name,curve_interval_ms,
             rozgrzewka_h,drabinka,drabinka_histereza_pct,drabinka_kredyt,
             flat_na_dobie,journal_path,auto_ea,ea_konfig,
@@ -2884,6 +2896,7 @@ mod testy_konfiguracji_walk_forward {
             "sim_native_swap_cash_digits":sim_native_swap_cash_digits,
             "sim_trade_sessions":sim_trade_sessions,
             "live_telegram_ingress":live_telegram_ingress,
+            "live_ingress_max_age_min":live_ingress_max_age_min,
             "quick_tick_stride":quick_tick_stride,
             "settings":settings,"formaty":legs(formaty),"pulapy":pulapy,
             "daily_reset":daily_reset,"source_name":source_name,
@@ -3060,6 +3073,7 @@ mod testy_konfiguracji_walk_forward {
         sim_native_swap_cash_digits: a.sim_native_swap_cash_digits,
         sim_trade_sessions: a.sim_trade_sessions.clone(),
         live_telegram_ingress: a.live_telegram_ingress,
+        live_ingress_max_age_min: a.live_ingress_max_age_min,
         settings: p.settings.clone(),
         ea_konfig: p.ea.clone(),
         formaty: p.formaty.clone(),

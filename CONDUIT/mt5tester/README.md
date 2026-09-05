@@ -96,12 +96,14 @@ effective settings must remain explicit and identical in both systems.
   tombstone prevents new orders and retries broker-refused pending removal.
 - Daily trailing can use total peak equity or peak daily profit. Day, EOD
   and weekend guards include exposure consisting only of pending orders.
-- Native fault scenarios 1–14 in XT exercise confirmed exits, broker refusal,
+- Native fault scenarios 1–15 in XT exercise confirmed exits, broker refusal,
   cancellation/fill races, residual partials, partial accounting, refused
   grid edits and clean replacement, including legacy and no-fault controls.
   Further scenarios cover known special grid legs, profit-budget flooring
   against acknowledged exposure, a standalone portfolio cap before profit
   reserve activation, receive-time source recovery and legacy orphan rejection.
+  A receipt-order fixture uses actual equal-price positions with a synthetic
+  pre-reconciliation pending cache to verify stable RiskFree grid selection.
   Source identity and aliases survive basket pruning within
   a native run. XT accepts one source channel per experiment; its fresh tester
   state does not claim the live application's persisted account restart proof.

@@ -4,6 +4,7 @@ import { LancuchyPanel, WyborLancucha } from "@/components/panels/LancuchyPanel"
 import { DymekLotAuto, useEkspozycjaAuto } from "@/components/panels/LotAuto";
 import { CofnijPonow } from "./CofnijPonow";
 import { CommandMenu, type SettingsRequest } from "./CommandMenu";
+import { quoteUtcTime } from "@/lib/clock";
 import { WiekKwotowania, ZdrowieMT5, stanKwotowania, useTykanie } from "./PulsRynku";
 import { presetDlaFormatu } from "@/data/formaty";
 import { useApp } from "@/store/AppStore";
@@ -126,7 +127,7 @@ export function Shell({ view, onView, onSettings, children }: { view: ViewId; on
   /* Wiek kwotowania liczy się z ZEGARA, nie z przyjścia danych — gdy strumień
      staje, panel przestaje się przerysowywać i licznik zamarłby razem z nim. */
   const teraz = useTykanie();
-  const stanQ = stanKwotowania(q.time, teraz);
+  const stanQ = stanKwotowania(quoteUtcTime(q, app.live), teraz);
   const martwe = stanQ === "martwe" || stanQ === "brak";
   /* TRYB AUTO-EA ma WŁASNY wskaźnik aktywnego łańcucha (projekt EA-2), więc
      i własną nazwę wejścia do panelu. Jedna flaga, żeby warunek nie rozsypał
@@ -213,7 +214,7 @@ export function Shell({ view, onView, onSettings, children }: { view: ViewId; on
             {}
             <span
               className={`conn ${
-                app.connection.mt5 !== "connected" ? "conn--off" : martwe ? "conn--warn" : "conn--ok"
+                app.connection.mt5 !== "connected" ? "conn--off" : martwe || stanQ === "nieznane" ? "conn--warn" : "conn--ok"
               }`}
             >
               <span className="dot dot--pulse" />

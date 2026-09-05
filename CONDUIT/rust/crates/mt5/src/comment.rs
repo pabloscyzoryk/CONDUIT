@@ -24,6 +24,8 @@ pub struct Tagged {
     pub basket: Option<u32>,
     pub level: i32,
     pub is_toucher: bool,
+    /// Local submission order within a basket. Missing in legacy/truncated comments.
+    pub order_sequence: Option<u64>,
     /// oryginalny komentarz silnika, jeśli się zmieścił
     pub note: String,
 }
@@ -64,6 +66,32 @@ pub fn encode(tag: &str, basket: Option<u32>, level: i32, is_toucher: bool, note
         s.truncate(MAX_COMMENT);
     }
     s
+}
+
+/// Adds a complete, terminated base-36 local-order marker before the optional note.
+/// Returning None preserves the existing machine identity when a custom tag or
+/// extreme IDs leave insufficient room; a truncated ordinal is never accepted.
+pub fn encode_ordered(tag: &str, basket: Option<u32>, level: i32, is_toucher: bool,
+                      sequence: u64, note: &str) -> Option<String> {
+    if sequence == 0 { return None; }
+    let prefix = encode(tag, basket, level, is_toucher, "");
+    let decoded = decode(tag, &prefix)?;
+    if decoded.basket != basket || decoded.level != level || decoded.is_toucher != is_toucher { return None; }
+    let mut n = sequence;
+    let mut digits = Vec::new();
+    while n > 0 { digits.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize] as char); n /= 36; }
+    let ordinal: String = digits.into_iter().rev().collect();
+    let mut text = format!("{prefix}~{ordinal}!");
+    if text.len() > MAX_COMMENT { return None; }
+    let note = note.trim();
+    if !note.is_empty() && text.len() + 1 < MAX_COMMENT {
+        text.push('-');
+        for c in note.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_') {
+            if text.len() >= MAX_COMMENT { break; }
+            text.push(c);
+        }
+    }
+    Some(text)
 }
 
 /// Odczytuje stan z komentarza. `None`, gdy komentarz nie jest nasz.
@@ -117,6 +145,19 @@ pub fn decode(tag: &str, comment: &str) -> Option<Tagged> {
         i += 1;
     }
 
+    // The closing ! is mandatory: an ordinal clipped by a broker must not
+    // turn into a different valid (shorter) ordinal.
+    let mut order_sequence = None;
+    if b.get(i) == Some(&b'~') {
+        let start = i + 1;
+        let mut end = start;
+        while end < b.len() && (b[end].is_ascii_digit() || b[end].is_ascii_lowercase()) { end += 1; }
+        if end > start && b.get(end) == Some(&b'!') {
+            order_sequence = u64::from_str_radix(&rest[start..end], 36).ok().filter(|v| *v > 0);
+            i = end + 1;
+        }
+    }
+
     // --- notatka ---
     let note = if b.get(i) == Some(&b'-') {
         rest[i + 1..].to_string()
@@ -128,6 +169,7 @@ pub fn decode(tag: &str, comment: &str) -> Option<Tagged> {
         basket,
         level,
         is_toucher,
+        order_sequence,
         note,
     })
 }
@@ -248,5 +290,33 @@ mod tests {
     fn notatka_bez_znakow_spoza_ascii() {
         let c = encode(DEFAULT_TAG, Some(1), 0, false, "koszyk_żółć");
         assert!(c.is_ascii(), "komentarz {c}");
+    }
+}
+
+#[cfg(test)]
+mod local_order_comment_tests {
+    use super::*;
+    #[test]
+    fn complete_ordinal_roundtrip_keeps_existing_machine_fields() {
+        for seq in [1,35,36,100_000,u64::MAX] {
+            let text=encode_ordered("CD",Some(12),-4,true,seq,"B12").unwrap();
+            assert!(text.len()<=MAX_COMMENT);
+            let decoded=decode("CD",&text).unwrap();
+            assert_eq!((decoded.basket,decoded.level,decoded.is_toucher,decoded.order_sequence),(Some(12),-4,true,Some(seq)));
+            assert_eq!(decoded.note,"B12");
+            assert_eq!(decode("CD",&(text+" [sl]")).unwrap().order_sequence,Some(seq));
+        }
+    }
+    #[test]
+    fn clipped_malformed_or_legacy_ordinal_is_never_invented() {
+        for text in ["CD12.3","CD12.3-B12","CD12.3~","CD12.3~1","CD12.3~0!","CD12.3~ZZ!","CD12.3~zzzzzzzzzzzzzzzzzzzz!"] {
+            let d=decode("CD",text).unwrap();assert_eq!(d.basket,Some(12));assert_eq!(d.level,3);assert_eq!(d.order_sequence,None,"{text}");
+        }
+    }
+    #[test]
+    fn exhausted_comment_space_does_not_silently_drop_identity_or_sequence() {
+        assert!(encode_ordered("CD",Some(u32::MAX),i32::MIN,true,u64::MAX,"note").is_none());
+        assert!(encode_ordered("VERY_LONG_CUSTOM_TAG",Some(12345),7,false,99999,"").is_none());
+        assert!(encode_ordered("CD",Some(1),0,false,0,"").is_none());
     }
 }

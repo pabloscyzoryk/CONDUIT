@@ -299,6 +299,9 @@ class Sidecar(object):
         self.last_deal_poll = 0.0
         self.last_send = 0.0
         self.last_tick_key = None          # (time_msc, bid, ask) — nie dublujemy
+        # Chart metadata only. A first cached quote does not certify a clock.
+        self._quote_clocks = {}
+        self._quote_clock_account = None
         self.brak_tickow = 0               # puste odpytania z rzędu (detekcja padu terminala)
         self.ostatnia_odbudowa = 0.0       # kiedy ostatnio wołaliśmy init_terminal()
         self.ostatni_dozor_rodzica = 0.0   # kiedy ostatnio sprawdzalismy proces bota
@@ -337,6 +340,7 @@ class Sidecar(object):
     # ---------- terminal ----------
 
     def init_terminal(self):
+        self._reset_quote_clock()
         kwargs = {}
         if self.follow_account:
             kwargs["path"] = running_terminal_path(self.args.terminal)
@@ -380,6 +384,10 @@ class Sidecar(object):
         self.point = si.point
         self.digits = si.digits
         self._pick_filling(si)
+        try:
+            self._quote_clock_account = account_key(mt5.account_info())
+        except BrokerError:
+            pass
         log("MT5 gotowy: %s digits=%d point=%s stops=%d filling_mask=%d -> market=%d pending=%d"
             % (self.symbol, si.digits, si.point, si.trade_stops_level,
                si.filling_mode, self.filling_market, self.filling_pending))
@@ -391,6 +399,7 @@ class Sidecar(object):
             raise BrokerError(ERR_ACCOUNT_CHANGED, "stara sesja po zmianie konta; polecenie odrzucone")
         current = account_key(mt5.account_info())
         if current != self.bound_account or (expected is not None and current != expected):
+            self._reset_quote_clock()
             self.account_changed = True
             raise BrokerError(ERR_ACCOUNT_CHANGED, "login/serwer/typ konta zmieniony; polecenie odrzucone")
         if mutation and expected is None:
@@ -566,15 +575,46 @@ class Sidecar(object):
 
     # ---------- strumienie ----------
 
+    def _reset_quote_clock(self):
+        self._quote_clocks.clear()
+        self._quote_clock_account = None
+
+    def _observe_quote_clock(self, symbol, tick):
+        """Pair an advancing quote with its observed UTC; never infer a zone.
+
+        Initial, backwards and same-timestamp snapshots cannot establish or
+        refresh evidence. Polling still emits exactly the legacy tick stream.
+        The consumer expires the certificate using its monotonic age.
+        """
+        if self.account_changed or tick is None or not getattr(tick, "time_msc", 0):
+            self._quote_clocks.pop(symbol, None)
+            return {"quote_observed_utc_ms": None, "quote_observation_age_ms": None}
+        now = time.monotonic()
+        stamp = int(tick.time_msc)
+        previous = self._quote_clocks.get(symbol)
+        if previous is None or stamp < previous[0] or now < previous[1]:
+            if len(self._quote_clocks) >= 32:
+                self._quote_clocks.clear()
+            previous = (stamp, now, None, None)
+            self._quote_clocks[symbol] = previous
+        elif stamp > previous[0]:
+            previous = (stamp, now, int(time.time() * 1000), now)
+            self._quote_clocks[symbol] = previous
+        observed_utc, advanced_at = previous[2:]
+        age = max(0, int((now - advanced_at) * 1000)) if advanced_at is not None else None
+        return {"quote_observed_utc_ms": observed_utc, "quote_observation_age_ms": age}
+
     def poll_tick(self):
         t = mt5.symbol_info_tick(self.symbol)
         if t is None:
+            self._observe_quote_clock(self.symbol, None)
             # Terminal mógł zniknąć albo zostać zrestartowany pod sidecarem.
             # Uchwyt biblioteki może pozostać pozornie ważny bez nowych ticków,
             # dlatego wykonujemy niezależną kontrolę połączenia.
             self._sprawdz_terminal()
             return
         self.brak_tickow = 0
+        self._observe_quote_clock(self.symbol, t)
         key = (t.time_msc, t.bid, t.ask)
         if key == self.last_tick_key:
             return
@@ -770,6 +810,8 @@ class Sidecar(object):
         sym = a.get("symbol") or self.symbol
         if not mt5.symbol_select(sym, True):
             raise BrokerError(ERR_BAD_ARGS, "nie da się wybrać symbolu %s" % sym)
+        if sym != self.symbol:
+            self._reset_quote_clock()
         self.symbol = sym
         return {"symbol": sym}
 
@@ -1019,12 +1061,11 @@ class Sidecar(object):
             OSTATNIA, a seria biegnie w przeszłość.
             To jest droga doładowywania historii przy przewijaniu w lewo.
 
-        ZEGAR. `time` ze świecy i `time_msc` z ticku są w tej samej bazie —
-        czasie SERWERA BROKERA, podanym jako epoka. Zwracamy
-        to bez przeliczania, żeby świeca i kwotowanie wpadały do tego samego
-        kubełka; `server_time_ms` i `utc_time_ms` pozwalają odbiorcy policzyć
-        przesunięcie, jeśli go potrzebuje. Przeliczanie tutaj rozdzieliłoby
-        świece i ticki na różne osie czasu.
+        ZEGAR. Surowe `time` świecy i `time_msc` ticku zwracamy bez zmiany
+        istniejącej osi wykresu. Ostatni tick może pochodzić z zamkniętej
+        sesji. Offset wolno wyznaczać tylko z pary zarejestrowanej podczas
+        postępu kwotowań, nigdy odejmując dzisiejsze UTC od starego ticku.
+        Ta obserwacja nie zmienia strefy ani ustawień silnika.
         """
         sym = a.get("symbol") or self.symbol
         tf_name, tf, bar_s = timeframe(a.get("tf"))
@@ -1064,11 +1105,18 @@ class Sidecar(object):
             for r in rates
         ]
 
-        # Czas serwera bierzemy z ostatniego kwotowania — MT5 nie ma osobnego
-        # wywołania „która godzina u brokera". Gdy kwotowania nie ma (rynek
-        # zamknięty, symbol martwy), zostaje None i odbiorca wie, że nie wie.
+        # Read-only account check prevents a cached clock crossing an account
+        # switch even in legacy non-FOLLOW mode. No credentials leave memory.
+        try:
+            account = account_key(mt5.account_info())
+        except BrokerError:
+            account = None
+        if account != self._quote_clock_account or account is None:
+            self._reset_quote_clock()
+            self._quote_clock_account = account
         t = mt5.symbol_info_tick(sym)
         server_ms = int(t.time_msc) if t is not None and t.time_msc else None
+        observation = self._observe_quote_clock(si.name, t)
 
         return {
             "symbol": si.name,
@@ -1078,6 +1126,7 @@ class Sidecar(object):
             "point": float(si.point),
             "server_time_ms": server_ms,
             "utc_time_ms": int(time.time() * 1000),
+            **observation,
             # kolumny: t, o, h, l, c, tick_volume, spread(pkt)
             "bars": bars,
         }

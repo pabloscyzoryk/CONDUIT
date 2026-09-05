@@ -58,6 +58,7 @@ async fn podglad_tematu_zwraca_katalog_zmiennych_i_gotowy_temat() {
     run.state.update(
         conduit_server::coalesce::Sections::one(conduit_server::coalesce::Section::Settings),
         |s| {
+            s.language = "pl".into();
             s.stats.balance = 237.65;
             s.stats.equity = 241.02;
             s.stats.free_margin = 228.62;
@@ -148,6 +149,10 @@ async fn bez_parametru_podglad_dotyczy_szablonu_zapisanego_w_ustawieniach() {
     let run = conduit_server::serve(cfg, conduit_server::default_auth())
         .await
         .unwrap();
+    run.state.update(
+        conduit_server::coalesce::Sections::one(conduit_server::coalesce::Section::Settings),
+        |s| s.language = "pl".into(),
+    );
 
     conduit_server::commands::apply(
         &run.state,

@@ -3084,6 +3084,10 @@
     "Browser unavailable ({error}). CONDUIT keeps running; open {adres} manually."
   ],
   [
+    "MT5: kolejność lokalnych zleceń niedostępna; remisy starych filli zachowują kolejność obserwacji",
+    "MT5: local order sequence unavailable; tied legacy fills retain observed order"
+  ],
+  [
     "MAX DRAWDOWN {a}% ≥ {b}%",
     "MAX DRAWDOWN {a}% ≥ {b}%"
   ],
