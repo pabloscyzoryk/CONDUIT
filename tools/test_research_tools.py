@@ -2,9 +2,10 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from giga_sweep8 import BROKER_FIELDS, FAMILIES, generate
-from research_runner import validate_results
+from research_runner import validate_results, write_json, write_progress
 
 
 class CandidateSpaceTests(unittest.TestCase):
@@ -17,6 +18,7 @@ class CandidateSpaceTests(unittest.TestCase):
         self.assertEqual({r['family'] for r in rows}, {*FAMILIES, 'reference'})
         for row in rows:
             self.assertEqual(row['settings']['lot_max'], 5)
+            self.assertTrue(row['settings']['explicit_pending_until_cancel'])
             self.assertFalse(set(row['changes']) & BROKER_FIELDS)
             self.assertEqual(row['settings']['konto_dzwignia'], 500)
             self.assertEqual(row['settings']['swap_long_points'], -75.82)
@@ -29,6 +31,15 @@ class CandidateSpaceTests(unittest.TestCase):
 
 
 class CompletionTests(unittest.TestCase):
+    def test_monitor_read_lock_does_not_abort_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)/'state.json'
+            with patch('research_runner.os.replace', side_effect=[PermissionError('reader lock'), None]) as replace:
+                write_json(target, {'active': 2})
+                self.assertEqual(replace.call_count, 2)
+            with patch('research_runner.write_json', side_effect=PermissionError('locked')):
+                write_progress(target, {'active': 2})
+
     def test_complete_exit_cannot_hide_skipped_presets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

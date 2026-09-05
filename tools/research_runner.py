@@ -22,7 +22,26 @@ def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_suffix(path.suffix + '.tmp')
     partial.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-    os.replace(partial, path)
+    # Windows readers (including PowerShell and some preview tools) can briefly
+    # open an existing file without FILE_SHARE_DELETE. Keep the previous whole
+    # document visible and retry the atomic replacement, never truncate it.
+    for attempt in range(24):
+        try:
+            os.replace(partial, path)
+            return
+        except PermissionError:
+            if attempt == 23:
+                raise
+            time.sleep(min(.025 * (attempt+1), .25))
+
+
+def write_progress(path: Path, payload: dict) -> None:
+    """A locked monitor file must never orphan the research child processes."""
+    try:
+        write_json(path, payload)
+    except OSError as exc:
+        print(json.dumps({'warning': 'progress_write_failed', 'path': str(path),
+                          'error': str(exc)}), flush=True)
 
 
 def file_hash(path: Path) -> str:
@@ -113,6 +132,11 @@ def main() -> int:
             pending.pop(0)
             job_dir = root / job['id']
             job_dir.mkdir(exist_ok=True)
+            receipt_path = job_dir/'receipt.json'
+            if receipt_path.exists():
+                previous = json.loads(receipt_path.read_text('utf-8'))
+                if previous.get('status') == 'running':
+                    raise RuntimeError(f"Unreconciled running receipt for {job['id']}; recover the existing process before relaunching")
             argv = list(job['argv'])
             executable = str(Path(argv[0]).resolve())
             argv[0] = executable
@@ -176,7 +200,7 @@ def main() -> int:
         elapsed = time.time() - started_ms/1000
         finished = len(completed)
         eta = elapsed/finished*(len(jobs)-finished) if finished else -1
-        write_json(progress_dir/f'{study_id}.json', {
+        write_progress(progress_dir/f'{study_id}.json', {
             'id': study_id, 'nazwa': plan.get('name', study_id), 'rodzaj': 'backtest',
             'postep': finished/max(len(jobs),1), 'szybkosc': finished/max(elapsed,1),
             'jednostka_szybkosci': 'przebiegów/s', 'eta_s': eta,
@@ -192,7 +216,11 @@ def main() -> int:
     # Let the monitor retain a receipt instead of a stale, apparently crashed job.
     final_progress = progress_dir/f'{study_id}.json'
     if final_progress.exists():
-        os.replace(final_progress, root/'completed_progress.json')
+        write_json(root/'completed_progress.json', json.loads(final_progress.read_text('utf-8')))
+        try:
+            final_progress.unlink()
+        except OSError as exc:
+            print(json.dumps({'warning': 'completed_progress_cleanup', 'error': str(exc)}), flush=True)
     return 1 if stopped or any(r['status'] != 'complete' for r in completed) else 0
 
 

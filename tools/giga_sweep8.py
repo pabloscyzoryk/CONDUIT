@@ -119,6 +119,9 @@ def generate(base: dict, broker: dict, count: int, seed: int) -> list[dict]:
     common.update(broker)
     common['lot_max'] = 5.0
     common['day_trail_basis'] = 'EquityPeak'
+    # User-specified source contract, fixed across the whole search space.
+    # It applies to explicit LIMIT/STOP signals, not ordinary entry-grid legs.
+    common['explicit_pending_until_cancel'] = True
     rows = [{'id': 'GOD-X7-cap5', 'family': 'reference', 'settings': common,
              'changes': {}, 'fingerprint': fingerprint(common)}]
     seen = {rows[0]['fingerprint']}
@@ -178,6 +181,7 @@ def main() -> None:
                 'broker_profile': broker, 'families': list(FAMILIES),
                 'candidates': manifest_rows,
                 'invariants': ['No date/hour/message-ID filter axes.',
+                               'Explicit pending signals remain source-valid until a bound cancellation.',
                                'Broker costs are fixed across all candidates.',
                                'Quick results cannot enter coronation without exact reruns.',
                                'GOD-X8 name is reserved for the owner-selected candidate.']}

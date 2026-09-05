@@ -1,0 +1,110 @@
+[
+  {
+    "path": "CONDUIT/rust/crates/mt5/sidecar/test_follow_terminal.py",
+    "category": "literal_credential",
+    "line_sha256": "7d1a31d59183fbab2f3bb7e5b54df37dec4b01bf11b96370a563bbccd0bac6fd",
+    "reason": "Synthetic credential sentinel in isolated Python terminal-following test; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/mt5/sidecar/test_follow_terminal.py",
+    "category": "literal_credential",
+    "line_sha256": "f544b2be56311049c4116ac6a70f5fcca900f3d8157d19589bb117189a238dfa",
+    "reason": "Synthetic credential sentinel in isolated Python terminal-following test; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/journal/provenance.rs",
+    "category": "literal_credential",
+    "line_sha256": "0e6918564062f2fc1be3b188b1370e3b28d3220d1cf60f993531d6d16c490cb5",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/journal/provenance.rs",
+    "category": "literal_credential",
+    "line_sha256": "c7367967647b9a7dc6c8b34b2d4bc5435e1c7a372b4c9b56bd2d0aa193278e2b",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/notify.rs",
+    "category": "literal_credential",
+    "line_sha256": "e1b763e21e8a7cd7bb7ebd11975fff16bad505181291255ee54b45f65c1de38d",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/secrets.rs",
+    "category": "literal_credential",
+    "line_sha256": "4dbe6aae310c511e233261c20039672e641dec8387b404dcb3f85ec7c6c44568",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/secrets.rs",
+    "category": "literal_credential",
+    "line_sha256": "3f5c4a59868999a6a8496eadc468b7e45e4dbddadb3c8f6d62834cd1afb6eda0",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/secrets.rs",
+    "category": "literal_credential",
+    "line_sha256": "ce38bc05828b4ac3a33cc8336d8e8b9b83aa72ea25b4dd60d83077f737cf5f5b",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/secrets.rs",
+    "category": "literal_credential",
+    "line_sha256": "4a7000e63e58f65bb90c3e2614c6aa22be761eb14169768bf184a80e03fbdde5",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/store.rs",
+    "category": "literal_credential",
+    "line_sha256": "285e28ae8af12aaef8801bf1549cdbf20454bfda56f820e61fd99ebdb83ca207",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/store.rs",
+    "category": "literal_credential",
+    "line_sha256": "4ea78eacf11904327c7feebe1442467b5af6f315519f94541f5ca265d404195e",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/store.rs",
+    "category": "literal_credential",
+    "line_sha256": "b8012fb60e824b579a86e861ce66c60a2ee34b30aa3d9e88830e497c363ae749",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/telegram/src/service.rs",
+    "category": "literal_credential",
+    "line_sha256": "803b0bbdd97ed9c56b90c5451da199382a5d18a1d741fcca34974d106cb4ad17",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/telegram/src/service.rs",
+    "category": "literal_credential",
+    "line_sha256": "d8286cb51a6f95e6032de28efc618ec9b556d2d17b7cfe73686a8951915de87c",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/rust/crates/telegram/src/service.rs",
+    "category": "literal_credential",
+    "line_sha256": "8066fa5b2af1033348e33a367634d11ea15853a7bc2c629bc7b1b57802c11f79",
+    "reason": "Synthetic credential sentinel inside Rust test-only module; not a private configuration value."
+  },
+  {
+    "path": "CONDUIT/src/i18n/pl.ts",
+    "category": "literal_credential",
+    "line_sha256": "065e325ee462cc0362be88cb899d5e7d3712cd1b5bf08426617962054a76942b",
+    "reason": "Polish translation string for a credential-related field; not a credential assignment."
+  },
+  {
+    "path": "CONDUIT/src/i18n/pl.ts",
+    "category": "literal_credential",
+    "line_sha256": "798a187396c262fdbac0ae94cdae938b8c00c0946e143bcd4cfe2acf47aefec4",
+    "reason": "Polish translation string for a credential-related field; not a credential assignment."
+  },
+  {
+    "path": "CONDUIT/rust/crates/server/src/journal/provenance.rs",
+    "category": "literal_credential",
+    "line_sha256": "cad0367f1f1820619228c0dca01a10a497ae3fdb96a2fa920ad60085cf5f7cbf",
+    "reason": "Synthetic camelCase API hash sentinel in Rust test-only provenance redaction fixture; not a private configuration value."
+  }
+]
