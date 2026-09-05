@@ -815,7 +815,7 @@ export interface TradeMark {
   closeTime: number;
   closePrice: number;
   /** wynik NETTO (z prowizja i swapem) — to on decyduje o kolorze */
-  net: number;
+  net: number | null;
   /** powod zamkniecia ze skonczonej listy (`CloseReason`) albo z dziennika */
   reason: string;
   /** czy to NIE nasz handel (inny magic) */
@@ -1199,8 +1199,7 @@ export function renderChart(a: RenderArgs) {
       // poza kadrem w poziomie — nie ma czego rysowac
       if (Math.max(p.x1, p.x2) < padL - 20 || Math.min(p.x1, p.x2) > padL + plotW + 20) continue;
 
-      const zysk = t.net >= 0;
-      const col = zysk ? theme.up : theme.down;
+      const col = t.net === null ? theme.textDim : t.net >= 0 ? theme.up : theme.down;
       const gorace = a.hotTrade === t.ticket;
 
       /* Linia trzymania: od wejscia do wyjscia. Pokazuje JAK DLUGO pozycja
@@ -1243,7 +1242,8 @@ export function renderChart(a: RenderArgs) {
          wejsciami zamienia sie w scianie tekstu. */
       if (gorace) {
         ctx.font = "700 10px ui-monospace, SFMono-Regular, Consolas, monospace";
-        const txt = `${t.dir} ${t.volume.toFixed(2)} · ${t.reason} · ${t.net >= 0 ? "+" : ""}${t.net.toFixed(2)} $`;
+        const result = t.net === null ? "—" : `${t.net >= 0 ? "+" : ""}${t.net.toFixed(2)} $`;
+        const txt = `${t.dir} ${t.volume.toFixed(2)} · ${t.reason} · ${result}`;
         const tw = ctx.measureText(txt).width + 12;
         const bx = Math.min(Math.max(p.x2 + 10, padL + 2), padL + plotW - tw - 2);
         const by = p.y2 - 9;

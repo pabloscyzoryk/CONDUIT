@@ -19,6 +19,8 @@ use conduit_core::telegram_ingress::{
 use conduit_core::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+#[path = "funnel_observation.rs"]
+mod funnel_observation;
 
 /// JEDEN FORMAT W PRZEBIEGU: nazwa kanału, nazwa presetu i jego ustawienia.
 ///
@@ -912,13 +914,9 @@ pub fn run_with_progress(
     let mut max_floating_loss: f64 = 0.0;
     let mut max_open_pos: u32 = 0;
     let mut signals_taken_prev = 0u64;
-    // LEJEK W PRZÓD (audyt poz. 20): świeże wiadomości z akcją wejścia
-    // (Entry|MarketOpen), liczone w pętli PRZED routingiem i wszystkimi
-    // bramkami. Licznik jest własnością PRZEBIEGU (zmienna pętli), więc
-    // wymiana dobowa ani przełączenie szczebla drabinki go nie zerują —
-    // mianownik lejka, którego dotąd nie było: 308 z 890 sygnałów OMEGA-X2
-    // wychodziło z silnika bez koszyka i bez jreject, niepoliczone nigdzie.
-    let mut sygnaly_wejsciowe: u64 = 0;
+    // Versioned, read-only source observations survive the entire replay,
+    // including daily engine replacement. They never affect trade authority.
+    let mut source_funnel = funnel_observation::SourceFunnel::default();
     // ARCHIWUM COMPOUNDINGU (audyt poz. 21): silnik wycina martwe koszyki
     // (>500 szt., starsze niż 7 dni) ZANIM przebieg bez resetu dobowego
     // zrobi jedyny zrzut na końcu — O91 widział 105 z 807 koszyków. Drenaż
@@ -1093,6 +1091,7 @@ pub fn run_with_progress(
                 seg += 1;
                 for (idx, s) in zespol.lista.iter_mut().enumerate() {
                     let engine = &mut s.engine;
+                    source_funnel.collect(idx, engine);
                     narosle[idx].0 += engine.stats.signals;
                     narosle[idx].1 += engine.stats.messages;
                     narosle[idx].2 += engine.created_baskets_count();
@@ -1382,24 +1381,11 @@ pub fn run_with_progress(
                     }
                 }
             }
-            // LEJEK W PRZÓD (poz. 20): licznik mianownika, zanim wiadomość
-            // zobaczy routing, szczebel drabinki czy jakąkolwiek bramkę
-            // silnika. Tylko wiadomość ŚWIEŻA — edycja i odpowiedź nie
-            // zakładają nowego koszyka, więc liczyłyby ten sam sygnał
-            // drugi raz. Samo `parse` jest czyste: nie dotyka ani brokera,
-            // ani silników, więc handel zostaje co do centa.
-            if m.edit_of.is_none()
-                && m.reply_to.is_none()
-                && conduit_core::parser::parse(&m.text).iter().any(|s| {
-                    matches!(
-                        s,
-                        conduit_core::parser::Signal::Entry(_)
-                            | conduit_core::parser::Signal::MarketOpen { .. }
-                    )
-                })
-            {
-                sygnaly_wejsciowe += 1;
-            }
+            // Read-only reporting observes the configured parser at receipt.
+            // Execution, routing and all gates below are unchanged.
+            let report_engine = if routuj { zespol.indeks_formatu(&m.kanal) } else { Some(0) };
+            let report_cfg = report_engine.map(|index| &zespol.lista[index].engine.cfg).unwrap_or(&cfg.settings);
+            let offered_source = source_funnel.observe(report_engine.unwrap_or(usize::MAX), m, report_cfg);
             // broker musi znać cenę PRZED obsługą wiadomości
             //
             // D3: KTÓRĄ cenę. Wiadomość, która przyszła MIĘDZY tickami,
@@ -1457,6 +1443,7 @@ pub fn run_with_progress(
                                 *poza_szczeblem
                                     .entry(zespol.lista[i].format.clone())
                                     .or_insert(0) += 1;
+                                source_funnel.reject_before_engine(offered_source.clone());
                                 continue;
                             }
                         }
@@ -1485,8 +1472,12 @@ pub fn run_with_progress(
                             m.kanal.clone()
                         };
                         *bez_trasy.entry(klucz).or_insert(0) += 1;
+                        source_funnel.reject_before_engine(offered_source.clone());
                     }
                 }
+            }
+            if let Some(index) = report_engine {
+                source_funnel.collect(index, &zespol.lista[index].engine);
             }
             let teraz = przyjete_sygnaly(&zespol);
             if teraz > signals_taken_prev {
@@ -2143,8 +2134,13 @@ pub fn run_with_progress(
         prog_be: cfg.settings.stat_be_prog_usd,
         ticks: Some(ticks),
         tz_offset_ms: cfg.settings.server_tz_offset_ms,
-        sygnaly_wejsciowe: sygnaly_wejsciowe.min(u32::MAX as u64) as u32,
+        sygnaly_wejsciowe: 0, // the versioned source funnel below is authoritative
     });
+
+    for (index, leg) in zespol.lista.iter().enumerate() {
+        source_funnel.collect(index, &leg.engine);
+    }
+    source_funnel.apply(&mut metrics.stat_sygnalow.lejek);
 
     RunResult {
         approximation: approximation_info(
@@ -3016,6 +3012,9 @@ mod tests {
             assert_eq!(r.metrics.known_entry_sources,600);
             assert_eq!(r.metrics.known_full_entry_sources,600);
             assert_eq!(r.metrics.entry_sources_first_seen_as_edit,0);
+            assert_eq!(r.metrics.stat_sygnalow.lejek.sygnaly_wejsciowe,600);
+            assert_eq!(r.metrics.stat_sygnalow.lejek.koszyki_sygnaly,600);
+            assert_eq!(r.metrics.stat_sygnalow.lejek.zgubione_bez_sladu,0);
             assert!(r.trades.is_empty(),"count also includes valid unfilled baskets");
         }
         drop(ticks);std::fs::remove_file(path).unwrap();
@@ -3262,7 +3261,8 @@ SL 2990"
         cfg.settings.msg_kurs_sprzed_luki = true;
 
         let ordinary = run(&ticks, &messages, &cfg);
-        assert_eq!(ordinary.metrics.stat_sygnalow.lejek.sygnaly_wejsciowe, 2);
+        assert_eq!(ordinary.metrics.stat_sygnalow.lejek.sygnaly_wejsciowe, 1,
+            "redelivery is one source regardless of the ingress dedup mode");
 
         cfg.live_telegram_ingress = true;
         let live = run(&ticks, &messages, &cfg);
@@ -3271,6 +3271,36 @@ SL 2990"
         drop(ticks);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn source_funnel_counts_full_first_edit_and_draft_completion_without_duplicate_inflation() {
+        let path=std::env::temp_dir().join(format!("conduit_funnel_first_edit_{}.bin",std::process::id()));
+        let t0=1_700_000_000_000;
+        let rows:Vec<_>=(0..12).map(|i|(t0+i*1000,4005.,4005.2)).collect();
+        zapisz_ticki(&path,&rows);let ticks=TickData::open(&path).unwrap();
+        let entry="BUY LIMIT GOLD @ 3999/3998\nSL 3990\nTP 4020";
+        let message=|n:i64,id:i64,text:&str,edit:bool,reply:Option<i64>|ReplayMessage {
+            ts:t0+n*1000,msg_id:id,text:text.into(),edit_of:edit.then_some(id),reply_to:reply,kanal:"Synergy".into(),..Default::default()
+        };
+        let messages=vec![message(1,1,entry,true,None),message(2,1,entry,true,None),
+            message(3,1,entry,false,None),message(4,2,"SELL GOLD @ 4010/4009\nSL 4020\nTP 3990",true,None),
+            message(5,3,"Signal preparation",false,None),message(6,3,entry,true,None),
+            message(7,99,"TP1 HIT",false,Some(1))];
+        let mut cfg=RunConfig{from:t0,to:t0+12_000,start_balance:600.,..Default::default()};
+        cfg.settings.server_tz_offset_ms=0;cfg.settings.exec_latency_ms=0;
+        cfg.settings.edycja_sieroty_nie_otwiera=false;cfg.settings.merge_same_side=false;
+        cfg.settings.side_filter=conduit_core::settings::SideFilter::BuyOnly;
+        cfg.settings.lot_fixed=0.01;cfg.settings.lot_max=0.01;
+        cfg.settings.max_open_baskets=0;cfg.settings.max_open_positions=0;
+        for ingress in [false,true] {
+            cfg.live_telegram_ingress=ingress;let r=run(&ticks,&messages,&cfg);let l=&r.metrics.stat_sygnalow.lejek;
+            assert_eq!(l.source_observation_version,1);assert_eq!(l.sygnaly_wejsciowe,3);
+            assert_eq!(l.koszyki_sygnaly,2);assert_eq!(l.odrzucone_sygnaly,1);
+            assert_eq!(l.zgubione_bez_sladu,0);assert_eq!(l.unattributed_entry_outcomes,0);
+            assert_eq!(r.metrics.baskets,2,"message telemetry never creates an extra basket");
+        }
+        drop(ticks);std::fs::remove_file(path).unwrap();
     }
 
     #[test]

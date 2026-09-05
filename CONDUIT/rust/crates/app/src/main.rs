@@ -10,6 +10,8 @@ mod mt5_guard;
 /// dzięki któremu silnik zarządza wyłącznie własnymi pozycjami.
 mod routing;
 mod runtime_python;
+#[cfg(any(feature = "window", test))]
+mod shell_lifecycle;
 #[cfg(feature = "window")]
 mod window;
 mod wznowienie;
@@ -251,9 +253,24 @@ fn main() -> Result<()> {
 
     #[cfg(feature = "window")]
     {
-        // Okno przejmuje wątek główny aż do zamknięcia.
-        window::run(&url, a.lab, &data_dir)?;
-        zamknij(&running, &mut straz, &mut zywy);
+        shell_lifecycle::finish_native_session(
+            || window::run(&url, a.lab, &data_dir),
+            |error| {
+                let adres = format!("{url}/{widok}");
+                let text = format!("Native window unavailable ({error}). CONDUIT keeps running at {adres}; opening the browser.");
+                eprintln!("{text}");
+                running.state.log("system", "warn", "CONDUIT", &text);
+                if let Err(error) = open::that_detached(adres.as_str()) {
+                    let text = format!("Browser unavailable ({error}). CONDUIT keeps running; open {adres} manually.");
+                    eprintln!("{text}");
+                    running.state.log("system", "error", "CONDUIT", &text);
+                    return Err(error.into());
+                }
+                Ok(())
+            },
+            || rt.block_on(czekaj_na_przerwanie()),
+            || zamknij(&running, &mut straz, &mut zywy),
+        );
         Ok(())
     }
 

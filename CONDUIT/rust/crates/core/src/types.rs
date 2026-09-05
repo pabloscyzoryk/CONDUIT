@@ -255,6 +255,22 @@ pub struct ClosedTrade {
 }
 
 impl ClosedTrade {
+    /// Display/export net from an explicit producer contract. No cash mutation
+    /// and no inference from the size or sign of historical costs.
+    pub fn net_profit(&self) -> Option<f64> {
+        use crate::cost_receipt::ProfitBasis;
+        if !self.profit.is_finite() || !self.commission.is_finite() || !self.swap.is_finite() {
+            return None;
+        }
+        let net = match self.profit_basis? {
+            ProfitBasis::PriceOnlyGross => self.profit + self.commission + self.swap,
+            ProfitBasis::PricePlusSwap => self.profit + self.commission,
+            ProfitBasis::CanonicalClosedNetV1 => self.canonical_net().ok()?,
+            ProfitBasis::LegacySourceDefined => return None,
+        };
+        net.is_finite().then_some(net)
+    }
+
     /// Canonical closed-net only. Never guesses costs on a historical record.
     pub fn canonical_net(&self) -> Result<f64, crate::cost_receipt::CostError> {
         use crate::cost_receipt::{CostError, ProfitBasis};

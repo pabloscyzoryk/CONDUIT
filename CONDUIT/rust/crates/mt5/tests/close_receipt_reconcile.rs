@@ -396,7 +396,7 @@ fn cost_runtime_hold_preserves_legacy_ledger_and_protection_without_reconnect() 
         f.bridge.cancel_pending(pending).unwrap();assert!(f.bridge.pendings().is_empty());
         f.bridge.close_position(ID,CloseReason::Manual).unwrap();f.emit();
         let c=f.bridge.drain_closed();assert_eq!(c.len(),1);near(c[0].profit,4.);
-        assert!(c[0].cost_receipt.is_none());assert!(c[0].profit_basis.is_none());
+        assert!(c[0].cost_receipt.is_none());assert_eq!(c[0].profit_basis, Some(conduit_core::cost_receipt::ProfitBasis::PriceOnlyGross));
         assert!(!f.bridge.transport().config().closed_profit_net_costs);
         assert_eq!(f.bridge.transport().execution_generation(),generation);
         assert!(f.bridge.transport().is_connected());
@@ -409,7 +409,7 @@ fn cost_receipt_off_ignores_unexpected_cost_payload_and_keeps_original_profit() 
     let mut f=Fixture::new(true,0.08);f.bridge.close_position(ID,CloseReason::BasketClose).unwrap();
     f.call("probe_corrupt",json!({"field":"cost_receipt","value":"ignored while OFF"}));f.emit();
     let c=f.bridge.drain_closed();assert_eq!(c.len(),1);near(c[0].profit,4.);
-    assert!(c[0].profit_basis.is_none());assert!(c[0].cost_receipt.is_none());
+    assert_eq!(c[0].profit_basis, Some(conduit_core::cost_receipt::ProfitBasis::PriceOnlyGross));assert!(c[0].cost_receipt.is_none());
     f.call("probe_duplicate_cost",json!({"value":{"different":"still ignored while OFF"}}));
     f.bridge.poll_state();assert!(f.bridge.drain_closed().is_empty());
     assert!(f.bridge.close_receipt_issue().is_none(),"OFF metadata must not alter the economic duplicate fingerprint");

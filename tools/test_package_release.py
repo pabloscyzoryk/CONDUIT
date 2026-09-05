@@ -180,8 +180,36 @@ class PackageTests(SyntheticFixture):
         active = pkg.read_json(package / "lancuchy.json")["lista"][0]
         self.assertEqual(active["pulapy"], self.caps)
         self.assertEqual({k:v for k,v in active["presety"].items() if v}, {"Synergy":"GOD-X8-TEST"})
-        self.assertEqual((package / "presets/BIEZACY.json").read_bytes(), self.preset.read_bytes())
-        self.assertEqual((package / "presets/GOD-X8-TEST.json").read_bytes(), self.preset.read_bytes())
+        self.assertEqual((package / "presets/BIEZACY.json").read_bytes(), (package / "presets/GOD-X8-TEST.json").read_bytes())
+        self.assertEqual(pkg.read_json(package / "presets/BIEZACY.json")["settings"], self.preset_doc["settings"])
+        manifest = pkg.read_json(package / "PACKAGE_MANIFEST.json")
+        self.assertEqual(manifest["selected_preset_sha256"], pkg.sha(self.preset.read_bytes()))
+        self.assertEqual(manifest["packaged_preset_sha256"], pkg.sha((package / "presets/BIEZACY.json").read_bytes()))
+
+    def test_selected_metadata_drops_inherited_performance_claims_without_changing_settings(self):
+        self.preset_doc.update({"nazwa": "GOD-X6", "tagline": "GOD-X6 winning days 100%",
+                               "opis": "Old result 123456 USD", "description": "Old coronation claim",
+                               "performance": {"old_profit": 123456}, "research_parent": "GOD-X6"})
+        self.json("selected.json", self.preset_doc)
+        original = self.preset.read_bytes()
+        self.revise_selection(lambda v: v.update(preset_sha256=pkg.sha(original)))
+        for kind in ("public", "private"):
+            package = self.stage(kind)
+            selected = pkg.read_json(package / "presets/GOD-X8-TEST.json")
+            self.assertEqual(selected, {"name": "GOD-X8-TEST", "nazwa": "GOD-X8-TEST", "format": "Synergy",
+                                        "tagline": "Synergy", "description": "", "opis": "", "settings": {"lot_max": 5}})
+            self.assertEqual(pkg.read_json(package / "presets/BIEZACY.json"), selected)
+            self.assertEqual(self.preset.read_bytes(), original, "approval source stays byte-identical")
+            self.assertEqual((package / "presets/GOD-X7.json").read_bytes(), (self.source / "config/presets/GOD-X7.json").read_bytes())
+            self.assertTrue(pkg.verify(package, self.template if kind == "private" else None)["ok"])
+
+    def test_reintroduced_claims_fail_semantic_verification_even_with_updated_payload_hashes(self):
+        package = self.stage()
+        for relative in ("presets/GOD-X8-TEST.json", "presets/BIEZACY.json"):
+            self.update_package_json(package, relative, lambda v: v.update(tagline="Old inherited coronation"))
+        self.update_package_json(package, "PACKAGE_MANIFEST.json", lambda v: v.update(
+            packaged_preset_sha256=pkg.sha((package / "presets/GOD-X8-TEST.json").read_bytes())))
+        self.assert_code("selected_preset_metadata_not_normalized", pkg.verify, package)
 
     def test_private_home_dc_authorization_allows_other_unauthenticated_dcs(self):
         result = pkg.source_inspection(self.template)

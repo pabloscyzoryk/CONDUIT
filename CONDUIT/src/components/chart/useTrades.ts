@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ClosedPosition } from "@/types";
+import { closedNetProfit } from "@/lib/tradeProfit";
 import { backendBase } from "@/store/transport";
 import type { TradeMark } from "./chartRender";
 
@@ -79,7 +80,7 @@ function zDealow(deals: Deal[], symbol: string): TradeMark[] {
 }
 
 /** Zamknięte pozycje z bieżącej sesji → znaczniki. */
-function zMigawki(closed: ClosedPosition[], symbol: string): TradeMark[] {
+export function zMigawki(closed: ClosedPosition[], symbol: string): TradeMark[] {
   return closed
     .filter((p) => p.symbol === symbol)
     .map((p) => ({
@@ -90,7 +91,7 @@ function zMigawki(closed: ClosedPosition[], symbol: string): TradeMark[] {
       openPrice: p.openPrice,
       closeTime: p.closeTime,
       closePrice: p.closePrice,
-      net: p.profit + p.swap + p.commission,
+      net: closedNetProfit(p),
       reason: p.reason,
       foreign: p.source !== undefined && p.source !== "BOT",
     }));

@@ -3076,6 +3076,14 @@
     "RISK BUDGET: {reason:?}; no legal grid fits the current reserve"
   ],
   [
+    "Okno natywne niedostępne ({error}). CONDUIT nadal działa pod {adres}; otwieram przeglądarkę.",
+    "Native window unavailable ({error}). CONDUIT keeps running at {adres}; opening the browser."
+  ],
+  [
+    "Przeglądarka niedostępna ({error}). CONDUIT nadal działa; otwórz ręcznie {adres}.",
+    "Browser unavailable ({error}). CONDUIT keeps running; open {adres} manually."
+  ],
+  [
     "MAX DRAWDOWN {a}% ≥ {b}%",
     "MAX DRAWDOWN {a}% ≥ {b}%"
   ],

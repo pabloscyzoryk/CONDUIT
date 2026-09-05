@@ -5804,6 +5804,11 @@ fn zamk_obce(c: &conduit_mt5::ForeignClosed) -> ui::ClosedPosition {
         open_time: c.open_ts,
         close_time: c.close_ts,
         profit: c.profit,
+        profit_basis: ui::ClosedProfitBasis::PriceOnlyGross,
+        net_profit: {
+            let net = c.profit + c.commission + c.swap;
+            (c.profit.is_finite() && c.commission.is_finite() && c.swap.is_finite() && net.is_finite()).then_some(net)
+        },
         swap: c.swap,
         commission: c.commission,
         // Powodu zamknięcia cudzej transakcji NIE znamy — nie zgadujemy go.

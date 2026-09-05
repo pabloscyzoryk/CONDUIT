@@ -381,6 +381,17 @@ pub struct PendingOrder {
     pub magic: Option<i64>,
 }
 
+/// Presentation basis; ReportedNet is reserved for the local demo, not receipt proof.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClosedProfitBasis {
+    #[default]
+    Unknown,
+    PriceOnlyGross,
+    PricePlusSwap,
+    CanonicalClosedNetV1,
+    ReportedNet,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClosedPosition {
@@ -393,6 +404,11 @@ pub struct ClosedPosition {
     pub open_time: i64,
     pub close_time: i64,
     pub profit: f64,
+    #[serde(default)]
+    pub profit_basis: ClosedProfitBasis,
+    /// Validated net amount; absent legacy metadata means unknown, never zero.
+    #[serde(default)]
+    pub net_profit: Option<f64>,
     pub swap: f64,
     pub commission: f64,
     pub reason: CloseReason,
@@ -403,6 +419,26 @@ pub struct ClosedPosition {
     /// `None` = wartość nieznana, nie zero (patrz `Position::magic`).
     #[serde(default)]
     pub magic: Option<i64>,
+}
+
+impl ClosedPosition {
+    /// Uses explicit producer metadata; canonical records require the validated
+    /// server projection, not a client-side guess about an absent receipt.
+    pub fn net_result(&self) -> Option<f64> {
+        if !self.profit.is_finite() || !self.swap.is_finite() || !self.commission.is_finite() { return None; }
+        let net = match self.profit_basis {
+            ClosedProfitBasis::PriceOnlyGross => self.profit + self.commission + self.swap,
+            ClosedProfitBasis::PricePlusSwap => self.profit + self.commission,
+            ClosedProfitBasis::CanonicalClosedNetV1 => {
+                let verified = self.net_profit?;
+                if !verified.is_finite() || (verified-self.profit).abs() > verified.abs().max(1.0)*1e-12 { return None; }
+                verified
+            },
+            ClosedProfitBasis::ReportedNet => self.profit,
+            ClosedProfitBasis::Unknown => return None,
+        };
+        net.is_finite().then_some(net)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2016,6 +2052,13 @@ pub fn closed_from_core(c: &conduit_core::ClosedTrade, symbol: &str) -> ClosedPo
         open_time: c.open_ts,
         close_time: c.close_ts,
         profit: c.profit,
+        profit_basis: match c.profit_basis {
+            Some(conduit_core::cost_receipt::ProfitBasis::PriceOnlyGross) => ClosedProfitBasis::PriceOnlyGross,
+            Some(conduit_core::cost_receipt::ProfitBasis::PricePlusSwap) => ClosedProfitBasis::PricePlusSwap,
+            Some(conduit_core::cost_receipt::ProfitBasis::CanonicalClosedNetV1) => ClosedProfitBasis::CanonicalClosedNetV1,
+            _ => ClosedProfitBasis::Unknown,
+        },
+        net_profit: c.net_profit(),
         swap: c.swap,
         commission: c.commission,
         reason: c.reason.into(),
@@ -2509,4 +2552,41 @@ mod testy_drabinki {
 
 fn jezyk_domyslny_ui() -> String {
     "en".into()
+}
+
+#[cfg(test)]
+mod closed_profit_basis_tests {
+    use super::*;
+    use conduit_core::{ClosedTrade, Side, cost_receipt::ProfitBasis};
+    fn trade(basis: Option<ProfitBasis>, profit: f64, swap: f64) -> ClosedTrade {
+        ClosedTrade { ticket: 1, side: Side::Buy, volume: 0.01, open_price: 100.0,
+            close_price: 101.0, open_ts: 0, close_ts: 1000, profit, swap, commission: -2.0,
+            reason: conduit_core::CloseReason::Partial, basket: Some(1), profit_basis: basis, cost_receipt: None }
+    }
+    #[test]
+    fn closed_ui_preserves_explicit_basis_and_net_for_both_legacy_producers() {
+        for swap in [-3.0, 4.0] {
+            let gross = closed_from_core(&trade(Some(ProfitBasis::PriceOnlyGross), 20.0, swap), "TEST");
+            let sim = closed_from_core(&trade(Some(ProfitBasis::PricePlusSwap), 20.0+swap, swap), "TEST");
+            assert_eq!(gross.net_result(), Some(18.0+swap));
+            assert_eq!(sim.net_result(), gross.net_result());
+            assert_eq!(sim.net_profit, gross.net_profit);
+            let json=serde_json::to_value(&sim).unwrap();
+            assert_eq!(json["profitBasis"], "PricePlusSwap");
+            assert_eq!(json["netProfit"], 18.0+swap);
+            assert_eq!(serde_json::from_value::<ClosedPosition>(json).unwrap().net_result(), gross.net_result());
+        }
+    }
+    #[test]
+    fn closed_ui_never_invents_net_for_old_or_invalid_canonical_records() {
+        for basis in [None, Some(ProfitBasis::LegacySourceDefined), Some(ProfitBasis::CanonicalClosedNetV1)] {
+            let ui=closed_from_core(&trade(basis, 20.0, 0.0), "TEST");
+            assert_eq!(ui.net_result(), None);
+            assert_eq!(ui.net_profit, None);
+        }
+        let mut json=serde_json::to_value(closed_from_core(&trade(None, 20.0, 0.0), "TEST")).unwrap();
+        json.as_object_mut().unwrap().remove("profitBasis");
+        json.as_object_mut().unwrap().remove("netProfit");
+        assert_eq!(serde_json::from_value::<ClosedPosition>(json).unwrap().net_result(), None);
+    }
 }

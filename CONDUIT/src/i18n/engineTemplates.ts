@@ -1530,5 +1530,7 @@ export const ENGINE_TEMPLATES: readonly (readonly [string, string])[] = [
   ["BUDŻET RYZYKA: zlecenie ręczne odrzucone ({reason:?}); maksymalny dozwolony wolumen: 0.00000000", "RISK BUDGET: manual order rejected ({reason:?}); maximum allowed volume: 0.00000000"],
   ["BUDŻET RYZYKA: zlecenie ręczne odrzucone; maksymalny dozwolony wolumen: {maximum:.8}; żądany wolumen pozostaje bez zmian", "RISK BUDGET: manual order rejected; maximum allowed volume: {maximum:.8}; requested volume is unchanged"],
   ["BUDŻET RYZYKA: {reason:?}; nowe zlecenie wstrzymane", "RISK BUDGET: {reason:?}; new order withheld"],
-  ["BUDŻET RYZYKA: {reason:?}; żadna legalna siatka nie mieści się w bieżącej rezerwie", "RISK BUDGET: {reason:?}; no legal grid fits the current reserve"]
+  ["BUDŻET RYZYKA: {reason:?}; żadna legalna siatka nie mieści się w bieżącej rezerwie", "RISK BUDGET: {reason:?}; no legal grid fits the current reserve"],
+  ["Okno natywne niedostępne ({error}). CONDUIT nadal działa pod {adres}; otwieram przeglądarkę.", "Native window unavailable ({error}). CONDUIT keeps running at {adres}; opening the browser."],
+  ["Przeglądarka niedostępna ({error}). CONDUIT nadal działa; otwórz ręcznie {adres}.", "Browser unavailable ({error}). CONDUIT keeps running; open {adres} manually."],
 ];

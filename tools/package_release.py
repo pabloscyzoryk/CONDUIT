@@ -241,6 +241,18 @@ def selected_preset(preset: Path, selection: Path):
     return chosen, doc
 
 
+def production_preset_metadata(document: dict, selected_id: str) -> dict:
+    # Candidate documents may inherit historical performance copy. Approval
+    # selects settings and identity, never silently endorses that old prose.
+    return {"name": selected_id, "nazwa": selected_id, "format": "Synergy",
+            "tagline": "Synergy", "description": "", "opis": "",
+            "settings": document["settings"]}
+
+
+def settings_sha256(settings: dict) -> str:
+    return sha(json.dumps(settings, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
 def safe_destination(destination: Path, kind: str) -> Path:
     destination = destination.absolute()
     # Resolve all existing parents; directory junctions cannot redirect a public
@@ -338,9 +350,11 @@ def stage(source: Path, template: Path, executable: Path, preset: Path, selectio
         item = checked_file(source / "config/presets", item.name)
         check_public_config(read_json(item))
         put("presets/" + item.name, item.read_bytes())
-    put("presets/" + name + ".json", preset.read_bytes())
-    # BIEZACY is a public strategy snapshot, never an account configuration.
-    put("presets/BIEZACY.json", preset.read_bytes())
+    packaged_preset = production_preset_metadata(preset_doc, name)
+    packaged_preset_bytes = (json.dumps(packaged_preset, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    put("presets/" + name + ".json", packaged_preset_bytes)
+    # BIEZACY is the identical reviewed strategy with normalized presentation.
+    put("presets/BIEZACY.json", packaged_preset_bytes)
     def put_json(relative, value, public=True):
         put(relative, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), public)
     put_json("settings.json", settings, kind == "public")
@@ -356,7 +370,10 @@ def stage(source: Path, template: Path, executable: Path, preset: Path, selectio
              "aktywny_lancuch": chains["aktywny"], "presety_nog": {"Synergy": name}}
     put_json("PACZKA.json", stamp)
     manifest = {"schema": SCHEMA, "kind": kind, "preset_id": name,
-                "selected_preset_sha256": chosen["preset_sha256"], "public_files": public_members,
+                "selected_preset_sha256": chosen["preset_sha256"],
+                "packaged_preset_sha256": sha(packaged_preset_bytes),
+                "selected_settings_sha256": settings_sha256(preset_doc["settings"]),
+                "preset_metadata_policy": "selected_identity_only_v1", "public_files": public_members,
                 "private_files": sorted(f for f in PRIVATE_FILES if (staging / f).is_file()) if kind == "private" else [],
                 "chain_caps": active.get("pulapy", {}), "account_overlay_explicit": chosen.get("account_overlay", {}),
                 "runtime_authentication_verified": False, "execution_started": False}
@@ -408,10 +425,15 @@ def verify(package: Path, template: Path | None = None, allow_incomplete=False) 
     expected_presets = {"Synergy": manifest["preset_id"]}
     if settings.get("presetId") != manifest["preset_id"] or active_presets != expected_presets or stamp.get("presety_nog") != expected_presets or stamp.get("aktywny_lancuch") != chains.get("aktywny"):
         fail("preset_chain_stamp_mismatch")
-    if sha(checked_file(package, "presets/" + manifest["preset_id"] + ".json").read_bytes()) != manifest["selected_preset_sha256"]:
+    if sha(checked_file(package, "presets/" + manifest["preset_id"] + ".json").read_bytes()) != manifest.get("packaged_preset_sha256"):
         fail("selected_preset_changed")
-    if sha(checked_file(package, "presets/BIEZACY.json").read_bytes()) != manifest["selected_preset_sha256"]:
+    if sha(checked_file(package, "presets/BIEZACY.json").read_bytes()) != manifest.get("packaged_preset_sha256"):
         fail("current_preset_snapshot_changed")
+    packaged_preset = read_json(checked_file(package, "presets/" + manifest["preset_id"] + ".json"))
+    if not isinstance(packaged_preset.get("settings"), dict) or settings_sha256(packaged_preset["settings"]) != manifest.get("selected_settings_sha256"):
+        fail("selected_preset_settings_changed")
+    if manifest.get("preset_metadata_policy") != "selected_identity_only_v1" or packaged_preset != production_preset_metadata(packaged_preset, manifest["preset_id"]):
+        fail("selected_preset_metadata_not_normalized")
     if active.get("pulapy") != manifest.get("chain_caps") or set(active.get("pulapy", {})) != CHAIN_CAP_KEYS:
         fail("chain_caps_differ_from_reviewed_selection")
     overlay = manifest.get("account_overlay_explicit", {})

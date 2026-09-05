@@ -38,6 +38,15 @@ def calendar_windows(start: dt.date, end: dt.date, tick_days: list[str]):
     return windows
 
 
+def validate_candidate_names(names):
+    # Output targets are Windows filenames. Case-only differences collide too.
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+    if any(not isinstance(name, str) or not name or any(char not in allowed for char in name) for name in names):
+        raise ValueError("Safe research candidate identifiers required")
+    if len({name.casefold() for name in names}) != len(names):
+        raise ValueError("Candidate identifiers must remain unique including the optional reference")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--finalists", required=True, type=Path,
@@ -47,6 +56,11 @@ def main():
     parser.add_argument("--ticks", required=True, type=Path)
     parser.add_argument("--tick-manifest", required=True, type=Path)
     parser.add_argument("--signals", required=True, type=Path)
+    parser.add_argument("--signal-contract", required=True,
+                        choices=["historical_reference", "observed_receipts", "mixed_missing_original_stress"],
+                        help="Keep the historical publication benchmark distinct from actual receipt replay")
+    parser.add_argument("--trade-sessions", required=True, type=Path,
+                        help="Measured broker trade-session JSON used by the qualifying search")
     parser.add_argument("--from", dest="start", required=True, type=dt.date.fromisoformat)
     parser.add_argument("--to", dest="end", required=True, type=dt.date.fromisoformat)
     parser.add_argument("--output", required=True, type=Path)
@@ -76,6 +90,7 @@ def main():
         loaded.append((row["id"], doc))
     if args.include_reference:
         loaded.append(("GOD-X7-reference", json.loads(args.include_reference.read_text("utf-8-sig"))))
+    validate_candidate_names([name for name, _ in loaded])
     # Legacy research arithmetic has no broker-volume ceiling. V2 deliberately
     # enforces one; silently calling that path unlimited would be misleading.
     if any(doc["settings"].get("order_volume_contract_v2", False) for _, doc in loaded):
@@ -90,8 +105,6 @@ def main():
         folder.mkdir(parents=True)
         presets[label] = folder
         for name, original in loaded:
-            if not name or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in name):
-                raise ValueError("Safe research candidate identifiers required")
             doc = copy.deepcopy(original)
             doc.update({"name": name, "nazwa": name})
             doc["settings"]["lot_max"] = cap
@@ -109,26 +122,38 @@ def main():
                         "--balance", str(deposit), "--signal-time-offset-min", "0",
                         "--sim-limit-price-improvement", "--sim-price-digits", "2",
                         "--sim-new-pending-sl-next-tick", "--sim-native-swap-cash-digits", "2",
-                        "--live-telegram-ingress", "--rozgrzewka-h", "72",
+                        "--sim-trade-sessions", str(args.trade_sessions.resolve()),
+                        "--rozgrzewka-h", "72",
                         "--quick-tick-stride", "1", "--no-charts", "--dump-trades", "--out", str(result)]
+                if args.signal_contract != "historical_reference":
+                    argv.append("--live-telegram-ingress")
                 jobs.append({"id": identity, "argv": argv, "result_dir": str(result),
                              "threads": worker_threads, "expected_candidates": len(loaded),
-                             "window": window, "deposit": deposit, "cap_mode": label})
+                             "window": window, "deposit": deposit, "cap_mode": label,
+                             "signal_contract": args.signal_contract})
     inputs = [{"path": str(path.resolve()), "sha256": file_hash(path)}
-              for path in (args.finalists, args.source_manifest, args.signals, args.tick_manifest, args.exe)]
+              for path in (args.finalists, args.source_manifest, args.signals, args.tick_manifest,
+                           args.exe, args.trade_sessions)]
     inputs.append({"path": str(args.ticks.resolve()), "sha256": tick_manifest["output_sha256"]})
     for folder in presets.values():
         inputs.extend({"path": str(p), "sha256": file_hash(p)} for p in sorted(folder.glob("*.json")))
-    plan = {"id": "giga_sweep8_coronation", "name": "GOD-X8 — koronacja kandydatów",
+    plan = {"id": "giga_sweep8_coronation_" + args.signal_contract, "name": "GOD-X8 — koronacja kandydatów",
             "threads": 24, "output": str(output), "progress_dir": str(args.progress_dir.resolve()),
             "source_revision": file_hash(args.source_manifest), "stop_at": args.stop_at,
             "inputs": inputs, "jobs": jobs,
             "metadata": {"etap_badania": "Koronacja — dokładne niezależne rachunki",
                          "tryb_obliczen": "exact", "kanal": "Synergy", "kandydaci": len(finalists),
-                         "status_walidacji": "candidate_review", "source_state": args.source_state},
+                         "status_walidacji": "coronation", "source_state": args.source_state},
             "protocol": {"window_boundaries": "inclusive from, exclusive to; broker wall-clock dates",
+                         "signal_contract": args.signal_contract,
+                         "separate_contracts": "Never combine profits across overlapping histories or describe them as independent samples.",
+                         "historical_reference": "Publication-final benchmark assumptions; unrecorded original versions remain unknown.",
+                         "observed_receipts": "Only actually recorded message receipts; no reconstruction of earlier positions or missing originals.",
+                         "mixed_missing_original_stress": "Missing-original stress evidence; not a complete historical live replay.",
                          "week": "calendar Monday through Sunday, clipped to the full window",
                          "source_state": args.source_state,
+                         "broker_trade_sessions": {"path": str(args.trade_sessions.resolve()),
+                                                   "sha256": file_hash(args.trade_sessions)},
                          "market_warmup_hours": 72, "warmup_trading": False,
                          "best_day_exclusion": "only max lot 0.01; never subtract days from compounding at higher caps",
                          "arithmetic": "lot_max=0; strategy sizing, margin and risk rules remain active; no claim of broker-executable unlimited orders",

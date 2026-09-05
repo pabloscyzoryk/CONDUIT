@@ -1241,7 +1241,7 @@ impl Mt5Bridge {
                 known.as_ref().map(|p| p.open_ts).unwrap_or(c.time_msc)
             };
             self.closed.push(ClosedTrade {
-                profit_basis: None, cost_receipt: None,
+                profit_basis: Some(conduit_core::cost_receipt::ProfitBasis::PriceOnlyGross), cost_receipt: None,
                 ticket: c.position,
                 side,
                 volume: c.volume,
@@ -1329,7 +1329,7 @@ impl Mt5Bridge {
                 None => deal_reason(c.reason),
             };
             let trade = ClosedTrade {
-                profit_basis: None, cost_receipt: None,
+                profit_basis: Some(conduit_core::cost_receipt::ProfitBasis::PriceOnlyGross), cost_receipt: None,
                 ticket: known.ticket, side, volume: c.volume,
                 open_price: if c.price_open > 0.0 { c.price_open } else { known.open_price },
                 close_price: c.price,

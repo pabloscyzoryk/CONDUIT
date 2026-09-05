@@ -546,11 +546,12 @@ pub struct CloseDetail {
     pub close_ts: Ts,
     /// czas trzymania pozycji w sekundach
     pub hold_s: f64,
-    /// wynik brutto (bez prowizji i swapu)
+    /// Price-only gross for explicit producer bases; source-defined in old records.
     pub gross: f64,
     pub commission: f64,
     pub swap: f64,
-    /// wynik netto — to, co naprawdę weszło na saldo
+    /// Explicit producer net, or the historical numeric projection when basis
+    /// is absent. It is not an account cash ledger (entry costs can book earlier).
     pub net: f64,
     pub reason: String,
     pub excursion: Excursion,
@@ -564,6 +565,12 @@ impl CloseDetail {
             (r4(t.cost_receipt.as_ref().ok_or(crate::cost_receipt::CostError::MissingReceipt)?.gross_profit
                 .ok_or(crate::cost_receipt::CostError::MissingComponent(crate::cost_receipt::CostComponent::GrossProfit))?),
              r4(t.canonical_net()?))
+        } else if matches!(t.profit_basis,Some(crate::cost_receipt::ProfitBasis::PriceOnlyGross |
+            crate::cost_receipt::ProfitBasis::PricePlusSwap)) {
+            let gross=if t.profit_basis==Some(crate::cost_receipt::ProfitBasis::PricePlusSwap) {t.profit-t.swap} else {t.profit};
+            // Preserve the journal's historical nonfinite-to-zero projection;
+            // do not introduce a new error that could halt the trading engine.
+            (r4(gross),r4(t.net_profit().unwrap_or(f64::NAN)))
         } else {
             // Historical output preserved byte-for-byte. Source-defined, not a
             // declaration that these old fields represented complete costs.
@@ -1341,6 +1348,29 @@ mod testy {
         };
         let d = CloseDetail::new(&trade, e).unwrap();
         assert_eq!(d.left_on_table, 0.0);
+    }
+
+    #[test]
+    fn explicit_producer_net_has_no_double_swap_and_preserves_rebate_sign() {
+        use crate::cost_receipt::ProfitBasis;
+        let mut trade=ClosedTrade{ticket:101,side:Side::Buy,volume:0.01,open_price:4000.,close_price:4100.,
+            open_ts:0,close_ts:1000,profit:103.,commission:2.,swap:3.,reason:CloseReason::Tp,basket:Some(1),
+            profit_basis:Some(ProfitBasis::PricePlusSwap),cost_receipt:None};
+        let d=CloseDetail::new(&trade,Excursion::default()).unwrap();
+        assert_eq!(d.gross,100.);assert_eq!(d.net,105.);
+        trade.profit=100.;trade.profit_basis=Some(ProfitBasis::PriceOnlyGross);
+        let d=CloseDetail::new(&trade,Excursion::default()).unwrap();
+        assert_eq!(d.gross,100.);assert_eq!(d.net,105.);
+    }
+
+    #[test]
+    fn historical_unknown_basis_keeps_its_projection_without_new_engine_error() {
+        let trade=ClosedTrade{ticket:101,side:Side::Buy,volume:0.01,open_price:4000.,close_price:4100.,
+            open_ts:0,close_ts:1000,profit:100.,commission:2.,swap:3.,reason:CloseReason::Tp,basket:Some(1),
+            profit_basis:None,cost_receipt:None};
+        let d=CloseDetail::new(&trade,Excursion::default()).unwrap();
+        assert_eq!(d.net,101.,"old projection is compatibility data, not a validated net claim");
+        assert!(d.profit_basis.is_none());assert!(trade.net_profit().is_none());
     }
 
     /// Wyłączony dziennik nie produkuje niczego, a filtr poziomu działa.

@@ -2031,7 +2031,7 @@ fn main() -> Result<()> {
         wypisz_statystyki_e(r);
         if a.dump_trades {
             let path = a.out.join("transakcje.json");
-            std::fs::write(&path, serde_json::to_string(&r.trades)?)?;
+            std::fs::write(&path, serde_json::to_string(&closed_trade_raw_export(&r.trades)?)?)?;
             println!(
                 "zapisano {} transakcji → {}",
                 r.trades.len(),
@@ -2159,44 +2159,10 @@ fn main() -> Result<()> {
         // Saldo narastajaco i czas trzymania liczymy TUTAJ, bo `ClosedTrade`
         // ich nie niesie, a bez nich tabela transakcji jest nieczytelna.
         if !a.summary_only && !r.trades.is_empty() {
-            let mut saldo = r.metrics.start_balance;
-            let pozycje: Vec<serde_json::Value> = r
-                .trades
-                .iter()
-                .enumerate()
-                .map(|(i, t)| -> anyhow::Result<serde_json::Value> {
-                    let canonical=t.profit_basis==Some(conduit_core::cost_receipt::ProfitBasis::CanonicalClosedNetV1);
-                    let netto = if canonical {t.canonical_net()?} else {t.profit + t.commission + t.swap};
-                    saldo += netto;
-                    let mut row=serde_json::json!({
-                        "lp": i + 1,
-                        "ticket": t.ticket,
-                        "kierunek": format!("{:?}", t.side),
-                        "wolumen": t.volume,
-                        "cena_otwarcia": t.open_price,
-                        "cena_zamkniecia": t.close_price,
-                        "otwarcie": fmt_ts(t.open_ts),
-                        "zamkniecie": fmt_ts(t.close_ts),
-                        "otwarcie_ms": t.open_ts,
-                        "zamkniecie_ms": t.close_ts,
-                        "trzymanie_min": (t.close_ts - t.open_ts) as f64 / 60_000.0,
-                        "zysk": t.profit,
-                        "prowizja": t.commission,
-                        "swap": t.swap,
-                        "netto": netto,
-                        "saldo_po": saldo,
-                        "powod": format!("{:?}", t.reason),
-                        "koszyk": t.basket,
-                    });
-                    if canonical {
-                        row["profit_basis"]=serde_json::json!(t.profit_basis);
-                        row["cost_receipt"]=serde_json::json!(t.cost_receipt);
-                        row["saldo_po_basis"]=serde_json::json!("start_plus_closed_net_NOT_actual_cash_balance");
-                    }
-                    Ok(row)
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
+            let pozycje = closed_trade_export_rows(&r.trades, r.metrics.start_balance);
             let plik = serde_json::json!({
+                "trade_export_version": 2,
+                "net_basis": "explicit per-row producer basis; unknown values are null",
                 "preset": name,
                 "format": formaty.get(name.as_str()).cloned().unwrap_or_default(),
                 "od": fmt_ts(from),
@@ -2386,6 +2352,81 @@ impl WariantOkien for Preset {
         // Pusty sufit jako stała, żeby dało się oddać referencję.
         static ZERO: std::sync::OnceLock<PulapyGlobalne> = std::sync::OnceLock::new();
         ZERO.get_or_init(PulapyGlobalne::default)
+    }
+}
+
+/// Reporting projection only. The broker's original profit and account cash are
+/// never changed; unknown historical bases remain unknown, including the suffix
+/// of the synthetic cumulative closed-net ledger.
+fn closed_trade_export_rows(trades: &[conduit_core::types::ClosedTrade], start: f64) -> Vec<serde_json::Value> {
+    let mut ledger = start.is_finite().then_some(start);
+    trades.iter().enumerate().map(|(i,t)| {
+        let net = t.net_profit();
+        ledger = ledger.zip(net).map(|(balance,value)|balance+value).filter(|v|v.is_finite());
+        let mut row=serde_json::json!({
+            "lp":i+1, "ticket":t.ticket, "kierunek":format!("{:?}",t.side),
+            "wolumen":t.volume, "cena_otwarcia":t.open_price, "cena_zamkniecia":t.close_price,
+            "otwarcie":fmt_ts(t.open_ts), "zamkniecie":fmt_ts(t.close_ts),
+            "otwarcie_ms":t.open_ts, "zamkniecie_ms":t.close_ts,
+            "trzymanie_min":(t.close_ts-t.open_ts) as f64/60_000.,
+            "zysk":t.profit, "prowizja":t.commission, "swap":t.swap,
+            "netto":net, "saldo_po":ledger, "powod":format!("{:?}",t.reason), "koszyk":t.basket,
+            "profit_basis":t.profit_basis,
+            "netto_status":if net.is_some(){"known"}else{"unavailable_unknown_basis_or_invalid_receipt"},
+            "saldo_po_basis":"start_plus_closed_net_NOT_actual_cash_balance",
+        });
+        if let Some(receipt)=&t.cost_receipt { row["cost_receipt"]=serde_json::json!(receipt); }
+        row
+    }).collect()
+}
+
+fn closed_trade_raw_export(trades: &[conduit_core::types::ClosedTrade]) -> Result<serde_json::Value> {
+    let mut rows=serde_json::to_value(trades)?;
+    for (row,trade) in rows.as_array_mut().expect("serialized trade slice is an array").iter_mut().zip(trades) {
+        row["net_profit"]=serde_json::json!(trade.net_profit());
+    }
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod trade_export_basis_tests {
+    use super::*;
+    use conduit_core::{cost_receipt::*,types::{ClosedTrade,Side,CloseReason}};
+    fn trade(basis:Option<ProfitBasis>,profit:f64,swap:f64)->ClosedTrade {
+        ClosedTrade{ticket:101,side:Side::Buy,volume:0.01,open_price:4000.,close_price:4100.,
+            open_ts:1_700_000_000_000,close_ts:1_700_000_060_000,profit,commission:-2.,swap,
+            reason:CloseReason::Tp,basket:Some(1),profit_basis:basis,cost_receipt:None}
+    }
+    #[test]
+    fn simulated_price_plus_swap_is_not_charged_a_second_time() {
+        let trades=[trade(Some(ProfitBasis::PricePlusSwap),103.,3.),trade(Some(ProfitBasis::PriceOnlyGross),100.,3.)];
+        let rows=closed_trade_export_rows(&trades,600.);
+        assert_eq!(rows[0]["netto"],101.);assert_eq!(rows[1]["netto"],101.);
+        assert_eq!(rows[1]["saldo_po"],802.);assert_eq!(rows[0]["zysk"],103.);
+        assert_eq!(trades[0].profit,103.,"export cannot mutate already-booked broker profit");
+    }
+    #[test]
+    fn canonical_receipt_keeps_fee_and_costs_exactly_once() {
+        let receipt=CostReceipt{schema:CostSchema::V1,key:CostReceiptKey{scope_id:"synthetic-export".into(),deal_id:1001},
+            position_identifier:101,volume:0.01,currency:"USD".into(),
+            source:CostSource::SimulatorLedger{run_id:"export-test".into(),cost_spec_hash:"synthetic-spec".into()},
+            gross_profit:Some(100.),entry_commission_alloc:Some(-1.),exit_commission:Some(-1.),
+            entry_fee_alloc:Some(0.),exit_fee:Some(-0.5),swap:Some(3.),
+            completeness:CostCompleteness::Complete,entry_allocation:None};
+        let t=trade(None,100.,3.).with_cost_receipt(receipt).unwrap();
+        let rows=closed_trade_export_rows(&[t],600.);
+        assert_eq!(rows[0]["netto"],100.5);assert_eq!(rows[0]["saldo_po"],700.5);
+    }
+    #[test]
+    fn unknown_legacy_or_invalid_receipt_never_fabricates_a_net_ledger() {
+        let rows=closed_trade_export_rows(&[trade(None,100.,3.),trade(Some(ProfitBasis::PricePlusSwap),103.,3.),
+            trade(Some(ProfitBasis::CanonicalClosedNetV1),100.,3.)],600.);
+        assert!(rows[0]["netto"].is_null());assert!(rows[0]["saldo_po"].is_null());
+        assert_eq!(rows[1]["netto"],101.);assert!(rows[1]["saldo_po"].is_null());
+        assert!(rows[2]["netto"].is_null());assert!(rows[2]["saldo_po"].is_null());
+        let raw=closed_trade_raw_export(&[trade(None,100.,3.),trade(Some(ProfitBasis::PricePlusSwap),103.,3.)]).unwrap();
+        assert!(raw[0]["net_profit"].is_null());assert_eq!(raw[1]["net_profit"],101.);
+        assert_eq!(raw[1]["profit"],103.);assert_eq!(raw[1]["swap"],3.);
     }
 }
 

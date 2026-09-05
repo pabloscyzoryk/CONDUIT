@@ -74,8 +74,25 @@ pub struct KoszykDump {
 //  ZRZUT TRANSAKCJI (`transakcje.json`)
 // ============================================================
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TransakcjaDump {
+    pub ticket: u64,
+    pub side: String,
+    pub volume: f64,
+    pub open_price: f64,
+    pub close_price: f64,
+    pub open_ts: i64,
+    pub close_ts: i64,
+    pub profit: f64,
+    pub commission: f64,
+    pub swap: f64,
+    pub reason: String,
+    pub basket: Option<u32>,
+    pub(crate) validated_net: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawTransakcjaDump {
     pub ticket: u64,
     pub side: String,
     pub volume: f64,
@@ -90,13 +107,45 @@ pub struct TransakcjaDump {
     pub swap: f64,
     pub reason: String,
     pub basket: Option<u32>,
+    #[serde(default)]
+    profit_basis: Option<String>,
+    #[serde(default)]
+    net_profit: Option<f64>,
 }
+
+// The offline exporter validates canonical receipts before projecting net_profit.
+// Keep the decision crate independent of broker/core dependencies.
+impl<'de> Deserialize<'de> for TransakcjaDump {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw=RawTransakcjaDump::deserialize(deserializer)?;
+        if !raw.profit.is_finite() || !raw.commission.is_finite() || !raw.swap.is_finite() {
+            return Err(D::Error::custom("nonfinite closed trade costs"));
+        }
+        let net=match raw.profit_basis.as_deref() {
+            Some("PriceOnlyGross") => raw.profit+raw.commission+raw.swap,
+            Some("PricePlusSwap") => raw.profit+raw.commission,
+            Some("CanonicalClosedNetV1") => raw.net_profit
+                .ok_or_else(|| D::Error::custom("canonical trade lacks exporter-validated net_profit; re-export with a qualified cost adapter"))?,
+            _ => return Err(D::Error::custom("closed profit basis is unknown; re-export with explicit producer metadata before net analysis")),
+        };
+        if !net.is_finite() || raw.net_profit.is_some_and(|v| !v.is_finite() || (v-net).abs()>net.abs().max(1.0)*1e-12)
+            || (raw.profit_basis.as_deref()==Some("CanonicalClosedNetV1") && (raw.profit-net).abs()>net.abs().max(1.0)*1e-12) {
+            return Err(D::Error::custom("closed net projection contradicts its explicit profit basis"));
+        }
+        Ok(Self {ticket:raw.ticket,side:raw.side,volume:raw.volume,open_price:raw.open_price,
+            close_price:raw.close_price,open_ts:raw.open_ts,close_ts:raw.close_ts,
+            profit:raw.profit,commission:raw.commission,swap:raw.swap,reason:raw.reason,
+            basket:raw.basket,validated_net:net})
+    }
+}
+
 
 impl TransakcjaDump {
     /// wynik NETTO — to, co naprawdę weszło na saldo
     #[inline]
     pub fn netto(&self) -> f64 {
-        self.profit - self.commission.abs() + self.swap
+        self.validated_net
     }
     #[inline]
     pub fn stop_zabral(&self) -> bool {
@@ -352,5 +401,37 @@ impl Ticki {
             }
         }
         lo
+    }
+}
+
+#[cfg(test)]
+mod closed_profit_basis_tests {
+    use super::*;
+    fn raw() -> serde_json::Value {
+        serde_json::json!({"ticket":1,"side":"Buy","volume":0.01,"open_price":100.0,
+            "close_price":101.0,"open_ts":1,"close_ts":1000,"profit":20.0,
+            "commission":-2.0,"swap":-3.0,"reason":"Partial","basket":1})
+    }
+    #[test]
+    fn analyzer_uses_explicit_signed_net_and_does_not_duplicate_swap() {
+        for swap in [-3.0,4.0] {
+            let mut gross=raw(); gross["swap"]=swap.into(); gross["profit_basis"]="PriceOnlyGross".into();
+            assert_eq!(serde_json::from_value::<TransakcjaDump>(gross.clone()).unwrap().netto(),18.0+swap);
+            gross["profit"]=(20.0+swap).into(); gross["profit_basis"]="PricePlusSwap".into();
+            assert_eq!(serde_json::from_value::<TransakcjaDump>(gross).unwrap().netto(),18.0+swap);
+        }
+        let mut canonical=raw(); canonical["profit_basis"]="CanonicalClosedNetV1".into();
+        canonical["profit"]=14.0.into(); canonical["net_profit"]=14.0.into();
+        assert_eq!(serde_json::from_value::<TransakcjaDump>(canonical.clone()).unwrap().netto(),14.0);
+        canonical["net_profit"]=15.0.into();
+        assert!(serde_json::from_value::<TransakcjaDump>(canonical).is_err());
+    }
+    #[test]
+    fn analyzer_rejects_unknown_history_instead_of_fabricating_complete_net() {
+        assert!(serde_json::from_value::<TransakcjaDump>(raw()).is_err());
+        for basis in ["LegacySourceDefined","FutureBasis","CanonicalClosedNetV1"] {
+            let mut value=raw();value["profit_basis"]=basis.into();
+            assert!(serde_json::from_value::<TransakcjaDump>(value).is_err());
+        }
     }
 }

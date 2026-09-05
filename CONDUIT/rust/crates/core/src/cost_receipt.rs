@@ -45,6 +45,10 @@ impl From<CostSchema> for u16 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProfitBasis {
     LegacySourceDefined,
+    /// The producer reports price movement only; costs remain separate.
+    PriceOnlyGross,
+    /// The producer already includes swap, but commission remains separate.
+    PricePlusSwap,
     CanonicalClosedNetV1,
 }
 
@@ -479,6 +483,51 @@ mod tests {
             }),
         }
     }
+    fn closed_for_basis(profit: f64, swap: f64, commission: f64, basis: Option<ProfitBasis>) -> crate::ClosedTrade {
+        crate::ClosedTrade { ticket: 90, side: crate::Side::Buy, volume: 0.01,
+            open_price: 100.0, close_price: 101.0, open_ts: 0, close_ts: 1000,
+            profit, commission, swap, reason: crate::CloseReason::Partial, basket: Some(1),
+            profit_basis: basis, cost_receipt: None }
+    }
+
+    #[test]
+    fn explicit_profit_basis_counts_swap_and_commission_once() {
+        for swap in [-7.0, 3.0] {
+            let gross = closed_for_basis(20.0, swap, -2.0, Some(ProfitBasis::PriceOnlyGross));
+            let sim = closed_for_basis(20.0 + swap, swap, -2.0, Some(ProfitBasis::PricePlusSwap));
+            assert_eq!(gross.net_profit(), Some(18.0 + swap));
+            assert_eq!(sim.net_profit(), gross.net_profit());
+            assert_eq!(sim.profit, 20.0 + swap, "presentation never changes the stored amount");
+        }
+        let unknown = closed_for_basis(20.0, 0.0, 0.0, None);
+        assert_eq!(unknown.net_profit(), None);
+        let encoded = serde_json::to_value(&unknown).unwrap();
+        assert!(encoded.get("profit_basis").is_none());
+        assert_eq!(serde_json::from_value::<crate::ClosedTrade>(encoded).unwrap().net_profit(), None);
+        let mut legacy = unknown;
+        legacy.profit_basis = Some(ProfitBasis::LegacySourceDefined);
+        assert_eq!(legacy.net_profit(), None);
+        legacy.profit_basis = Some(ProfitBasis::PriceOnlyGross);
+        legacy.profit = f64::MAX; legacy.swap = f64::MAX;
+        assert_eq!(legacy.net_profit(), None);
+    }
+
+    #[test]
+    fn explicit_profit_basis_requires_canonical_receipt_and_preserves_partial_costs() {
+        let base = closed_for_basis(0.5, 0.0, 0.0, Some(ProfitBasis::PriceOnlyGross));
+        let canonical = base.with_cost_receipt(receipt()).unwrap();
+        near(canonical.net_profit().unwrap(), -0.3682);
+        near(canonical.net_profit().unwrap(), canonical.profit);
+        let mut missing = canonical.clone(); missing.cost_receipt = None;
+        assert_eq!(missing.net_profit(), None);
+        let mut mismatch = canonical.clone(); mismatch.profit += 1.0;
+        assert_eq!(mismatch.net_profit(), None);
+        let mut invalid = canonical.clone(); invalid.swap = f64::NAN;
+        assert_eq!(invalid.net_profit(), None);
+        let total: f64 = [canonical.clone(), canonical].iter().map(|c| c.net_profit().unwrap()).sum();
+        near(total, -0.7364);
+    }
+
     fn near(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-11, "{a} != {b}");
     }

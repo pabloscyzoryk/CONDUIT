@@ -172,6 +172,8 @@ export type CloseReason =
   | "MAX_DD"
   | "AI";
 
+export type ClosedProfitBasis = "Unknown" | "PriceOnlyGross" | "PricePlusSwap" | "CanonicalClosedNetV1" | "ReportedNet";
+
 export interface ClosedPosition {
   ticket: number;
   symbol: string;
@@ -182,6 +184,10 @@ export interface ClosedPosition {
   openTime: number;
   closeTime: number;
   profit: number;
+  /** Missing legacy metadata is unknown, not gross or zero. */
+  profitBasis?: ClosedProfitBasis;
+  /** Server-validated receipt net; required for CanonicalClosedNetV1. */
+  netProfit?: number | null;
   swap: number;
   commission: number;
   reason: CloseReason;

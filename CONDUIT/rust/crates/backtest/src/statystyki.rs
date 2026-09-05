@@ -138,13 +138,22 @@ pub struct StatKoszykow {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Lejek {
+    /// 1 = causal unique-source denominator; 0 = legacy NEW-only counting.
+    pub source_observation_version: u32,
+    pub source_identity_semantics: String,
+    /// Entry outcomes not attributable to an observed source; never hidden by a clamp.
+    pub unattributed_entry_outcomes: u32,
+    /// Accepted independent sources / observed independent entry sources.
+    /// Merged NEW sources count separately here, not as additional baskets.
+    pub accepted_entry_sources_pct: f64,
     /// wiadomości z akcją wejścia, które w ogóle dotarły do bramek
     /// (mianownik WSTECZ: koszyki + odrzucone — zostaje jako odczyt
     /// porównawczy, ale nie widzi sygnałów zgubionych bez jreject)
     pub sygnaly_widziane: u32,
-    /// LICZNIK W PRZÓD: każda ŚWIEŻA wiadomość (bez `edit_of` i `reply_to`)
-    /// z akcją Entry|MarketOpen, policzona w pętli przebiegu PRZED routingiem
-    /// i wszystkimi bramkami. 0 = przebieg sprzed licznika (stare archiwa).
+    /// Unique Entry|MarketOpen sources at receipt, including a first observed
+    /// EDIT and legitimate full entries in replies. Revisions/redelivery count
+    /// once; known management aliases do not become new independent sources.
+    /// See source_observation_version before interpreting older archives.
     pub sygnaly_wejsciowe: u32,
     /// UNIKALNE `msg_id` koszyków — sygnały, które OSTATECZNIE weszły.
     /// Osobno od `koszyki`, bo re-arm potrafi założyć kilka koszyków z jednej

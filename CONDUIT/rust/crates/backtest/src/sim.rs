@@ -84,6 +84,9 @@ pub struct SimBroker {
     /// run receipts; this model does NOT implement persisted consumer replay.
     pub cost_run_id: String,
     cost_ledger: crate::sim_costs::SimCostLedger,
+    /// Metadata only: legacy records cannot allocate entry costs to close slices.
+    /// Sticky across rate changes; never changes cash or order decisions.
+    unallocated_entry_cost_seen: bool,
     pub slippage: f64,
     pub slippage_pending: f64,
     pub limit_price_improvement: bool,
@@ -239,6 +242,7 @@ impl SimBroker {
             closed_profit_net_costs: false,
             cost_run_id: "ephemeral-sim-v1".into(),
             cost_ledger: crate::sim_costs::SimCostLedger::default(),
+            unallocated_entry_cost_seen: false,
             slippage: 0.0,
             slippage_pending: 0.0,
             limit_price_improvement: false,
@@ -732,6 +736,7 @@ impl SimBroker {
                 comment: o.comment.clone(),
             });
             if let Some(tickets)=&mut new_pending_tickets { tickets.insert(t); }
+            self.unallocated_entry_cost_seen |= o.volume * self.commission_per_lot != 0.0;
             self.balance -= o.volume * self.commission_per_lot;
             self.spread_paid_usd += (q.ask - q.bid).max(0.0) * XAU_CONTRACT * o.volume;
             self.filled_pendings += 1;
@@ -899,7 +904,7 @@ impl SimBroker {
             self.swap_acc.remove(&p.ticket).unwrap_or(0.0)
         };
         let tr = ClosedTrade {
-            profit_basis: None, cost_receipt: None,
+            profit_basis: (!self.unallocated_entry_cost_seen).then_some(conduit_core::cost_receipt::ProfitBasis::PricePlusSwap), cost_receipt: None,
             ticket: p.ticket,
             side: p.side,
             volume: p.volume,
@@ -1076,6 +1081,7 @@ impl Broker for SimBroker {
             is_toucher: r.is_toucher,
             comment: r.comment,
         });
+        self.unallocated_entry_cost_seen |= r.volume * self.commission_per_lot != 0.0;
         self.balance -= r.volume * self.commission_per_lot;
         self.spread_paid_usd += (self.q.ask - self.q.bid).max(0.0) * XAU_CONTRACT * r.volume;
         Ok(t)
@@ -1286,7 +1292,7 @@ impl Broker for SimBroker {
         else { self.balance += profit; }
         self.positions[idx].volume -= vol;
         let tr = ClosedTrade {
-            profit_basis: None, cost_receipt: None,
+            profit_basis: (!self.unallocated_entry_cost_seen).then_some(conduit_core::cost_receipt::ProfitBasis::PricePlusSwap), cost_receipt: None,
             ticket: p.ticket,
             side: p.side,
             volume: vol,

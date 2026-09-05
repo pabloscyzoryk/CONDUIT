@@ -159,3 +159,19 @@ impl Broker for InjectedClose {
     assert_eq!(b.quarantined_cost_trades().len(),1);assert!(b.cost_reconciliation_required().is_some());assert!(!b.cost_net_supported());
     assert!(b.open_market(req(0.01)).is_err());assert!(b.balance.is_finite());
 }
+
+#[test]
+fn legacy_net_metadata_remembers_charged_entry_cost_across_rate_changes() {
+    let mut c=config(); c.closed_profit_net_costs=false; c.commission_per_lot=0.0;
+    let mut b=SimBroker::z_ustawien(1000.0,&c); b.mark(q(T,4000.0));
+    let t=b.open_market(req(0.07)).unwrap(); b.mark(q(T+1,4001.0));
+    b.close_position(t,CloseReason::Manual).unwrap();
+    assert_eq!(b.history[0].profit_basis,Some(ProfitBasis::PricePlusSwap));
+    near(b.history[0].net_profit().unwrap(),b.history[0].profit);
+    b.commission_per_lot=7.0;
+    let t=b.open_market(req(0.07)).unwrap();
+    b.commission_per_lot=0.0; // This cannot erase the cost paid at entry.
+    b.close_partial(t,0.02,CloseReason::Partial).unwrap();
+    b.close_position(t,CloseReason::Manual).unwrap();
+    assert!(b.history[1..].iter().all(|trade|trade.net_profit().is_none()));
+}

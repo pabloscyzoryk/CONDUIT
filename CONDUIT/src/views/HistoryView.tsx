@@ -4,6 +4,7 @@ import { EksportHistorii } from "@/components/panels/ExportPanel";
 import { useApp } from "@/store/AppStore";
 import { useT } from "@/i18n";
 import { dateTime, duration, money, num, toneOf } from "@/lib/format";
+import { closedNetProfit, closedProfitSummary } from "@/lib/tradeProfit";
 import { isManaged, type CloseReason, type PositionSource } from "@/types";
 import "./views.css";
 
@@ -90,8 +91,10 @@ export function HistoryView() {
         (scope === "all" || (scope === "bot") === isManaged(c.source)),
     );
     arr.sort((a, b) => {
-      const va = sort === "profit" ? a.profit : sort === "openTime" ? a.openTime : a.closeTime;
-      const vb = sort === "profit" ? b.profit : sort === "openTime" ? b.openTime : b.closeTime;
+      const va = sort === "profit" ? closedNetProfit(a) : sort === "openTime" ? a.openTime : a.closeTime;
+      const vb = sort === "profit" ? closedNetProfit(b) : sort === "openTime" ? b.openTime : b.closeTime;
+      if (va === null) return vb === null ? 0 : 1;
+      if (vb === null) return -1;
       return (va - vb) * dir;
     });
     return arr;
@@ -102,28 +105,10 @@ export function HistoryView() {
     [app.snapshot.pendingHistory, from],
   );
 
-  const summary = useMemo(() => {
-    const total = closed.reduce((a, c) => a + c.profit, 0);
-    const wins = closed.filter((c) => c.profit > 0);
-    const losses = closed.filter((c) => c.profit < 0);
-    const grossWin = wins.reduce((a, c) => a + c.profit, 0);
-    const grossLoss = Math.abs(losses.reduce((a, c) => a + c.profit, 0));
-    const best = closed.reduce((a, c) => Math.max(a, c.profit), 0);
-    const worst = closed.reduce((a, c) => Math.min(a, c.profit), 0);
-    const avgHold = closed.length
-      ? closed.reduce((a, c) => a + (c.closeTime - c.openTime), 0) / closed.length
-      : 0;
-    return {
-      total,
-      count: closed.length,
-      winRate: closed.length ? (wins.length / closed.length) * 100 : 0,
-      pf: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : 0,
-      best,
-      worst,
-      avgHold,
-      volume: closed.reduce((a, c) => a + c.volume, 0),
-    };
-  }, [closed]);
+  const summary = useMemo(() => closedProfitSummary(closed), [closed]);
+  const signedMoney = (value: number | null) => value === null ? "—" : `${value >= 0 ? "+" : "−"}${money(Math.abs(value), cur)}`;
+  const netTone = (value: number | null) => value === null ? "" : toneOf(value);
+
 
   const head = (key: SortKey, label: string) => (
     <th
@@ -208,9 +193,8 @@ export function HistoryView() {
       </div>
       <div className="hstats">
         <div className="hstat">
-          <b className={toneOf(summary.total)}>
-            {summary.total >= 0 ? "+" : "−"}
-            {money(Math.abs(summary.total), cur)}
+          <b className={netTone(summary.total)} title={summary.total === null ? t("hist.netUnknown") : undefined}>
+            {signedMoney(summary.total)}
           </b>
           <span>{t("hist.stat.net")}</span>
         </div>
@@ -219,19 +203,19 @@ export function HistoryView() {
           <span>{t("hist.stat.trades")}</span>
         </div>
         <div className="hstat">
-          <b className={summary.winRate >= 50 ? "up" : "down"}>{summary.winRate.toFixed(1)}%</b>
+          <b className={summary.winRate === null ? "" : summary.winRate >= 50 ? "up" : "down"}>{summary.winRate === null ? "—" : `${summary.winRate.toFixed(1)}%`}</b>
           <span>{t("hist.stat.winRate")}</span>
         </div>
         <div className="hstat">
-          <b>{summary.pf === Infinity ? "∞" : summary.pf.toFixed(2)}</b>
+          <b>{summary.pf === null ? "—" : summary.pf === Infinity ? "∞" : summary.pf.toFixed(2)}</b>
           <span>{t("hist.stat.pf")}</span>
         </div>
         <div className="hstat">
-          <b className="up">+{money(summary.best, cur)}</b>
+          <b className={netTone(summary.best)}>{signedMoney(summary.best)}</b>
           <span>{t("hist.stat.best")}</span>
         </div>
         <div className="hstat">
-          <b className="down">{money(summary.worst, cur)}</b>
+          <b className={netTone(summary.worst)}>{signedMoney(summary.worst)}</b>
           <span>{t("hist.stat.worst")}</span>
         </div>
         <div className="hstat">
@@ -283,8 +267,9 @@ export function HistoryView() {
                 </tr>
               </thead>
               <tbody>
-                {closed.map((c) => (
-                  <tr key={c.ticket} className={isManaged(c.source) ? "" : "row--foreign"}>
+                {closed.map((c) => {
+                  const net = closedNetProfit(c);
+                  return <tr key={`${c.ticket}-${c.closeTime}-${c.volume}`} className={isManaged(c.source) ? "" : "row--foreign"}>
                     <td style={{ textAlign: "left" }}>
                       <div className="cell-stack">
                         <span className="num cell-strong">#{c.ticket}</span>
@@ -314,12 +299,11 @@ export function HistoryView() {
                       )}
                     </td>
                     <td className="num cell-sub">{money(c.swap + c.commission, cur)}</td>
-                    <td className={`num cell-strong ${toneOf(c.profit)}`}>
-                      {c.profit >= 0 ? "+" : "−"}
-                      {money(Math.abs(c.profit), cur)}
+                    <td className={`num cell-strong ${netTone(net)}`} title={net === null ? t("hist.netUnknown") : undefined}>
+                      {signedMoney(net)}
                     </td>
-                  </tr>
-                ))}
+                  </tr>;
+                })}
               </tbody>
             </table>
           </div>

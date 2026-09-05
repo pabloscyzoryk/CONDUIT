@@ -96,7 +96,7 @@ effective settings must remain explicit and identical in both systems.
   tombstone prevents new orders and retries broker-refused pending removal.
 - Daily trailing can use total peak equity or peak daily profit. Day, EOD
   and weekend guards include exposure consisting only of pending orders.
-- Native fault scenarios 1–13 in XT exercise confirmed exits, broker refusal,
+- Native fault scenarios 1–14 in XT exercise confirmed exits, broker refusal,
   cancellation/fill races, residual partials, partial accounting, refused
   grid edits and clean replacement, including legacy and no-fault controls.
   Further scenarios cover known special grid legs, profit-budget flooring
@@ -105,6 +105,11 @@ effective settings must remain explicit and identical in both systems.
   Source identity and aliases survive basket pruning within
   a native run. XT accepts one source channel per experiment; its fresh tester
   state does not claim the live application's persisted account restart proof.
+- Entry and MarketOpen share the same capacity check. Compaction preserves
+  live or uncertain ownership and pending exit/review state; 600 retained
+  baskets produce an explicit capacity rejection. Reused slots start clean.
+  Lifetime result IDs are independent of the 600 live-slot ceiling, with
+  a coverage marker when a broker close cannot be mapped to a registered owner.
 - Fast addons apply the lot ceiling after their multiplier. Local invalid-TP
   checks preserve capacity and start the configured cooldown; transmitted
   refusals consume an attempt. The

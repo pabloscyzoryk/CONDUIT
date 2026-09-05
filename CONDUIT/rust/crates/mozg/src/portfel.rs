@@ -400,6 +400,7 @@ mod testy {
             open_ts: 2_000,
             close_ts: 3_000,
             profit: netto,
+            validated_net: netto,
             commission: 0.0,
             swap: 0.0,
             reason: powod.into(),
@@ -488,7 +489,7 @@ mod testy {
         assert_ne!(kolizyjne[0].kanal, kolizyjne[1].kanal);
         assert_eq!(
             kolizyjne.iter().map(|r| r.kanal.as_str()).collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from(["STORM", "Synergy"]),
+            std::collections::BTreeSet::from(["SyntheticFormatA", "SyntheticFormatB"]),
         );
     }
 }

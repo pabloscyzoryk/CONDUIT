@@ -19,6 +19,8 @@ def read_summary(path: Path, allow_partial: bool = False) -> tuple[dict, dict]:
 def compact(name: str, metrics: dict) -> dict:
     funnel = metrics.get('stat_sygnalow', {}).get('lejek', {})
     baskets = metrics.get('stat_sygnalow', {}).get('koszyki', {})
+    source_version = metrics.get('entry_source_observation_version', 0)
+    acceptance = funnel.get('accepted_entry_sources_pct') if isinstance(source_version, int) and source_version >= 1 else None
     return {'name': name,
             **{key: metrics.get(key) for key in (
                 'total_profit', 'start_balance', 'end_equity', 'market_days',
@@ -29,7 +31,13 @@ def compact(name: str, metrics: dict) -> dict:
                 'blown', 'stop_outs', 'profit_factor')},
             'filled_baskets': baskets.get('z_pozycjami'),
             'entry_signals': funnel.get('sygnaly_wejsciowe'),
+            # Compatibility alias for older rank/report consumers, not actual
+            # unique source acceptance. New G8h ranking uses the separate field.
             'signal_utilization_pct': funnel.get('wykonanych_pct'),
+            'signal_utilization_basis': 'legacy_closed_baskets_per_entry_source_proxy',
+            'closed_basket_to_entry_sources_pct': funnel.get('wykonanych_pct'),
+            'accepted_entry_sources_pct': acceptance,
+            'entry_source_observation_version': source_version,
             'rejected_signals': funnel.get('odrzucone_sygnaly'),
             'no_fill_baskets': funnel.get('koszyk_bez_fillu')}
 

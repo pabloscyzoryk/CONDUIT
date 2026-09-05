@@ -838,14 +838,14 @@ pub fn zmienne_tematu(
     let mut zysk_brutto = 0.0f64;
     let mut strata_brutto = 0.0f64;
     let mut zrealizowany = 0.0f64;
+    let mut net_complete = true;
     for c in snap
         .closed
         .iter()
         .filter(|c| c.source == Origin::Bot && dzis(c.close_time))
     {
-        // netto = to, co NAPRAWDĘ zmieniło saldo (ten sam wzór, co w eksporcie)
-        let netto = c.profit + c.swap + c.commission;
         ile += 1;
+        let Some(netto) = c.net_result() else { net_complete = false; continue; };
         zrealizowany += netto;
         if netto > 0.0 {
             wygrane += 1;
@@ -859,7 +859,7 @@ pub fn zmienne_tematu(
     } else {
         0.0
     };
-    let pf = if strata_brutto > 0.0 {
+    let pf = if !net_complete { "—".to_string() } else if strata_brutto > 0.0 {
         format!("{:.2}", zysk_brutto / strata_brutto)
     } else if zysk_brutto > 0.0 {
         // Dzień bez ani jednej straty. „inf" w temacie maila wygląda jak
@@ -921,7 +921,7 @@ pub fn zmienne_tematu(
     v.dodaj(
         "zysk_dzis",
         "Zysk ZREALIZOWANY dzisiaj",
-        pieniadze_ze_znakiem(zrealizowany, waluta),
+        if net_complete { pieniadze_ze_znakiem(zrealizowany, waluta) } else { "—".into() },
     );
     v.dodaj(
         "wynik_dzis",
@@ -968,7 +968,7 @@ pub fn zmienne_tematu(
         "Transakcje zamknięte dzisiaj",
         ile.to_string(),
     );
-    v.dodaj("skutecznosc", "Skuteczność dzisiaj", procent(skutecznosc));
+    v.dodaj("skutecznosc", "Skuteczność dzisiaj", if net_complete { procent(skutecznosc) } else { "—".into() });
     v.dodaj("profit_factor", "Profit factor dzisiaj", pf);
     v.dodaj(
         "sygnaly",
@@ -1595,6 +1595,8 @@ mod tests {
             open_time: 0,
             close_time,
             profit,
+            profit_basis: crate::ui::ClosedProfitBasis::PriceOnlyGross,
+            net_profit: Some(profit),
             swap: 0.0,
             commission: 0.0,
             reason: crate::ui::CloseReason::Tp,
@@ -1674,6 +1676,27 @@ mod tests {
         assert_eq!(v.get("skutecznosc"), Some("66.7%"));
         // (12 + 6) / 4
         assert_eq!(v.get("profit_factor"), Some("4.50"));
+    }
+
+    #[test]
+    fn mail_net_uses_explicit_basis_once_and_propagates_unknown() {
+        use crate::ui::{Origin, ClosedProfitBasis};
+        let mut snap = migawka();
+        let dzis = 20_664 * 86_400_000;
+        let mut gross = zamknieta(20.0, dzis, Origin::Bot);
+        gross.swap = -3.0; gross.commission = -2.0;
+        let mut sim = gross.clone(); sim.profit = 17.0; sim.profit_basis = ClosedProfitBasis::PricePlusSwap;
+        let mut canonical = gross.clone(); canonical.profit = 14.0;
+        canonical.profit_basis = ClosedProfitBasis::CanonicalClosedNetV1; canonical.net_profit = Some(14.0);
+        snap.closed = vec![gross, sim, canonical];
+        let v = zmienne_tematu(&snap, MailCategory::Summary, "report", dzis);
+        assert_eq!(v.get("zysk_dzis"), Some("+$44.00"));
+        snap.closed[0].profit_basis = ClosedProfitBasis::Unknown;
+        let v = zmienne_tematu(&snap, MailCategory::Summary, "report", dzis);
+        assert_eq!(v.get("zysk_dzis"), Some("—"));
+        assert_eq!(v.get("skutecznosc"), Some("—"));
+        assert_eq!(v.get("profit_factor"), Some("—"));
+        assert_eq!(v.get("transakcje"), Some("3"));
     }
 
     #[test]

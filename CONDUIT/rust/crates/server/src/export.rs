@@ -258,10 +258,16 @@ fn wybierz_historie(st: &StateHandle, q: &Filtr) -> Vec<ui::ClosedPosition> {
     })
 }
 
-async fn historia_csv(State(st): State<StateHandle>, Query(q): Query<Filtr>) -> Response {
-    let dane = wybierz_historie(&st, &q);
+fn history_net_total(dane: &[ui::ClosedPosition]) -> Option<f64> {
+    dane.iter().try_fold(0.0, |sum, p| {
+        let total = sum + p.net_result()?;
+        total.is_finite().then_some(total)
+    })
+}
+
+fn tabela_historii(dane: &[ui::ClosedPosition], separator: char) -> String {
     let mut c = Csv::new(
-        q.separator(),
+        separator,
         &[
             "ticket",
             "zrodlo",
@@ -281,9 +287,11 @@ async fn historia_csv(State(st): State<StateHandle>, Query(q): Query<Filtr>) -> 
             "wynik_netto",
             "koszyk",
             "komentarz",
+            "profit_basis",
+            "net_status",
         ],
     );
-    for p in &dane {
+    for p in dane {
         let trwanie = if p.close_time > p.open_time && p.open_time > 0 {
             format!("{:.1}", (p.close_time - p.open_time) as f64 / 60_000.0)
         } else {
@@ -307,11 +315,18 @@ async fn historia_csv(State(st): State<StateHandle>, Query(q): Query<Filtr>) -> 
             licz(p.profit),
             licz(p.swap),
             licz(p.commission),
-            licz(p.profit + p.swap + p.commission),
+            p.net_result().map(licz).unwrap_or_default(),
             p.basket_id.map(|b| format!("B{b}")).unwrap_or_default(),
             p.comment.clone(),
+            tekst_enum(&p.profit_basis),
+            if p.net_result().is_some() { "known" } else { "unknown" }.into(),
         ]);
     }
+    c.buf
+}
+
+async fn historia_csv(State(st): State<StateHandle>, Query(q): Query<Filtr>) -> Response {
+    let dane = wybierz_historie(&st, &q);
     // ZAKRES DANYCH IDZIE DO SAMEGO PLIKU, nie tylko do JSON-a. CSV bywa
     // jedyną rzeczą, którą ktoś ogląda po tygodniu — i musi sam powiedzieć,
     // czego w nim nie ma. Wiersz zaczyna się od `#`, więc arkusz pokaże go
@@ -325,7 +340,7 @@ async fn historia_csv(State(st): State<StateHandle>, Query(q): Query<Filtr>) -> 
     );
     // BOM jest już w nagłówku komentarza, więc z tabeli go zdejmujemy —
     // dwa znaczniki kolejności bajtów w jednym pliku psują pierwszą komórkę.
-    let tabela = c.buf.trim_start_matches('\u{feff}').to_string();
+    let tabela = tabela_historii(&dane, q.separator()).trim_start_matches('\u{feff}').to_string();
     plik_csv(
         &format!("conduit-historia-{}.csv", stempel()),
         naglowek + &tabela,
@@ -334,7 +349,7 @@ async fn historia_csv(State(st): State<StateHandle>, Query(q): Query<Filtr>) -> 
 
 async fn historia_json(State(st): State<StateHandle>, Query(q): Query<Filtr>) -> Response {
     let dane = wybierz_historie(&st, &q);
-    let suma: f64 = dane.iter().map(|p| p.profit + p.swap + p.commission).sum();
+    let suma = history_net_total(&dane);
     let bot = dane.iter().filter(|p| p.source == ui::Origin::Bot).count();
     let v = serde_json::json!({
         "meta": meta(&st, "historia transakcji"),
@@ -343,7 +358,8 @@ async fn historia_json(State(st): State<StateHandle>, Query(q): Query<Filtr>) ->
             "pozycji": dane.len(),
             "w_tym_bota": bot,
             "spoza_bota": dane.len() - bot,
-            "wynik_netto": (suma * 100.0).round() / 100.0,
+            "wynik_netto": suma.map(|n| (n * 100.0).round() / 100.0),
+            "net_status": if suma.is_some() { "known" } else { "unknown" },
         },
         "pozycje": dane,
     });
@@ -1313,6 +1329,31 @@ mod tests {
         assert_eq!(pole("5", ','), "5");
         assert_eq!(pole("0.00", ','), "0.00");
         assert_eq!(pole("+3.5", ','), "+3.5");
+    }
+
+    #[test]
+    fn history_export_net_matches_ui_and_preserves_unknown() {
+        let make = |basis, profit, swap| {
+            crate::ui::closed_from_core(&conduit_core::ClosedTrade { ticket: 1,
+                side: conduit_core::Side::Buy, volume: 0.01, open_price: 100.0, close_price: 101.0,
+                open_ts: 1, close_ts: 1000, profit, swap, commission: -2.0,
+                reason: conduit_core::CloseReason::Partial, basket: Some(1),
+                profit_basis: basis, cost_receipt: None }, "TEST")
+        };
+        use conduit_core::cost_receipt::ProfitBasis;
+        let mut rows=vec![make(Some(ProfitBasis::PriceOnlyGross),20.0,-3.0),
+            make(Some(ProfitBasis::PricePlusSwap),23.0,3.0)];
+        assert_eq!(history_net_total(&rows),Some(36.0));
+        let csv=tabela_historii(&rows,',');
+        let data:Vec<_>=csv.lines().skip(1).map(|line|line.split(',').collect::<Vec<_>>()).collect();
+        assert_eq!(data[0][15],"15.00"); assert_eq!(data[1][15],"21.00");
+        assert_eq!(data[0][18],"PriceOnlyGross"); assert_eq!(data[1][18],"PricePlusSwap");
+        assert_eq!(data[0][19],"known");
+        rows.push(make(None,20.0,0.0));
+        assert_eq!(history_net_total(&rows),None);
+        let csv=tabela_historii(&rows,',');
+        let unknown=csv.lines().last().unwrap().split(',').collect::<Vec<_>>();
+        assert_eq!(unknown[15],""); assert_eq!(unknown[19],"unknown");
     }
 
     #[test]

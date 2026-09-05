@@ -20,8 +20,9 @@ test('actual history reason tooltip explains RF without changing the profit cell
   const result = jsx(fragment, ['c', 't', 'Badge', 'REASON_TONE', 'REASON_LABEL'], [c, k => k, 'Badge', { RISK_FREE: 'info' }, { RISK_FREE: 'hist.reason.riskFree' }]);
   assert.equal(result.props.title, 'hist.reason.riskFree.hint');
   assert.equal(c.profit, -16.08);
-  assert.match(source, /toneOf\(c\.profit\)/);
-  assert.match(source, /money\(Math\.abs\(c\.profit\), cur\)/);
+  assert.match(source, /const net = closedNetProfit\(c\)/);
+  assert.match(source, /netTone\(net\)/);
+  assert.match(source, /signedMoney\(net\)/);
 });
 
 test('actual basket RF badge follows current riskFree state, not a fabricated secured guarantee', () => {

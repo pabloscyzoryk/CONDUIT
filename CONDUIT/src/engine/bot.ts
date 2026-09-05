@@ -430,6 +430,8 @@ export function closePosition(s: BotState, ticket: number, price: number, reason
     openTime: p.openTime,
     closeTime: now(),
     profit,
+    profitBasis: "ReportedNet",
+    netProfit: profit,
     swap: p.swap,
     commission: p.commission,
     reason,

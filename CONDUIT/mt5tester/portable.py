@@ -181,7 +181,7 @@ UseCloud=0
             for line in content.splitlines():
                 if "BROKER_SPEC " in line:
                     specs.append(line[line.index("BROKER_SPEC "):])
-                for marker in ["BROKER_SPEC ", "BROKER_PENDING_LIMIT ", "BROKER_SESSION ", "BROKER_SESSION_SUMMARY ", "SESSION_PROBE ", "OPEN_VOLUME_AUDIT ", "BLAD:", "CEXIT_TEST_RESULT|", "CEXIT_TEST_EVENT|", "EQ_STAT ", "most:"]:
+                for marker in ["BROKER_SPEC ", "BROKER_PENDING_LIMIT ", "BROKER_SESSION ", "BROKER_SESSION_SUMMARY ", "SESSION_PROBE ", "OPEN_VOLUME_AUDIT ", "NATIVE_CAPACITY_REJECT ", "BLAD:", "CEXIT_TEST_RESULT|", "CEXIT_TEST_EVENT|", "EQ_STAT ", "most:"]:
                     if marker in line:
                         diagnostics.append(line[line.index(marker):])
                         break

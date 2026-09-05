@@ -586,6 +586,13 @@ struct Basket
   };
 Basket   g_b[MAXB];
 int      g_nb = 0;
+struct NativeBasketResult
+  {
+   int id;
+   long source_id;
+   double profit;
+   int closes;
+  };
 int      g_next_id = 1;
 // Fault injection is inert by default and rejected outside the MQL tester.
 int      g_test_exit_stage = 0, g_test_close_reject = 0, g_test_cancel_reject = 0;
@@ -1251,6 +1258,33 @@ bool ExitOwnedSnapshot(int bi, ulong &positions[], ulong &orders[])
      }
    if(np != PositionsTotal() || no != OrdersTotal()) complete = false;
    return complete;
+  }
+bool NativeEnsureBasketCapacity(string entry_kind)
+  {
+   if(g_nb<MAXB)return true;
+   // Resolve ownership before moving any slot. A partially moved table would
+   // itself make the old and new indices appear to own the same ticket.
+   bool retain[MAXB];
+   for(int i=0;i<g_nb;i++)
+     {
+      retain[i]=Alive(i) || g_b[i].exit_pending || g_b[i].entry_review;
+      if(!retain[i])
+        {
+         ulong positions[],orders[];
+         retain[i]=!ExitOwnedSnapshot(i,positions,orders)
+                   || ArraySize(positions)>0 || ArraySize(orders)>0;
+        }
+     }
+   int write=0;
+   for(int i=0;i<g_nb;i++)if(retain[i])
+     {if(write!=i)g_b[write]=g_b[i];write++;}
+   g_nb=write;
+   if(g_nb<MAXB)return true;
+   g_cnt_reject++;
+   PrintFormat("NATIVE_CAPACITY_REJECT kind=%s retained=%d limit=%d",entry_kind,g_nb,MAXB);
+   if(In_Diag && g_handle_diag!=INVALID_HANDLE)
+      FileWrite(g_handle_diag,"NATIVE_CAPACITY_REJECT",(string)g_now,entry_kind,(string)g_nb,(string)MAXB);
+   return false;
   }
 void ExitRememberLivePositions(int bi, ulong &positions[])
   {
@@ -3690,14 +3724,9 @@ void HandleEntry(long msg_id, int side, bool is_limit, bool is_stop, double lo, 
      }
 
    // ---- nowy koszyk ----
-   if(g_nb >= MAXB)
-     {
-      int w = 0;
-      for(int i = 0; i < g_nb; i++) if(Alive(i)) { g_b[w] = g_b[i]; w++; }
-      g_nb = w;
-      if(g_nb >= MAXB) return;
-     }
+   if(!NativeEnsureBasketCapacity("Entry"))return;
    int bi = g_nb; g_nb++;
+   ZeroMemory(g_b[bi]);
    g_b[bi].id = g_next_id; g_next_id++;
    g_b[bi].msg_id = msg_id;
    g_b[bi].side = side;
@@ -3783,8 +3812,9 @@ void HandleMkt(long msg_id, int side)
    bool stary_auto = In_AutoLimit;   // MKT wchodzi po rynku niezależnie od auto_limit
    // (silnik: koszyk z punktową strefą + is_limit=false; PlaceGrid z auto_limit
    //  złożyłby limit na cenie — dlatego tu krótka ścieżka rynkowa)
-   if(g_nb >= MAXB) return;
+   if(!NativeEnsureBasketCapacity("MarketOpen"))return;
    int bi = g_nb; g_nb++;
+   ZeroMemory(g_b[bi]);
    g_b[bi].id = g_next_id; g_next_id++;
    g_b[bi].msg_id = msg_id;
    g_b[bi].side = side;
@@ -6967,12 +6997,70 @@ void PortfolioBudgetScenarioTick()
    ExitTestFinish(true,"PORTFOLIO_CAP_BEFORE_PROFIT_ARM_AND_ACKNOWLEDGED_EXPOSURE");
   }
 
+void BasketCapacityScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0 && In_HonorMarketOpen
+                      && In_EntryIdempotency && In_ProfitBudgetArmPct==0.0
+                      && In_MaxPortfolioRisk==0.0,"capacity fixture inputs"))return;
+   // Bounded actual history: 601 distinct basket identities, each opened and
+   // closed before the next. The live exposure count is never 601.
+   for(int id=1;id<=MAXB+1;id++)
+     {
+      g_nb=1;ExitTestBasket(0);g_b[0].id=id;g_b[0].msg_id=100000+id;
+      ulong ticket=0;
+      if(!ExitTestRequire(ExitTestOpen(0,0.01,ticket),"history fixture open failed"))return;
+      g_powod_zamk="TEST_CAPACITY_HISTORY";
+      if(!ExitTestRequire(ZamknijPozycje(ticket),"history fixture close failed"))return;
+     }
+   NativeBasketResult history[];
+   if(!ExitTestRequire(CollectNativeBasketResults(history) && ArraySize(history)==MAXB+1,"history results truncated at live capacity"))return;
+   double sum=0.0;
+   for(int i=0;i<ArraySize(history);i++)
+     {if(!ExitTestRequire(history[i].closes==1,"history close duplicated or omitted"))return;sum+=history[i].profit;}
+   if(!ExitTestRequire(MathAbs(sum-(AccountInfoDouble(ACCOUNT_BALANCE)-g_start_balance))<1e-6,"history results do not reconcile cash"))return;
+   g_nb=MAXB;g_next_id=MAXB+2;
+   for(int i=0;i<MAXB;i++){ZeroMemory(g_b[i]);g_b[i].id=10000+i;g_b[i].state=ST_DONE;}
+   ExitTestBasket(MAXB-1);g_b[MAXB-1].id=9000;
+   ulong kept=0;
+   if(!ExitTestRequire(ExitTestOpen(MAXB-1,0.01,kept),"live sentinel open failed"))return;
+   MapPut(900000,9000);
+   g_b[1].exit_reason="stale";g_b[1].review_requested_lo=123.0;
+   long sent=g_open_request_count;
+   SourceFixtureMessage(777777,0,0,"MKT:market,BUY");
+   if(!ExitTestRequire(g_nb==2 && BIdx(9000)==0 && PositionSelectByTicket(kept)
+                      && MapGet(900000)==9000 && PositionsTotal()==2
+                      && g_open_request_count==sent+1,"MarketOpen lost live basket or failed compaction"))return;
+   if(!ExitTestRequire(g_b[1].exit_reason=="" && g_b[1].review_requested_lo==0.0,"reused market slot retained old metadata"))return;
+   SourceFixtureMessage(777777,0,0,"MKT:market,BUY");
+   if(!ExitTestRequire(g_nb==2 && PositionsTotal()==2 && g_open_request_count==sent+1,"MarketOpen source duplicated"))return;
+   for(int i=2;i<MAXB;i++){ZeroMemory(g_b[i]);g_b[i].id=20000+i;g_b[i].state=ST_DONE;}
+   g_nb=MAXB;g_b[2].exit_reason="stale";g_b[2].review_requested_hi=456.0;
+   double hi=MathFloor(g_bid)-10.0,lo=hi-1.0,sl=lo-10.0,tp=hi+5.0;
+   string entry=StringFormat("ENTRY2:entry,BUY,1,0,%.5f,%.5f,%.5f,0,nan,0,0,0,1,%.5f",lo,hi,sl,tp);
+   SourceFixtureMessage(888888,0,0,entry);
+   if(!ExitTestRequire(g_nb==3 && PositionsTotal()==2 && OrdersTotal()>0
+                      && g_b[2].exit_reason=="" && g_b[2].review_requested_hi==0.0,"Entry compaction lost live exposure or reused stale metadata"))return;
+   int orders=OrdersTotal();SourceFixtureMessage(888888,0,0,entry);
+   if(!ExitTestRequire(g_nb==3 && PositionsTotal()==2 && OrdersTotal()==orders,"Entry source duplicated"))return;
+   for(int i=3;i<MAXB;i++){ZeroMemory(g_b[i]);g_b[i].id=30000+i;g_b[i].state=ST_PENDING;}
+   g_nb=MAXB;sent=g_open_request_count;
+   if(!ExitTestRequire(!NativeEnsureBasketCapacity("fixture_all_active") && g_nb==MAXB
+                      && PositionsTotal()==2 && OrdersTotal()==orders && sent==g_open_request_count,"active capacity changed risk or lost baskets"))return;
+   g_nb=3;CancelPendings(2);
+   for(int bi=0;bi<2;bi++)for(int i=g_b[bi].npos-1;i>=0;i--)ZamknijPozycje(g_b[bi].pos[i]);
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0,"capacity fixture cleanup incomplete"))return;
+   PrintFormat("CEXIT_TEST_EVENT|basket_capacity|history_ids=%d|retained_exposure=1|market_and_entry_compact=1|duplicate_sources=0|active_cap=%d",MAXB+1,MAXB);
+   ExitTestFinish(true,"HISTORY_IDS_LIVE_CAPACITY_SOURCE_IDEMPOTENCY_AND_FRESH_SLOTS");
+  }
+
 void ExitFaultScenarioTick()
   {
    if(!MQLInfoInteger(MQL_TESTER) || In_TestExitScenario == 0 || g_test_exit_finished) return;
    if(In_TestExitScenario == 9) { KnownSpecialLevelScenarioTick(); return; }
    if(In_TestExitScenario == 10) { ProfitBudgetScenarioTick(); return; }
    if(In_TestExitScenario == 13) { PortfolioBudgetScenarioTick(); return; }
+   if(In_TestExitScenario == 14) { BasketCapacityScenarioTick(); return; }
    if(In_TestExitScenario == 11 || In_TestExitScenario == 12) { SourceRecoveryScenarioTick(); return; }
    if(In_TestExitScenario == 6) { PartialReceiptScenarioTick(); return; }
    if(In_TestExitScenario == 7 || In_TestExitScenario == 8) { EditReviewScenarioTick(); return; }
@@ -7072,7 +7160,7 @@ int OnInit()
      }
    if(!TestSppTargetPlanReset()) return INIT_FAILED;
    if(!TestBeRetargetContract()) return INIT_FAILED;
-   if(In_TestExitScenario < 0 || In_TestExitScenario > 13) return INIT_PARAMETERS_INCORRECT;
+   if(In_TestExitScenario < 0 || In_TestExitScenario > 14) return INIT_PARAMETERS_INCORRECT;
    if(In_TestExitScenario > 0
       && (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       return INIT_PARAMETERS_INCORRECT;
@@ -7167,43 +7255,60 @@ int OnInit()
    return INIT_SUCCEEDED;
   }
 
-// Wynik KAZDEGO koszyka policzony z historii brokera (jak zrzuc_koszyki)
-void ZrzucWyniki()
+int NativeBasketResultIndex(NativeBasketResult &results[],int id,long source_id)
   {
-   if(g_handle_diag == INVALID_HANDLE) return;
-   HistorySelect(0, TimeCurrent() + 86400);
+   for(int i=0;i<ArraySize(results);i++)if(results[i].id==id)return i;
+   int n=ArraySize(results);ArrayResize(results,n+1);
+   results[n].id=id;results[n].source_id=source_id;results[n].profit=0.0;results[n].closes=0;
+   return n;
+  }
+bool CollectNativeBasketResults(NativeBasketResult &results[])
+  {
+   ArrayResize(results,0);
+   if(!HistorySelect(0,TimeCurrent()+86400))return false;
+   bool complete=true;
    int total = HistoryDealsTotal();
-   double pl[MAXB]; int n[MAXB];
-   ArrayInitialize(pl, 0.0); ArrayInitialize(n, 0);
+   // IDs are lifetime identities, not indices into the live MAXB slots.
+   // Include registered zero-close baskets just as the previous report did.
+   for(int j=0;j<g_nrej;j++)if(g_rej_bid[j]>=0)
+      NativeBasketResultIndex(results,g_rej_bid[j],g_rej_msg[j]);
    for(int i = 0; i < total; i++)
      {
       ulong d = HistoryDealGetTicket(i);
       if(HistoryDealGetInteger(d, DEAL_MAGIC) != In_Magic) continue;
       if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
       ulong poz = (ulong)HistoryDealGetInteger(d, DEAL_POSITION_ID);
+      bool mapped=false;
       for(int j = 0; j < g_nrej; j++)
          if(g_rej_tk[j] == poz)
            {
-            int id = g_rej_bid[j];
-            if(id >= 0 && id < MAXB)
+            if(g_rej_bid[j]>=0)
               {
-               pl[id] += HistoryDealGetDouble(d, DEAL_PROFIT)
-                       + HistoryDealGetDouble(d, DEAL_SWAP)
-                       + HistoryDealGetDouble(d, DEAL_COMMISSION);
-               n[id]++;
+               int k=NativeBasketResultIndex(results,g_rej_bid[j],g_rej_msg[j]);
+               results[k].profit+=HistoryDealGetDouble(d,DEAL_PROFIT)
+                                 +HistoryDealGetDouble(d,DEAL_SWAP)
+                                 +HistoryDealGetDouble(d,DEAL_COMMISSION);
+               results[k].closes++;
+               mapped=true;
               }
             break;
            }
+      if(!mapped)complete=false;
      }
-   for(int j = 0; j < g_nrej; j++)
+   return complete;
+  }
+
+// Full registered broker history, independent of compaction and lifetime ID.
+void ZrzucWyniki()
+  {
+   if(g_handle_diag==INVALID_HANDLE)return;
+   NativeBasketResult results[];
+   bool complete=CollectNativeBasketResults(results);
+   FileWrite(g_handle_diag,"BASKET_RESULT_COVERAGE",complete?"1":"0",(string)ArraySize(results));
+   for(int j=0;j<ArraySize(results);j++)
      {
-      int id = g_rej_bid[j];
-      if(id < 0 || id >= MAXB || n[id] < 0) continue;
-      bool pierwszy = true;
-      for(int q = 0; q < j; q++) if(g_rej_bid[q] == id) { pierwszy = false; break; }
-      if(!pierwszy) continue;
-      FileWrite(g_handle_diag, "WYNIK", (string)id, (string)g_rej_msg[j],
-                StringFormat("%.5f", pl[id]), (string)n[id]);
+      FileWrite(g_handle_diag,"WYNIK",(string)results[j].id,(string)results[j].source_id,
+                StringFormat("%.5f",results[j].profit),(string)results[j].closes);
      }
   }
 
