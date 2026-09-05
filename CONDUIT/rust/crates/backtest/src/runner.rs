@@ -20,6 +20,13 @@ use conduit_core::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+/// JEDEN FORMAT W PRZEBIEGU: nazwa kanału, nazwa presetu i jego ustawienia.
+///
+/// Istnieje po to, żeby backtest umiał policzyć **kilka presetów naraz na
+/// jednym rachunku** — tak jak bot pracuje na żywo od 03.08.2026. Wcześniej
+/// `--preset` opisywał cały strumień i nie dało się zmierzyć portfela dwóch
+/// kanałów: ani wspólnego marginesu, ani pułapów, ani tego, czy formaty się
+/// wzmacniają, czy wytracają.
 #[derive(Debug, Clone)]
 pub struct FormatCfg {
     /// nazwa formatu — musi zgadzać się z polem `kanal` sygnału
@@ -47,11 +54,21 @@ pub struct RunConfig {
     /// outside Balance until close, with the declared account-money precision.
     /// This is not a strategy/sizing axis and is independent of NET reporting.
     pub sim_native_swap_cash_digits: Option<u32>,
+    /// Feed raw messages through the exact bounded content-dedup ingress used
+    /// by the VPS Telegram listener before they reach the parser/Engine.
+    /// False preserves the ordinary export backtest bit-for-bit.
     pub live_telegram_ingress: bool,
+    /// Explicitly approximate replay: raw rows are grouped into blocks of N
+    /// and represented by causal BID/ASK extrema.  `1` is the exact legacy
+    /// path.  This is a search/screening control, never a strategy axis.
+    pub quick_tick_stride: usize,
     /// Ustawienia PRZEBIEGU JEDNOFORMATOWEGO. Gdy `formaty` nie jest puste,
     /// to pole opisuje wyłącznie RACHUNEK (pola z `wielosilnik::POLA_RACHUNKU`)
     /// i nie steruje handlem.
     pub settings: Settings,
+    /// FORMATY HANDLUJĄCE. Puste = dokładnie ścieżka sprzed 03.08.2026:
+    /// jeden silnik, slot 0, zerowe pułapy, zerowe obce obciążenie i **bez
+    /// widoku brokera**. Na tym stoi bramka parytetu.
     pub formaty: Vec<FormatCfg>,
     /// Pułapy obowiązujące PONAD presetami (`limit skuteczny = min(preset, pułap)`).
     /// Same zera = rządzą wyłącznie presety.
@@ -64,14 +81,59 @@ pub struct RunConfig {
     pub source_name: String,
     /// zapisuj krzywą equity co N ms (0 = co zamknięcie transakcji)
     pub curve_interval_ms: i64,
+    /// ROZGRZEWKA HISTORII RYNKU: ile godzin ceny SPRZED `from` wsypać do
+    /// silnika, zanim zacznie handlować. **0 = zimny start** i to jest
+    /// zachowanie sprzed 03.08.2026, na którym stoi bramka parytetu.
+    ///
+    /// # Po co to jest
+    ///
+    /// `Engine::regime_ok` przy niepełnej historii PRZEPUSZCZA WSZYSTKO, a
+    /// `price_hist` rośnie o jeden punkt na godzinę. Przy `regime_ma_hours =
+    /// 72` znaczy to, że silnik startujący na zimno przez pierwsze 72 godziny
+    /// handlowe nie filtruje reżimu w ogóle.
+    ///
+    /// W backteście liczonym od `--from` jest to WIERNY model bota włączonego
+    /// tego dnia — i dopóki bot produkcyjny naprawdę tak startował, była to
+    /// właściwa domyślna. Od chwili, gdy `live.rs` dostał rozgrzewkę
+    /// (`rozgrzej_historie`), wierny model wymaga jej także tutaj — inaczej
+    /// LOTTO-SURVIVAL mierzy bota, którego już nie wydajemy, i systematycznie
+    /// ZANIŻA przeżywalność.
+    ///
+    /// Wycena szkody z `ZADANIA 31072026.txt` (ten sam preset, te same dni):
+    /// 22.07 okno ciepłe **0,00 $ / 0 transakcji**, zimny start **−135,48 $ /
+    /// 13 transakcji**; 23.07 odpowiednio **0,00** i **−48,64 / 14**. Dwa dni,
+    /// które preset miał przesiedzieć, kosztowały **−184 $**.
+    ///
+    /// Historia budowana jest **z tych samych ticków**, którymi przebieg
+    /// potem gra, i tą samą regułą co `on_tick` (punkt, gdy minęła godzina;
+    /// wartość = `mid`). Dzięki temu nie jest przybliżeniem, tylko dokładnie
+    /// tym, co silnik miałby, gdyby ruszył wcześniej.
     pub rozgrzewka_h: usize,
     /// DRABINKA ŁAŃCUCHÓW PO SALDZIE. **Pusta = ścieżka dotychczasowa,
     /// dosłownie: żaden nowy kod się nie wykonuje.** Na tym stoi bramka
     /// parytetu. Niepusta lista wyklucza `formaty` i `pulapy` — szczeble
     /// noszą własne nogi i własne pułapy. Patrz [`SzczebelCfg`].
     pub drabinka: Vec<SzczebelCfg>,
+    /// Histereza schodzenia W DÓŁ, w procentach progu: schodzimy dopiero,
+    /// gdy saldo < prog · (1 − h/100). `0` = bez histerezy (domyślnie
+    /// w backteście; na żywo wartość ustala użytkownik).
     pub drabinka_histereza_pct: f64,
+    /// Historyczny kredyt odejmowany od progów Drabinki (model legacy).
+    /// `credit_balance_separate` ON ignoruje tę kwotę: raw MT5 Balance
+    /// już wyklucza Credit. Próg nadal nie zależy od pływającego PnL/Equity.
+    ///
+    /// `0.0` = brak bonusu (domyślnie) — wtedy próg widzi surowe saldo i kod
+    /// jest co do centa tym sprzed 04.08.2026.
     pub drabinka_kredyt: f64,
+    /// PŁASKA DOBA BEZ RESETU SALDA — „dzień po dniu, ale zyski i straty
+    /// przechodzą dalej".
+    ///
+    /// Robi DOKŁADNIE pierwszą połowę tego, co `daily_reset`: na granicy doby
+    /// domyka wszystko (`CloseReason::EodFlat`) i wymienia silnik, ale
+    /// **saldo zostaje**. Odpowiednik na żywo to `eod_flat_hour` — czyli nie
+    /// nowy mechanizm, tylko przełącznik, który silnik już ma.
+    ///
+    /// `false` = ścieżka dotychczasowa co do centa.
     pub flat_na_dobie: bool,
     /// Dokąd zrzucić dziennik zdarzeń (`.jsonl`). `None` = nie zapisuj.
     ///
@@ -79,6 +141,20 @@ pub struct RunConfig {
     /// sama ścieżka go nie włącza. Dzięki temu sweep po stu presetach nie
     /// zaczyna nagle produkować stu plików po kilkaset megabajtów.
     pub journal_path: Option<std::path::PathBuf>,
+    /// TRYB AUTO-EA W BACKTEŚCIE — flaga [`Engine::tryb_auto_ea`] na każdym
+    /// silniku zespołu.
+    ///
+    /// # Po co osobne pole, skoro flagi dziś nikt nie czyta
+    ///
+    /// Bo **punkt (c) potrójnego kontraktu zera** („tryb AUTO-EA bez osi ⇒
+    /// co do centa jak AUTO") jest inaczej NIESPRAWDZALNY na korpusie.
+    /// Do 25.08.2026 flagę ustawiała wyłącznie `live.rs`, więc jedyny dowód,
+    /// jaki dało się przedstawić, był dowodem na atrapie brokera — a to jest
+    /// dokładnie ta klasa dowodu, o której wiemy, że nie wystarcza
+    /// (`sim_clock_strict` nie widział zamrożonego `rev_exit`).
+    ///
+    /// `false` = ścieżka dotychczasowa, dosłownie: ani jedno przypisanie się
+    /// nie wykonuje. Bramka parytetu liczy się przy tej wartości.
     pub auto_ea: bool,
     /// KONFIGURACJA EA tego przebiegu (surowy JSON z pola `ea` presetu).
     ///
@@ -98,12 +174,15 @@ impl Default for RunConfig {
             sim_new_pending_sl_next_tick: false,
             sim_native_swap_cash_digits: None,
             live_telegram_ingress: false,
+            quick_tick_stride: 1,
             settings: Settings::default(),
             formaty: Vec::new(),
             pulapy: PulapyGlobalne::default(),
             daily_reset: false,
             source_name: "ATFX VIP SIGNALS".into(),
             curve_interval_ms: 60_000,
+            // ZIMNY START — zachowanie sprzed 03.08.2026. Bramka parytetu
+            // liczy się przy tej wartości i tak ma zostać.
             rozgrzewka_h: 0,
             journal_path: None,
             drabinka: Vec::new(),
@@ -120,6 +199,14 @@ impl Default for RunConfig {
     }
 }
 
+/// JEDEN SZCZEBEL DRABINKI ŁAŃCUCHÓW (`RunConfig::drabinka`).
+///
+/// Drabinka FFS-1C (zamówienie użytkownika 04.08.2026): konto zaczyna na
+/// najniższym szczeblu i wspina się po progach SALDA — `0 → ZENONLY5,
+/// 500 → ZENONLY3, 1000 → SENTINEL-0, 1500 → SENTINEL-0A`. Progi liczą się
+/// po **BALANCE, nie equity**: pływający wynik otwartych pozycji nie ma prawa
+/// przełączać łańcuchów, bo cofnąłby się razem z ceną i drabinka trzepotałaby
+/// przy każdym oddechu rynku.
 #[derive(Debug, Clone)]
 pub struct SzczebelCfg {
     /// próg BALANCE, od którego ten szczebel obowiązuje (pierwszy zwykle 0)
@@ -231,6 +318,7 @@ pub struct BasketDump {
     pub secured: bool,
     #[serde(default)]
     pub peak_pl_usd: f64,
+    /// strefa z sygnału PRZED offsetami — do pomiaru wyjścia ze strefy
     #[serde(default)]
     pub entry_lo: f64,
     #[serde(default)]
@@ -332,6 +420,10 @@ fn zrzuc_koszyki(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResult {
+    /// Present only for deliberately approximate screening runs.  Absence is
+    /// the backwards-compatible exact result contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approximation: Option<ApproximationInfo>,
     /// Non-rankable run: a canonical-cost receipt/configuration was incomplete.
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub cost_reconciliation_required: Option<String>,
@@ -419,6 +511,20 @@ pub struct RunResult {
     pub przelaczenia: Vec<Przelaczenie>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApproximationInfo {
+    pub schema: String,
+    pub method: String,
+    pub requested_stride: usize,
+    pub raw_rows: u64,
+    pub observed_rows: u64,
+    pub observed_pct: f64,
+    pub message_and_day_boundaries_forced: bool,
+    pub extrema_preserved: bool,
+    pub coronation_eligible: bool,
+    pub warning: String,
+}
+
 impl RunResult {
     /// Shared rejection gate for every ranking/reporting adapter. A result
     /// with incomplete execution/cost/state proof is diagnostic data, never a
@@ -431,6 +537,14 @@ impl RunResult {
             ("SIM EXECUTION", self.sim_execution_reconciliation_required.as_deref()),
             ("CONTINUATION", self.continuation_reconciliation_required.as_deref()),
         ].into_iter().find_map(|(kind, reason)| reason.map(|reason| (kind, reason)))
+    }
+
+
+    /// A quick result can be ranked only inside its screening stage.  Any
+    /// release/coronation adapter should require this predicate in addition
+    /// to the ordinary reconciliation gate.
+    pub fn coronation_eligible(&self) -> bool {
+        !self.cancelled && self.approximation.is_none() && self.reconciliation_hold().is_none()
     }
 }
 
@@ -462,6 +576,42 @@ pub type ProgressFn<'a> = &'a (dyn Fn(u64) -> bool + Sync + Send);
 /// silnika, a jednocześnie rzadko dość, żeby wywołanie przez wskaźnik nie
 /// zjadło zysku z mapowania pliku w pamięć.
 const PROGRESS_EVERY: usize = 1 << 18;
+
+enum ReplayTickIndices {
+    Exact(std::ops::Range<usize>),
+    Quick { indices: std::sync::Arc<Vec<usize>>, pos: usize },
+}
+
+impl Iterator for ReplayTickIndices {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Exact(range) => range.next(),
+            Self::Quick { indices, pos } => {
+                let value = indices.get(*pos).copied();
+                *pos += usize::from(value.is_some());
+                value
+            }
+        }
+    }
+}
+
+fn approximation_info(stride: usize, raw_rows: usize, observed_rows: usize) -> Option<ApproximationInfo> {
+    (stride > 1).then(|| ApproximationInfo {
+        schema: "conduit.quick-backtest.v1".into(),
+        method: "causal-block-extrema: first/last + min/max BID/ASK; split at message/day boundaries".into(),
+        requested_stride: stride,
+        raw_rows: raw_rows as u64,
+        observed_rows: observed_rows as u64,
+        observed_pct: if raw_rows == 0 { 0.0 } else { observed_rows as f64 / raw_rows as f64 * 100.0 },
+        message_and_day_boundaries_forced: true,
+        extrema_preserved: true,
+        coronation_eligible: false,
+        warning: "APPROXIMATE SCREENING ONLY — rerun finalists with quick_tick_stride=1 before any crown/release decision".into(),
+    })
+}
 
 /// Uruchamia pełny przebieg.
 pub fn run(ticks: &TickData, messages: &[ReplayMessage], cfg: &RunConfig) -> RunResult {
@@ -504,6 +654,7 @@ pub fn run_with_progress(
     let i1 = ticks.index_at(cfg.to).min(ticks.len());
     if i1 <= i0 {
         return RunResult {
+            approximation: approximation_info(cfg.quick_tick_stride, 0, 0),
             cost_reconciliation_required: None,
             sr_warmup_reconciliation_required: None,
             sim_execution_reconciliation_required: None,
@@ -583,6 +734,10 @@ pub fn run_with_progress(
     // więc go NIE budujemy: i dla parytetu, i dlatego, że filtr niefiltrujący
     // kosztowałby dwie pętle po pozycjach na każdym z 54 mln ticków.
     let pojedynczy = zespol.lista.len() == 1;
+    // CZY W OGÓLE ROUTOWAĆ. To jest INNE pytanie niż „ilu jest silników":
+    // jeden format wybrany z wielokanałowego zbioru musi dostać wyłącznie
+    // swoje wiadomości (i policzyć resztę jako pominiętą), a przebieg
+    // klasyczny (`--preset`) bierze cały strumień jak przed 03.08.2026.
     let routuj = !cfg.formaty.is_empty() || drabinka_on;
     // rozliczenie zysku per szczebel: znacznik historii brokera przy ostatnim
     // przełączeniu + statystyki każdego szczebla
@@ -654,8 +809,8 @@ pub fn run_with_progress(
     //
     // W trybie dziennym silniki są WYMIENIANE co dobę, więc `stats.signals`
     // na końcu opisuje wyłącznie ostatni dzień — a ten bywa pusty. Bez tych
-    // sum rozbicie na formaty mogłoby opisywać tylko końcowy fragment przebiegu
-    // i wyglądać jak usterka routingu.
+    // sum rozbicie na formaty pokazywałoby „2 koszyki" przy dwustu
+    // transakcjach i wyglądałoby na usterkę routingu.
     let mut narosle: Vec<(u64, u64, u32)> = vec![(0, 0, 0); zespol.lista.len()];
     // archiwum koszyków zbierane przez wszystkie odcinki przebiegu
     let mut arch: Vec<BasketDump> = Vec::new();
@@ -700,7 +855,36 @@ pub fn run_with_progress(
     msgs.sort_by_key(|m| m.ts);
     let mut mi = 0usize;
 
-    let source = SourceKey::new(-1_000_000_000_301, None);
+    // QUICK BACKTEST: force every effective message-arrival row and every
+    // first row of a broker day.  The extrema selector splits at those rows,
+    // which is the key causal guarantee: a freshly created order cannot use a
+    // low/high from the earlier part of its raw N-row block.
+    let (tick_indices, quick_selected_total) = if cfg.quick_tick_stride > 1 {
+        let mut forced = Vec::with_capacity(msgs.len() + 128);
+        for m in &msgs {
+            let index = ticks.index_at(m.ts.saturating_add(lat));
+            if index >= i0 && index < i1 { forced.push(index); }
+        }
+        let first_day = day_of(ticks.ts(i0), tz);
+        let last_day = day_of(ticks.ts(i1 - 1), tz);
+        for day in (first_day + 1)..=last_day {
+            let boundary = day.saturating_mul(86_400_000).saturating_sub(tz);
+            let index = ticks.index_at(boundary);
+            if index >= i0 && index < i1 { forced.push(index); }
+        }
+        forced.sort_unstable();
+        forced.dedup();
+        let indices = ticks.quick_extrema_indices(i0, i1, cfg.quick_tick_stride, &forced);
+        let count = indices.len();
+        (ReplayTickIndices::Quick { indices, pos: 0 }, count)
+    } else {
+        (ReplayTickIndices::Exact(i0..i1), i1 - i0)
+    };
+
+    let source = SourceKey::new(-100_1874_553_201, None);
+    // The ordinary export backtest deliberately bypasses this.  A
+    // live-backtest enables it and therefore receives Telegram redeliveries
+    // through the same bounded, byte-exact gate as `app::live` on the VPS.
     let mut live_telegram_ingress = ContentMemory::new();
 
     let mut equity_curve: Vec<(Ts, f64)> = Vec::with_capacity(4096);
@@ -727,14 +911,16 @@ pub fn run_with_progress(
     // (Entry|MarketOpen), liczone w pętli PRZED routingiem i wszystkimi
     // bramkami. Licznik jest własnością PRZEBIEGU (zmienna pętli), więc
     // wymiana dobowa ani przełączenie szczebla drabinki go nie zerują —
-    // mianownik lejka potrzebny do wykrywania wejść, które opuszczają silnik
-    // bez koszyka i bez jawnego powodu odrzucenia.
+    // mianownik lejka, którego dotąd nie było: 308 z 890 sygnałów OMEGA-X2
+    // wychodziło z silnika bez koszyka i bez jreject, niepoliczone nigdzie.
     let mut sygnaly_wejsciowe: u64 = 0;
-    // Archiwum compoundingu: silnik może wyciąć martwe, stare koszyki zanim
-    // przebieg bez resetu dobowego wykona końcowy zrzut. Drenaż dobowy do
-    // mapy po id zachowuje każdy koszyk w stanie z ostatniego dnia jego życia;
-    // wpis jest odświeżany, dopóki koszyk pozostaje aktywny w silniku.
+    // ARCHIWUM COMPOUNDINGU (audyt poz. 21): silnik wycina martwe koszyki
+    // (>500 szt., starsze niż 7 dni) ZANIM przebieg bez resetu dobowego
+    // zrobi jedyny zrzut na końcu — O91 widział 105 z 807 koszyków. Drenaż
+    // dobowy do mapy po id trzyma każdy koszyk w stanie z ostatniego dnia
+    // jego życia; wpis odświeża się, dopóki koszyk żyje w silniku.
     let mut arch_comp: BTreeMap<u32, BasketDump> = BTreeMap::new();
+    // ostatni indeks zgłoszony sygnalizatorowi — raportujemy PRZYROSTY
     let mut last_reported = i0;
     let mut cancelled = false;
     // dokąd realnie doszliśmy; bez przerwania równa się `i1`, więc wynik
@@ -752,7 +938,9 @@ pub fn run_with_progress(
     // domyślnie wyłączona, więc stare wyniki pozostają odtwarzalne 1:1.
     let causal_tick_before_messages = cfg.settings.live_tick_order_strict;
 
-    for i in i0..i1 {
+    let mut quick_observed = 0usize;
+    for i in tick_indices {
+        quick_observed += 1;
         // ---------- postęp i przerwanie ----------
         if progress.is_some() && i - last_reported >= PROGRESS_EVERY {
             let delta = (i - last_reported) as u64;
@@ -770,6 +958,31 @@ pub fn run_with_progress(
         // ---------- granica doby ----------
         let day = day_of(q.ts, tz);
         if day != cur_day {
+            // NOC KOSZTUJE (S-3). Zanim policzymy wynik doby i cokolwiek
+            // zamkniemy, broker musi zobaczyć PIERWSZY kurs nowej doby:
+            //  * nalicza punkty swapowe za przekroczoną północ,
+            //  * odświeża cenę, więc zamknięcie idzie po kursie NOWEGO dnia,
+            //    a nie po ostatnim kursie poprzedniego.
+            // Bez tego tryb „dzień po dniu" nie płacił ani swapu, ani luki
+            // nocnej — a to unieważnia KAŻDY pomiar strategii trzymającej
+            // przez północ, w tym runnery po RISK FREE.
+            //
+            // Legacy repeats broker execution below. Under B15 this same
+            // source-row id is executed once, including across the day loop;
+            // its new SL must not become eligible until another physical row.
+            //
+            // D4 (`runner_ksiegowanie_v2`): pełny `on_quote` robił tu jednak
+            // DWIE rzeczy ponad to, o co chodziło — egzekwował PRZED
+            // komunikatami nocnymi (odwrotnie niż na zwykłym ticku) i przy
+            // `daily_reset` liczył ten sam tick trzy razy w licznikach
+            // poziomu marginesu. `mark` daje sam swap i cenę, czyli dokładnie
+            // to, czego wymaga „noc kosztuje".
+            //
+            // D5: zamknięcia z TEGO bloku (nocne SL/TP z luki oraz `EodFlat`
+            // niżej) nie trafiały do `DayStat::trades` ŻADNEGO dnia: pierwsze
+            // padały przed `daily.push`, drugie po nim, a licznik zaraz potem
+            // wracał do zera. Zapamiętujemy więc długość historii PRZED całym
+            // blokiem i doliczamy przyrost do dnia ZAMYKANEGO.
             let hist_granica = broker.history.len();
             let zamykamy_dobe = cur_day != i64::MIN;
             if cur_day != i64::MIN {
@@ -841,6 +1054,19 @@ pub fn run_with_progress(
                     // bez tego jeden wyzerowany dzień blokowałby resztę przebiegu
                     broker.blown = false;
                 }
+                // Resetujemy KONTO, nie WIEDZĘ O RYNKU. Historia ceny jest
+                // własnością rynku, a nie salda: bot na żywo nie zapomina
+                // o północy, jak wyglądały ostatnie 72 h. Bez przeniesienia
+                // tych buforów filtr reżimu (okno godzinowe) nigdy nie zbierał
+                // dość próbek i w trybie „dzień po dniu" był MARTWY — a to
+                // właśnie ten tryb jest głównym kryterium wyboru presetu.
+                // DZIENNIK PRZED WYMIANĄ SILNIKA. Bufor zdarzeń jest polem
+                // silnika, więc `engine = Engine::new(...)` wyrzucał razem
+                // z nim wszystko, czego jeszcze nie zapisano na dysk — a zapis
+                // następuje dopiero po uzbieraniu 4096 zdarzeń, czego jeden
+                // dzień handlowy nie osiąga. Efekt: `--journal` w trybie
+                // „dzień po dniu" dawał plik o zerowej długości, czyli raport
+                // udający, że bot nie zrobił nic.
                 if let Some(d) = dump.as_mut() {
                     for s in zespol.lista.iter_mut() {
                         let mut evs = s.engine.drain_journal();
@@ -934,6 +1160,11 @@ pub fn run_with_progress(
                     // numeruje koszyki od 1, więc bez tego po pierwszej
                     // północy dwa formaty produkowałyby ten sam numer `B1`.
                     let (slot, pulapy) = (engine.slot(), engine.pulapy.clone());
+                    // ...i TRYB. `tryb_auto_ea` jest własnością PRZEBIEGU,
+                    // nie doby: wymiana silnika o północy nie ma prawa
+                    // przełączyć bota z AUTO-EA na AUTO w połowie pomiaru.
+                    // (Sam `EaRdzen` celowo NIE przechodzi — wymiana silnika
+                    // jest modelem restartu, a N19 każe odtworzyć stan.)
                     let auto_ea = engine.tryb_auto_ea;
                     *engine = Engine::new(ust, cfg.start_balance);
                     engine.przypisz_slot(slot);
@@ -990,8 +1221,33 @@ pub fn run_with_progress(
             day_dd = 0.0;
             day_trades = 0;
             day_signals = 0;
+            // LICZNIK ODNIESIENIA MUSI WRÓCIĆ RAZEM Z SILNIKIEM.
+            //
+            // W trybie dziennym silnik jest WYMIENIANY (`Engine::new` wyżej),
+            // więc `engine.stats.signals` startuje od zera — a `signals_taken_prev`
+            // zostawał z narosłą wartością z poprzednich dni. Warunek
+            // `signals > signals_taken_prev` nie był już nigdy prawdziwy
+            // i `day_signals` zatrzymywał się po pierwszym dniu.
+            //
+            // Objaw zmierzony 01.08.2026: pełne okno pokazywało 9 dni z sygnałami
+            // przy 50 dniach Z TRANSAKCJAMI. Handel bez sygnału jest niemożliwy,
+            // więc to licznik kłamał, nie silnik — ale każda analiza „ile sygnałów
+            // przypada na dzień bez transakcji" była przez to bezwartościowa.
             signals_taken_prev = przyjete_sygnaly(&zespol);
 
+            // ---------- DRABINKA + RESET DOBOWY ----------
+            // Semantyka POMIARU „dzień z drabinką", zdefiniowana jawnie:
+            // reset dobowy wraca do kwoty startowej ORAZ do szczebla tej
+            // kwoty. Drabinka może wspiąć się WEWNĄTRZ dnia (dzień +250 od
+            // 300 $ przekracza próg 500 i przełącza łańcuch), ale o północy
+            // wszystko wraca do bazy. To NIE jest pomiar „drabinki
+            // wielodniowej" — od niego jest compounding.
+            //
+            // Warunek `cfg.daily_reset && !daily.is_empty()` MUSI być lustrem
+            // warunku resetu wyżej: w compoundingu saldo przechodzi przez
+            // północ, więc i szczebel przechodzi — wymuszenie powrotu do bazy
+            // każdej doby zamieniłoby compounding z drabinką w tryb dzienny
+            // z opóźnieniem i nikt by tego nie zauważył w tabeli.
             if drabinka_on && (cfg.daily_reset || cfg.flat_na_dobie) && !daily.is_empty() {
                 // Przy `flat_na_dobie` saldo ROŚNIE, więc szczebel liczy się
                 // z bieżącego salda; przy `daily_reset` saldo wraca do
@@ -1048,6 +1304,18 @@ pub fn run_with_progress(
             }
         }
 
+        // D5b: ZAMKNIĘCIA WYWOŁANE KOMUNIKATEM TEŻ SIĘ NIE LICZYŁY.
+        //
+        // Znalezione przy mierzeniu wpływu D5 (OMEGA-X2, 18.08): suma
+        // `DayStat::trades` po wszystkich dniach dawała 206 przy 282
+        // transakcjach przebiegu — a granica doby tłumaczyła tylko 23 z tych
+        // 76. Reszta to zamknięcia, które wykonał sam KOMUNIKAT: „TP1 HIT",
+        // „SL HIT", „CLOSE", bank przy RISK FREE. `hist_przed` brany jest
+        // niżej, PO pętli wiadomości, więc każde z nich przepadało — mimo że
+        // to najczęstsza droga wyjścia z pozycji w tym bocie.
+        //
+        // Ta sama wada co D5 i ten sam skutek (zaniżony licznik transakcji
+        // dnia w trybie dziennym), więc siedzi pod tą samą osią.
         let hist_wiad = broker.history.len();
 
         // W trybie przyczynowym rynek wykonuje się PRZED wiadomościami.
@@ -1125,6 +1393,16 @@ pub fn run_with_progress(
             {
                 sygnaly_wejsciowe += 1;
             }
+            // broker musi znać cenę PRZED obsługą wiadomości
+            //
+            // D3: KTÓRĄ cenę. Wiadomość, która przyszła MIĘDZY tickami,
+            // dostawała kurs ticku NASTĘPNEGO — czyli w przerwie dobowej
+            // i weekendowej podejmowała decyzję, znając już cenę otwarcia
+            // PO LUCE. To jest wiedza z przyszłości i systematycznie zawyża
+            // backtest; na żywo `live.rs` robi odwrotnie (`im.ts` = ostatni
+            // znany znacznik). Przy osi podajemy kwotowanie z poprzedniego
+            // obrotu pętli — pierwsza wiadomość przebiegu nie ma poprzednika,
+            // więc dostaje bieżące, jak dotąd.
             broker.q = if cfg.settings.msg_kurs_sprzed_luki {
                 q_sprzed.unwrap_or(q)
             } else {
@@ -1140,6 +1418,9 @@ pub fn run_with_progress(
                 text: m.text.clone(),
             };
             if !routuj {
+                // Przebieg klasyczny (`--preset`) bierze CAŁY strumień,
+                // niezależnie od pola `kanal` — tak samo, jak brał go przed
+                // 03.08.2026. To jest warunek parytetu.
                 zespol.lista[0].engine.on_message_received(&mut broker, &im, m.ts + lat - cfg.settings.server_tz_offset_ms);
             } else {
                 // ROUTING PO KANALE. Nazwa formatu z sygnału musi trafić na
@@ -1147,6 +1428,14 @@ pub fn run_with_progress(
                 // nie cisza (`bez_trasy` ląduje w metrykach i na ekranie).
                 match zespol.indeks_formatu(&m.kanal) {
                     Some(i) => {
+                        // DRABINKA: format bez nogi na bieżącym szczeblu =
+                        // ZARZĄDZAJ-NIE-OTWIERAJ. Świeża wiadomość z wejściem
+                        // (nowy sygnał) jest blokowana i POLICZONA; edycje
+                        // i odpowiedzi przechodzą, bo odnoszą się do rozmowy
+                        // istniejącego koszyka (RISK FREE, korekty TP, OUT).
+                        // Ten sam kontrakt co adopcja po restarcie na żywo:
+                        // stare pozycje dożywają końca pod swoim silnikiem,
+                        // nowych ekspozycji format nie bierze.
                         if drabinka_on && !aktywne[i] {
                             let nowy_sygnal = m.edit_of.is_none()
                                 && m.reply_to.is_none()
@@ -1303,6 +1592,8 @@ pub fn run_with_progress(
             }
         }
 
+        // ---------- pomiar OTWARTEGO RYZYKA ----------
+        // Liczone rzadko (co ~1 s), bo to pętla po pozycjach.
         if q.ts - last_curve_ts >= 1000 {
             let mut risk = 0.0;
             let mut floating = 0.0;
@@ -1439,6 +1730,15 @@ pub fn run_with_progress(
         metrics.max_dd_abs = daily.iter().map(|d| d.max_dd).fold(0.0, f64::max);
         metrics.max_dd_pct = metrics.max_dd_abs / cfg.start_balance * 100.0;
 
+        // POLA POCHODNE MUSZĄ IŚĆ ZA `total_profit`, NIE PRZED NIM.
+        //
+        // `compute` liczy je z `end_equity - start_balance`, a przy resecie
+        // dobowym saldo wraca co dzień do kwoty startowej, więc ta różnica jest
+        // ≈ 0. Do 18.08.2026 zostawały tu wartości policzone z tego zera:
+        // `expectancy` wychodziło 0,0 przy 130 transakcjach i zysku 3 681,18 $
+        // (powinno 28,32), a `recovery_factor` był zaniżony tak samo.
+        // `trades`, `win_rate` i `profit_factor` były poprawne, bo nie zależą
+        // od `total_profit` — stąd defekt wyglądał na kaprys jednego pola.
         if metrics.trades > 0 {
             metrics.expectancy = metrics.total_profit / metrics.trades as f64;
         }
@@ -1513,6 +1813,39 @@ pub fn run_with_progress(
         metrics.eq_przy_stopoucie = broker.eq_przy_stopoucie;
     }
     metrics.rejected_pending_stops = broker.rejected_pending_stops;
+    if cfg.quick_tick_stride > 1 && quick_observed > 0 {
+        // These three legacy fields count quote observations, not elapsed
+        // time.  A quick tape has fewer observations by construction.  Scale
+        // them back to raw-row equivalents so the existing ranking penalty
+        // does not reward a larger N merely for looking less often.  Since
+        // extrema are deliberately overrepresented this estimate is usually
+        // conservative; exact N=1 remains required for finalists.
+        let raw = end_idx.saturating_sub(i0) as u128;
+        let observed = quick_observed as u128;
+        let scale = |value: u64| -> u64 {
+            ((value as u128).saturating_mul(raw).saturating_add(observed / 2) / observed)
+                .min(u64::MAX as u128) as u64
+        };
+        metrics.ml_pod_200 = scale(metrics.ml_pod_200);
+        metrics.ml_pod_150 = scale(metrics.ml_pod_150);
+        metrics.ml_pod_100 = scale(metrics.ml_pod_100);
+    }
+    // ---------- DIAGNOSTYKA WARSTWY EA-CORE (N15 / N10 / N18 / N19) ----------
+    //
+    // Ten sam wzorzec co diagnostyka zmienności niżej: **na stderr, nie do
+    // `metrics`**. To jest wynik POMIARU, po którym nic się nie rankuje —
+    // a `Metrics` jest schematem archiwum (dopisanie pola bez `serde(default)`
+    // unieważniło już raz 207 plików).
+    //
+    // Przy `ea_enabled = false` nie drukuje się ani jedna linijka i nie liczy
+    // ani jedna suma. Parytet obejmuje też brak hałasu w wyjściu — dokładnie
+    // dlatego pętla stoi pod warunkiem, a nie warunek w środku pętli.
+    //
+    // ⚠ Przy `--daily-reset` i przy drabince silniki są WYMIENIANE, a razem
+    // z nimi ginie `EaRdzen` (to jest zamierzone: wymiana silnika modeluje
+    // restart, a N19 każe odtworzyć stan). Liczniki opisują wtedy ostatni
+    // odcinek, nie cały przebieg — i linijka mówi to wprost, zamiast podawać
+    // sumę, która wygląda na całość.
     if zespol.lista.iter().any(|s| s.engine.cfg.ea_enabled) {
         let odcinkowe = cfg.daily_reset || cfg.flat_na_dobie || !cfg.drabinka.is_empty();
         for s in zespol.lista.iter() {
@@ -1584,6 +1917,11 @@ pub fn run_with_progress(
             );
         }
     }
+    // ---------- DIAGNOSTYKA RODZINY „ROZMIAR STEROWANY ZMIENNOŚCIĄ" ----------
+    //
+    // Na stderr, nie do `metrics`: to jest wynik POMIARU, a nie liczba,
+    // po której cokolwiek się rankuje. Przy `Off` nie drukuje się nic i nic
+    // się nie liczy — parytet obejmuje też brak hałasu w wyjściu.
     for s in zespol.lista.iter() {
         if s.engine.cfg.vol_size_mode == conduit_core::settings::VolSizeMode::Off {
             continue;
@@ -1765,6 +2103,11 @@ pub fn run_with_progress(
             .collect()
     };
 
+    // ---- STATYSTYKI PAKIETU E (warstwa pomiarowa, nic nie wraca do silnika) ----
+    //
+    // Rejestr odrzuconych wejść zbieramy ze WSZYSTKICH nóg: przy jednym
+    // formacie to dosłownie ten jeden silnik, więc ścieżka jednonoga jest
+    // dokładnie taka, jak była.
     let odrzucone_wejscia: Vec<conduit_core::engine::OdrzuconeWejscie> = zespol
         .lista
         .iter()
@@ -1784,6 +2127,11 @@ pub fn run_with_progress(
     });
 
     RunResult {
+        approximation: approximation_info(
+            cfg.quick_tick_stride,
+            end_idx.saturating_sub(i0),
+            quick_observed.min(quick_selected_total),
+        ),
         cost_reconciliation_required: cost_reconciliation_required
             .or_else(||broker.cost_reconciliation_required().map(str::to_owned)),
         sr_warmup_reconciliation_required: None,
@@ -1967,6 +2315,7 @@ fn rozgrzej_dynamiczne_sr_v2(engine: &mut Engine,
 
 fn rejected_sr_warmup(cfg: &RunConfig, reason: String) -> RunResult {
     RunResult {
+        approximation: approximation_info(cfg.quick_tick_stride, 0, 0),
         cost_reconciliation_required: None, sr_warmup_reconciliation_required: Some(reason),
         sim_execution_reconciliation_required: None,
         continuation_reconciliation_required: None,
@@ -2005,6 +2354,42 @@ pub fn historia_z_tickow(
     godzin: usize,
     s: &Settings,
 ) -> (Vec<(Ts, Px)>, Vec<(Ts, Px)>) {
+    // ⚠ OKNO KALENDARZOWE ≠ GODZINY HANDLOWE. To był no-op, nie teoria.
+    //
+    // `price_hist` dostaje jeden punkt na godzinę **Z TICKÓW**, a złoto nie ma
+    // ticków w weekend ani w przerwie dobowej. Cofnięcie się o dokładnie
+    // `godzin * 3_600_000` (czyli 72 h = 3 dni kalendarzowe) daje przy starcie
+    // w poniedziałek okno Piątek→Poniedziałek, w którym ticki są tylko z
+    // piątku — czyli **~24 punkty zamiast 72**.
+    //
+    // A `regime_ok` przy `price_hist.len() < n` **przepuszcza wszystko**:
+    //
+    // ```
+    // if self.price_hist.len() < n.max(2) { return true; }
+    // ```
+    //
+    // Skutek: rozgrzewka formalnie działała (bufor był wypełniany), ale filtr
+    // i tak milczał, więc wynik wychodził **co do centa taki sam jak przy
+    // zimnym starcie**. Dokładnie to zgłosił zespół Fable jako „`--rozgrzewka-h`
+    // jest no-opem" i mieli rację.
+    //
+    // Cofamy się więc o zapas: `godzin * 2 + 120 h`. Weekend zjada 48 h na
+    // każde 7 dni, przerwy dobowe po ~1 h — podwojenie z okładem pokrywa oba
+    // przy każdym dniu tygodnia. Nadmiarowe punkty NIE szkodzą: `regime_ok`
+    // bierze `price_hist[len - n..]`, czyli ostatnie `n`, a `on_tick` i tak
+    // przycina bufor do 30 dni.
+    //
+    // NIE „naprawiamy" tego przez poluzowanie warunku w `regime_ok` — ten
+    // warunek jest wspólny z backtestem liczonym od `--from` i jego zmiana
+    // ruszyłaby każdy dotychczasowy pomiar.
+    //
+    // ZERO GODZIN = ZIMNY START, TAKŻE TUTAJ. Wołający (`run_with_progress`)
+    // i tak nie wchodzi tu przy `rozgrzewka_h == 0`, ale funkcja jest
+    // publiczna i sama musi trzymać umowę: bez tej gałęzi zapas `+120 h`
+    // wczytywałby historię nawet przy jawnym „bez rozgrzewki" — i ktoś,
+    // kto woła ją wprost (test, przyszłe narzędzie), dostałby ciepły silnik
+    // tam, gdzie zamówił zimny. Złapane przez
+    // `rozgrzewka_nie_jest_noopem::zero_godzin_dalej_znaczy_zimny_start`.
     if godzin == 0 {
         return (Vec::new(), Vec::new());
     }
@@ -2046,6 +2431,12 @@ pub fn historia_z_tickow(
     (price, vol)
 }
 
+/// Wstrzykuje konfigurację EA z presetu do rdzenia silnika.
+///
+/// Cisza przy złym JSON-ie byłaby tą samą klasą błędu, która 24.08.2026
+/// puściła 20 zleceń z niezwiązanego presetu — więc krzyczymy na `stderr`
+/// i zostawiamy warstwę wyłączoną, zamiast po cichu grać czymś innym,
+/// niż napisano w pliku.
 fn wstrzyknij_ea(e: &mut Engine, cfg: &RunConfig) {
     let txt = match cfg.ea_konfig.as_deref() {
         Some(t) if !t.trim().is_empty() => t,
@@ -2212,6 +2603,19 @@ mod credit_balance_separate_drabinka_tests {
     }
 }
 
+/// Przełącza zespół na szczebel `nowy` — Z ADOPCJĄ koszyków.
+///
+/// Kontrakt (ten sam co restart na żywo, `Engine::adopt_baskets`):
+/// * koszyki zachowują ORYGINALNE numery, licznik numeracji podnosi się sam
+///   ponad najwyższy adoptowany — zero podwójnych numerów;
+/// * koszyki przechodzą pod ustawienia NOWEJ nogi formatu (to nowy preset
+///   nimi odtąd zarządza) — przechodzą WSZYSTKIE, także domknięte, żeby
+///   zrzut końcowy był kompletny, a numeracja monotoniczna;
+/// * format bez nogi na nowym szczeblu zatrzymuje silnik i koszyki
+///   (zarządzaj-nie-otwieraj — nowe sygnały blokuje routing), zero sierot;
+/// * historia rynku, liczniki odrzutów, historia reżimu i liczniki relotu
+///   przechodzą jak przy wymianie dobowej — to własność PRZEBIEGU, nie
+///   szczebla.
 #[allow(clippy::too_many_arguments)]
 fn przelacz_szczebel(
     zespol: &mut Silniki,
@@ -2379,6 +2783,21 @@ fn szczebel_z_presetu(
     })
 }
 
+/// Buduje szczeble drabinki z zapisu `PROG=SZCZEBEL,PROG=SZCZEBEL,…`.
+///
+/// SZCZEBEL wolno podać na trzy sposoby:
+/// * `NAZWA` — łańcuch z `formaty.rs::lancuchy_wbudowane()` (postać pierwotna,
+///   nietknięta: łańcuch niesie swoje nogi i swoje pułapy, presety nóg ładują
+///   się z `presety_dir` PO NAZWIE z łańcucha, brak pliku to błąd twardy);
+/// * `preset:NAZWA` — POJEDYNCZY preset `presety_dir/NAZWA.json`;
+/// * `plik:ŚCIEŻKA` — POJEDYNCZY preset spod podanej ścieżki.
+///
+/// Dwie ostatnie postacie istnieją, bo drabinka jest narzędziem pomiarowym:
+/// bez nich każdy nowy zestaw szczebli wymagał dopisania łańcucha do kodu
+/// i przebudowy binarki, a pomiar 18.08.2026 musiał w tym celu przepisywać
+/// pole `kanal` w korpusie na „ZEN” (jedyne łańcuchy bez pułapów globalnych).
+/// Kolejność sprawdzania jest istotna: nazwa łańcucha wygrywa, więc każda
+/// wcześniejsza specyfikacja znaczy DOKŁADNIE to samo co przedtem.
 pub fn zbuduj_drabinke(
     spec: &str,
     presety_dir: &std::path::Path,
@@ -2509,6 +2928,37 @@ mod tests {
             buf.extend_from_slice(&ask.to_le_bytes());
         }
         std::fs::write(sciezka, buf).unwrap();
+    }
+
+    #[test]
+    fn quick_n1_is_exact_path_and_n_gt_1_is_non_coronation() {
+        let path=std::env::temp_dir().join(format!("conduit_quick_runner_{}.bin",std::process::id()));
+        let t0=1_700_000_000_000i64;
+        let rows:Vec<_>=(0..24).map(|i|{
+            let bid=4000.0 + ((i*7)%11) as f32 - 5.0;
+            (t0+i*1000,bid,bid+0.2)
+        }).collect();
+        zapisz_ticki(&path,&rows);
+        let ticks=TickData::open(&path).unwrap();
+        let base=RunConfig{from:t0,to:t0+24_000,..Default::default()};
+        let mut explicit=base.clone();explicit.quick_tick_stride=1;
+        let a=run(&ticks,&[],&base);let b=run(&ticks,&[],&explicit);
+        assert_eq!(serde_json::to_value(&a.metrics).unwrap(),serde_json::to_value(&b.metrics).unwrap());
+        assert_eq!(a.equity_curve,b.equity_curve);
+        assert_eq!(a.balance_curve,b.balance_curve);
+        assert_eq!(serde_json::to_value(&a.daily).unwrap(),serde_json::to_value(&b.daily).unwrap());
+        assert_eq!(serde_json::to_value(&a.trades).unwrap(),serde_json::to_value(&b.trades).unwrap());
+        assert_eq!(a.approximation,None);
+        assert!(a.coronation_eligible());
+
+        let mut quick=base;quick.quick_tick_stride=8;
+        let q=run(&ticks,&[],&quick);
+        let info=q.approximation.as_ref().expect("N>1 must self-label");
+        assert_eq!(info.requested_stride,8);
+        assert_eq!(info.raw_rows,24);
+        assert!(info.observed_rows < info.raw_rows && info.extrema_preserved);
+        assert!(!info.coronation_eligible && !q.coronation_eligible());
+        drop(ticks);std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -2735,7 +3185,7 @@ SL 2990"
         let message = ReplayMessage {
             ts: t0 + 500,
             telegram_published_ts: Some(t0 + 400),
-            msg_id: 1001,
+            msg_id: 9191,
             reply_to: None,
             edit_of: None,
             text: "BUY LIMITS GOLD @ 3999/3998 AREA\nTP 4010\nSL 3990".into(),
@@ -2788,6 +3238,7 @@ SL 2990"
         // `TickData` wymaga pliku, więc tu sprawdzamy tylko kontrakt typu:
         // domyślnie `cancelled` jest fałszem i nie ma czego raportować.
         let r = RunResult {
+            approximation: None,
             cost_reconciliation_required: None,
             sr_warmup_reconciliation_required: None,
             sim_execution_reconciliation_required: None,

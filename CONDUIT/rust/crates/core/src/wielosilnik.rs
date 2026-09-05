@@ -268,7 +268,7 @@ pub const POLA_RACHUNKU: &[&str] = &[
     "konto_dzwignia",
 ];
 
-pub const LICZBA_POL_USTAWIEN: usize = 498;
+pub const LICZBA_POL_USTAWIEN: usize = 515;
 
 /// Składa ustawienia dla JEDNEGO formatu.
 ///

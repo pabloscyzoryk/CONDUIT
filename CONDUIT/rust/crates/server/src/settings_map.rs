@@ -28,6 +28,22 @@ fn u(v: &Value, k: &str) -> Option<u32> {
     Some(f(v, k)? as u32)
 }
 
+/// Klucze dokumentu UI, które NIE trafiają do `conduit_core::Settings`.
+///
+/// **To NIE znaczy „martwe".** Lista miesza trzy różne rzeczy i trzeba je
+/// rozróżniać, bo inaczej audyt ustawień wyciąga fałszywe wnioski:
+///
+///  1. **Wygląd i zachowanie panelu** — czyta je React (`display_currency`,
+///     `one_click`, `poll_ms`, `merge_*`, `ui_*`). Działają, tylko nie w silniku.
+///  2. **Czytane POZA rdzeniem** — `comment_mode` i `comment_custom` bierze
+///     `live.rs` (`znacznik_komentarza`) i wysyła do mostu MT5. Też działają.
+///  3. **Naprawdę martwe** — nikt ich nie czyta. Te NIE MAJĄ prawa być
+///     widoczne w `settingsSchema.ts`: przełącznik, który nic nie robi, jest
+///     gorszy niż jego brak, bo użytkownik myśli, że coś ustawił.
+///     Stan na 29.07: `allow_mt5_modify`, `spp_refresh_after_modify`,
+///     `sim_clock_strict`, `grid_fallback_best_edge`, `comment_include_topic`,
+///     `day_flat_broker_clock` — usunięte z panelu, zostają w dokumencie,
+///     żeby stare presety i `settings.json` wczytywały się bez ostrzeżeń.
 pub const UI_ONLY_KEYS: &[&str] = &[
     // --- 1. panel ---
     "one_click",
@@ -43,8 +59,20 @@ pub const UI_ONLY_KEYS: &[&str] = &[
     "price_log_interval_s",
     "merge_config",
     "merge_chronological",
+    // Wygląd panelu. Trzymamy go w `settings.json`, a nie tylko w magazynie
+    // przeglądarki, żeby wybór motywu przeżył czyszczenie danych karty
+    // i pojechał razem z folderem na inny VPS.
     "ui_theme",
     "ui_palette",
+    // --- 3. martwe: nikt ich nie czyta; USUNIĘTE Z PANELU 29.07 ---
+    // Zostają na liście wyłącznie po to, żeby stare presety i `settings.json`
+    // wczytywały się bez zgłaszania „nieobsługiwane ustawienie".
+    //
+    //  * `allow_mt5_modify` — wymagałoby wykrywania cudzej modyfikacji SL/TP
+    //    w moście (`conduit_mt5`); dopóki tego nie ma, przełącznik kłamał,
+    //  * `spp_refresh_after_modify` — miała ją czytać pętla SPP w rdzeniu,
+    //  * `comment_include_topic` — `znacznik_komentarza` w `live.rs` nigdy
+    //    nie sięga po nazwę tematu.
     "allow_mt5_modify",
     "spp_refresh_after_modify",
     "comment_include_topic",
@@ -72,6 +100,24 @@ pub fn core_from_ui(doc: &Value) -> Settings {
         return c;
     }
 
+    // Dokument, który NADAL niesie klucze w nazewnictwie SILNIKA, nie przeszedł
+    // przez [`preset_to_ui`] — bo ta funkcja je z dokumentu usuwa. Taki plik
+    // powstaje, gdy preset trafi do `settings.json` z pominięciem tłumaczenia,
+    // i jest cichy w najgorszy możliwy sposób: klucz JEST w pliku, ma poprawną
+    // wartość, panel go pokazuje — a silnik czyta pod inną nazwą, więc dostaje
+    // wartość DOMYŚLNĄ.
+    //
+    // Zaobserwowane 30.07.2026 na `PACKAGE/settings.json`: `tp_schedule` stało
+    // w pliku jako `OfficialCounts`, a silnik grał `Ladder`; `zone_offset_mode`
+    // stało jako `Directional`, a silnik grał `None`. Cztery takie pola razem
+    // to różnica 1936 $ → −133 $ na oknie czerwiec–lipiec.
+    //
+    // Tłumaczymy więc taki dokument w locie. To NIE tworzy drugiego źródła
+    // prawdy: po tłumaczeniu klucze rdzenia z dokumentu znikają, a dla pliku
+    // zapisanego normalnie przez panel warunek niżej jest fałszywy i nie dzieje
+    // się nic. Wartość z presetu ma tu pierwszeństwo przed kluczem panelu
+    // celowo — obok niej stoi zwykle nieodświeżona pozostałość po poprzedniej
+    // konfiguracji, a nie świadomy wybór użytkownika.
     if PRZETLUMACZONE.iter().any(|k| doc.get(*k).is_some()) {
         return core_from_ui(&preset_to_ui(doc));
     }
@@ -80,6 +126,24 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "lot_scale_step") {
         c.lot_scale_step = v;
     }
+    // TRYB I WIELKOŚĆ LOTA — mapowane TĘDY od 04.08.2026.
+    //
+    // Do tej pory te trzy pola świadomie tu NIE przechodziły („panel ma dla
+    // nich osobny sterownik `Command::SetLot`"). Kosztowało to dwie usterki
+    // naraz, obie na żywym rachunku:
+    //
+    // 1. **Preset tracił lot przy każdej edycji z panelu.** Droga łatki
+    //    (`rest.rs::patch_preset_settings`) kończy się na `core_from_ui`, więc
+    //    pole nieprzepisane wracało do wartości domyślnej — zapis JEDNEGO pola
+    //    presetu po cichu przestawiał mu lot na stały 0,01.
+    // 2. **Karta panelu rządziła lotem automatu.** Jedynym nośnikiem tych pól
+    //    był `ui::LotConfig`, wspólny dla całego rachunku — a lot jest
+    //    własnością PRESETU nogi (patrz `wielosilnik::POLA_RACHUNKU`).
+    //
+    // Teraz pola jadą normalną drogą dokument→silnik, jak cała reszta.
+    // `apply_lot` nadal istnieje i nadal nadpisuje TE trzy pola kartą panelu,
+    // ale wołamy go WYŁĄCZNIE na dokumencie rachunku (`live.rs`), gdzie
+    // opisuje konfigurację ręczną bez pliku presetu.
     if let Some(v) = b(doc, "lot_mode_percent") {
         c.lot_mode_percent = v;
     }
@@ -222,6 +286,10 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "market_entry_step") {
         c.market_entry_step = v;
     }
+    // Brak klucza = `GridAtOnce`, czyli zachowanie sprzed rozdzielenia tej
+    // decyzji od `auto_limit`. Preset sprzed tej zmiany dostaje więc dokładnie
+    // to, co mierzył backtest. Panel bywa pisany małą literą — rozumiemy obie
+    // konwencje, bo dokładnie na tym rozjeździe zginęło pięć pól 30.07.
     if let Some(v) = s(doc, "market_entry_mode") {
         c.market_entry_mode = match v.as_str() {
             "Single" | "single" => MarketEntryMode::Single,
@@ -414,6 +482,7 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "partial_min_lot") {
         c.partial_min_lot = v;
     }
+    // ---- RODZINA TYLER (10.08.2026) ----
     if let Some(v) = b(doc, "partial_pct_od_pierwotnego") {
         c.partial_pct_od_pierwotnego = v;
     }
@@ -451,6 +520,12 @@ pub fn core_from_ui(doc: &Value) -> Settings {
         c.spp_sl_pad = v;
     }
 
+    // ---------- reakcje na komunikaty ----------
+    // Wartość przyjmujemy w OBU konwencjach: panel pisze `"all_runners"` /
+    // `"scale_out"`, preset z pliku niesie nazwę wariantu rdzenia. Bez nazw
+    // rdzenia `"MoveSlToBeOnly"` nie pasowało do niczego i wpadało w gałąź
+    // `else`, czyli po cichu ustawiało `CloseAllKeepNearest` — zmierzone
+    // −976 $ na oknie czerwiec–lipiec (ULTRA-X3).
     if b(doc, "ignore_risk_free").unwrap_or(false) {
         c.risk_free_mode = RiskFreeMode::Ignore;
     } else {
@@ -483,6 +558,9 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     c.out_at_entry_mode = if b(doc, "ignore_out_at_entry").unwrap_or(false) {
         OutAtEntryMode::Ignore
     } else {
+        // obie konwencje: panel (`"losers"`) i preset z pliku
+        // (`"CloseLosersOnly"`); sama konwencja panelu dawała cichy powrót
+        // do `CloseAll` — zmierzone −370 $ na oknie czerwiec–lipiec
         match s(doc, "out_at_entry_mode").as_deref() {
             Some("losers") | Some("CloseLosersOnly") => OutAtEntryMode::CloseLosersOnly,
             Some("flat") | Some("CloseFlatOnly") => OutAtEntryMode::CloseFlatOnly,
@@ -523,6 +601,8 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = b(doc, "honor_close_all") {
         c.honor_close_all = v;
     }
+    // W33: zasięg „CLOSE ALL". Brak klucza zostawia domyślne `Global`,
+    // czyli zachowanie sprzed 24.08.2026 co do centa.
     if let Some(v) = s(doc, "close_all_scope") {
         c.close_all_scope = match v.as_str() {
             "Basket" => CloseAllScope::Basket,
@@ -536,6 +616,8 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "partials_pct") {
         c.partials_pct = v;
     }
+    // 25.08: poboczne zapisy poleceń („Set SL to BE", „Out. At BE", „RISK FREEE",
+    // „ALL TP'S HIT", „zone is no longer valid", „TP3 should be 4043").
     if let Some(v) = b(doc, "parser_luz_interpunkcyjny") {
         c.parser_luz_interpunkcyjny = v;
     }
@@ -601,6 +683,7 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = u(doc, "bank_all_at_stage") {
         c.bank_all_at_stage = v.min(u8::MAX as u32) as u8;
     }
+    // Pakiet E1: próg remisu w raportach — oś POMIARU, nie handlu.
     if let Some(v) = f(doc, "stat_be_prog_usd") {
         c.stat_be_prog_usd = v;
     }
@@ -625,6 +708,9 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = b(doc, "be_at_tp1") {
         c.be_at_tp1 = v;
     }
+    // Osie prowadzenia pozycji używane przez GOD-X4/GOD-X5. Backtest czyta
+    // je wprost z JSON, a żywy bot przechodzi przez ten most — pominięcie
+    // oznacza dwie strategie pod tą samą nazwą presetu.
     if let Some(v) = u(doc, "be_od_etapu") {
         c.be_od_etapu = v.min(u8::MAX as u32) as u8;
     }
@@ -643,11 +729,23 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "sl_wlasny_na_pozycje") {
         c.sl_wlasny_na_pozycje = v;
     }
+    // Nazwy trybu przyjmujemy w OBU konwencjach — panel pisze `"gap"`, preset
+    // z pliku niesie `"Gap"`. Rozpoznawanie samej konwencji panelu oznaczało,
+    // że wartość z presetu „nie pasuje do żadnej gałęzi" i po cichu wygrywa
+    // wartość domyślna rdzenia.
+    //
+    // `"off"` MUSI być osobną gałęzią, a nie brakiem dopasowania. `None` znaczy
+    // tu „klucza nie ma / nie rozumiem", więc wywołujący zostawia domyślną —
+    // a domyślną `trail_runner_mode` jest `Tiered`. Preset z jawnym
+    // `trail_runner_mode = "Off"` WŁĄCZAŁ więc rodzinę runnerową zamiast ją
+    // wyłączyć: zmierzone −923 $ na oknie czerwiec–lipiec (ULTRA-X3).
     let mode_of = |key: &str| -> Option<TrailMode> {
         match s(doc, key).as_deref() {
             Some("gap") | Some("Gap") => Some(TrailMode::Gap),
             Some("lock_pct") | Some("LockPct") => Some(TrailMode::LockPct),
             Some("tiered") | Some("Tiered") => Some(TrailMode::Tiered),
+            Some("atr") | Some("Atr") => Some(TrailMode::Atr),
+            Some("chandelier") | Some("Chandelier") => Some(TrailMode::Chandelier),
             Some("off") | Some("Off") => Some(TrailMode::Off),
             _ => None,
         }
@@ -795,6 +893,12 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = u(doc, "trail_sr_atr_period") {
         c.trail_sr_atr_period = v;
     }
+    // ---------- EA-CORE — szkielet warstwy EA (FALA 0, 24.08.2026) ----------
+    //
+    // Brak klucza zostawia domyślne, czyli WARSTWĘ WYŁĄCZONĄ — kontrakt zera
+    // idzie przez panel tak samo jak przez plik presetu. Enumy w OBU
+    // konwencjach (wartość rdzenia i małe litery), jak `trail_sr_*` wyżej:
+    // ręcznie pisany preset nie ma przegrywać po cichu z domyślną.
     if let Some(v) = b(doc, "ea_enabled") {
         c.ea_enabled = v;
     }
@@ -837,6 +941,29 @@ pub fn core_from_ui(doc: &Value) -> Settings {
         c.ea_dozor_sl = v;
     }
 
+    // ---------- RODZINA A: EKSPOZYCJA WOBEC STANU RACHUNKU ----------
+    //
+    // OSIEM PÓL, KTÓRE DZIAŁAŁY W BACKTEŚCIE I GINĘŁY NA ŻYWO (25.08.2026).
+    //
+    // Osie A1–A4 są wpięte w silnik (`Engine::ea_sufit_jednostek`,
+    // `place_grid`), a `bt.exe` wczytuje preset wprost do `Settings` przez
+    // serde — więc backtest je honoruje. Bot na żywo idzie DRUGĄ drogą:
+    // preset ląduje w `settings.json`, a silnik dostaje wynik `core_from_ui`,
+    // który startuje od `Settings::default()` i przypisuje WYŁĄCZNIE pola
+    // wymienione w tym pliku. Pola nietłumaczone wracają więc do zera —
+    // po cichu, bez ostrzeżenia, przy poprawnej wartości w pliku.
+    //
+    // To jest DOKŁADNIE ta klasa błędu, którą dokumentuje komentarz na górze
+    // tej funkcji (30.07.2026: `tp_schedule` i `zone_offset_mode` stały
+    // w pliku, a silnik grał domyślnymi — cztery pola razem dały różnicę
+    // 1936 $ → −133 $ na oknie czerwiec–lipiec). Bez tego wpisu preset EA
+    // zmierzony jako zyskowny handlowałby na żywo BEZ warstwy, która dała
+    // mu ten wynik — a różnicy nie zobaczyłby nikt.
+    //
+    // `unmapped_keys` tego nie łapie z konstrukcji: sprawdza klucze OBECNE
+    // W DOKUMENCIE, a dopóki żaden preset nie ma pól rodziny A, dokument ich
+    // nie niesie i alarm milczy. Wykrywalne jest to dopiero od strony
+    // `Settings` — patrz test `rodzina_a_przezywa_obieg_panelu` niżej.
     if let Some(v) = f(doc, "ea_lot_z_wolnego_marginesu") {
         c.ea_lot_z_wolnego_marginesu = v;
     }
@@ -1018,6 +1145,12 @@ pub fn core_from_ui(doc: &Value) -> Settings {
         c.tp_open_extra = v;
     }
 
+    // ---------- mądre wyjście ----------
+    // Nazwy pól są w panelu i w rdzeniu IDENTYCZNE, więc przepisujemy je
+    // wprost. Ten blok istnieje dlatego, że bez niego cała rodzina
+    // `smart_exit_*` przechodziła przez `settings.json` nietknięta, ale
+    // `core_from_ui` jej nie czytało — backtest honorował ustawienie,
+    // a bot na żywo grał bez niego pod tą samą nazwą presetu.
     if let Some(v) = b(doc, "smart_exit") {
         c.smart_exit = v;
     }
@@ -1187,6 +1320,9 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "runner_partial_pct") {
         c.runner_partial_pct = v;
     }
+    // W30: warstwa allowance przed strefą (kanon Tylera). Dwa pola, bo kwota
+    // mówi GDZIE, a jednostki ILE — brak któregokolwiek zostawia zero, czyli
+    // plan siatki bajt w bajt jak przed 24.08.2026.
     if let Some(v) = f(doc, "entry_allowance_usd") {
         c.entry_allowance_usd = v;
     }
@@ -1239,9 +1375,10 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     }
     // JAWNE ODRZUCANIE SZCZEBLA, KTÓREGO BROKER I TAK NIE PRZYJMIE.
     //
-    // Jeżeli najgłębszy szczebel siatki leży dokładnie na stopie, broker może
-    // go odrzucić, choć jego ryzyko nadal weszłoby do wyliczenia wolumenu
-    // pozostałych szczebli. Ta opcja pozwala usunąć taki szczebel jawnie.
+    // Pole dołożone przy pracy nad „szczeblem widmem": przy geometrii ULTRA-X3
+    // najgłębszy szczebel siatki leży DOKŁADNIE na stopie w 1828 z 1865
+    // sygnałów (98,0 %), więc broker odrzuca go z kodem 10016 — a jego ryzyko
+    // i tak wchodzi do wyliczenia wolumenu pozostałych szczebli.
     //
     // Bez tej linijki pole było MARTWE po drodze z panelu: silnik je czyta,
     // preset je niesie, ale `core_from_ui` gubiło je po cichu. To ta sama
@@ -1421,9 +1558,14 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = b(doc, "sim_margin_check_on_fill") {
         c.sim_margin_check_on_fill = v;
     }
+    // Też wierność symulatora: SL/TP zlecenia oczekującego mierzone od CENY
+    // AKTYWACJI (10016), czyli koniec „szczebli-widm". Brak klucza = `false`,
+    // czyli zachowanie sprzed 31.07.2026.
     if let Some(v) = b(doc, "sim_validate_pending_stops") {
         c.sim_validate_pending_stops = v;
     }
+    // Przeliczanie wolumenu leżących limitów po wzroście salda (anuluj
+    // i złóż od nowa). Brak klucza = `false`, czyli zachowanie sprzed 31.07.
     if let Some(v) = b(doc, "pending_relot_on_balance") {
         c.pending_relot_on_balance = v;
     }
@@ -1443,6 +1585,8 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "pending_relot_up_od_salda") {
         c.pending_relot_up_od_salda = v;
     }
+    // Cel wg PLANU (wagi RR + limit ryzyka koszyka) zamiast gołego lota.
+    // Brak klucza = `false`, czyli zachowanie sprzed 03.08.
     if let Some(v) = b(doc, "pending_relot_wg_planu") {
         c.pending_relot_wg_planu = v;
     }
@@ -1453,6 +1597,10 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = b(doc, "reenter_respect_cap") {
         c.reenter_respect_cap = v;
     }
+    // ---- NAPRAWY Z AUDYTU FABLE (Z-3, Z-5, Z-7…Z-10) ----
+    // Wszystkie domyślnie `false`; brak klucza = zachowanie sprzed 31.07.2026.
+    // Bez tego mapowania panel gubiłby je przy zapisie — dokładnie klasa błędu
+    // `drop_unplaceable_levels`. Test `zaden_klucz_presetu_nie_ginie_po_tlumaczeniu`.
     if let Some(v) = b(doc, "sl_edit_reaches_pendings") {
         c.sl_edit_reaches_pendings = v;
     }
@@ -1539,6 +1687,9 @@ pub fn core_from_ui(doc: &Value) -> Settings {
         };
     }
     if let Some(v) = s(doc, "regime_filter") {
+        // obie konwencje: panel (`"counter"`) i preset z pliku (`"CounterMa"`);
+        // bez nazw rdzenia filtr reżimu po cichu WYŁĄCZAŁ się przy wczytaniu
+        // presetu — zmierzone −490 $ na oknie czerwiec–lipiec
         c.regime_filter = match v.as_str() {
             "trend" | "TrendMa" => RegimeFilter::TrendMa,
             "counter" | "CounterMa" => RegimeFilter::CounterMa,
@@ -1680,6 +1831,13 @@ pub fn core_from_ui(doc: &Value) -> Settings {
         c.lot_percent_small_mult = v;
     }
 
+    // ---------- pułap ekspozycji / własny stop-out ----------
+    // Sześć pól dołożonych 04.08.2026 do `conduit_core::Settings`. Bez
+    // mapowania TU nie ginęły po cichu przy starcie, tylko przy PIERWSZEJ
+    // edycji dowolnego pola presetu z panelu — `core_from_ui` odbudowuje
+    // `Settings` od domyślnych, więc wszystko niewymienione wracało do
+    // wartości domyślnej. Test `zaden_klucz_presetu_nie_ginie_po_tlumaczeniu`
+    // pilnuje, żeby następne pole nie powtórzyło tej drogi.
     if let Some(v) = f(doc, "expo_cap_pct") {
         c.expo_cap_pct = v;
     }
@@ -1765,6 +1923,19 @@ pub fn core_from_ui(doc: &Value) -> Settings {
         };
     }
 
+    // ---------- most dla osi Fazy 6 (37 pól, AUDYT_SILNIKA.md TOP 1) ----------
+    //
+    // Te pola żyły w silniku i backteście, ale NIE MIAŁY drogi panel→silnik:
+    // `core_from_ui` odbudowuje `Settings` od domyślnych, więc KAŻDA edycja
+    // presetu z panelu (`rest.rs::patch_preset_settings`) trwale je zerowała —
+    // ta sama klasa błędu co `drop_unplaceable_levels`, tylko ×37 naraz
+    // (m.in. sesja_bramka z pomiaru SESJAFILL 9615 $, cały reżim v2, vol_size_*).
+    //
+    // Nazwy kluczy są wspólne z rdzeniem. Enumy przyjmują słownik serde ORAZ
+    // małe litery — panel nie ma dla nich kontrolek, więc wartość w dokumencie
+    // pochodzi z presetu, ale plik bywa pisany ręcznie. Nierozpoznana nazwa
+    // wariantu NIE MOŻE po cichu przestawić bramki handlowej — zostaje wartość,
+    // którą konfiguracja już ma (wzorzec `lot_base`).
 
     // --- bramka sesji: od której godziny liczona (sygnał / wypełnienie) ---
     if let Some(v) = s(doc, "sesja_bramka") {
@@ -1927,6 +2098,57 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     }
     if let Some(v) = f(doc, "trail_atr_mult") {
         c.trail_atr_mult = v;
+    }
+    if let Some(v) = b(doc, "trail_adaptive_enabled") {
+        c.trail_adaptive_enabled = v;
+    }
+    if let Some(v) = b(doc, "trail_adaptive_runners_only") {
+        c.trail_adaptive_runners_only = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_window_s") {
+        c.trail_adaptive_window_s = v;
+    }
+    if let Some(v) = u(doc, "trail_adaptive_min_samples") {
+        c.trail_adaptive_min_samples = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_trend_er") {
+        c.trail_adaptive_trend_er = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_reversal_er") {
+        c.trail_adaptive_reversal_er = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_trend_gap_mult") {
+        c.trail_adaptive_trend_gap_mult = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_chop_gap_mult") {
+        c.trail_adaptive_chop_gap_mult = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_reversal_gap_mult") {
+        c.trail_adaptive_reversal_gap_mult = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_fast_vol_s") {
+        c.trail_adaptive_fast_vol_s = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_slow_vol_s") {
+        c.trail_adaptive_slow_vol_s = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_vol_ratio") {
+        c.trail_adaptive_vol_ratio = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_vol_favorable_mult") {
+        c.trail_adaptive_vol_favorable_mult = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_vol_adverse_mult") {
+        c.trail_adaptive_vol_adverse_mult = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_min_peak") {
+        c.trail_adaptive_min_peak = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_min_gap") {
+        c.trail_adaptive_min_gap = v;
+    }
+    if let Some(v) = f(doc, "trail_adaptive_max_gap") {
+        c.trail_adaptive_max_gap = v;
     }
 
     // ---------- broker ----------
@@ -2107,11 +2329,15 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "trail_runner_start",
         "trail_runner_gap",
         "trail_runner_lock_pct",
+        // --- trailing S/R po strukturze 1M (OS_SR_SPEC.md, 24.08.2026) ---
         "trail_sr_enabled",
         "trail_sr_scope",
         "trail_sr_activation",
         "trail_sr_min_gain",
         "trail_sr_min_dist_price",
+        // --- EA-CORE: szkielet warstwy EA (FALA 0, 24.08.2026) ---
+        // Pominięcie klucza tutaj = panel ZERUJE pole przy zapisie presetu
+        // (incydent ×3 w historii) — dlatego wpis stoi obok mapowania.
         "ea_enabled",
         "ea_tick_s",
         "ea_state_src",
@@ -2123,6 +2349,10 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "ea_state_ratchet",
         "ea_state_journal",
         "ea_dozor_sl",
+        // --- RODZINA A: ekspozycja wobec stanu rachunku (FALA 1) ---
+        // Dopisane 25.08.2026 razem z mapowaniem. Do tej chwili osie A1–A4
+        // działały w backteście i ginęły na żywo — patrz komentarz przy nich
+        // w `core_from_ui`.
         "ea_lot_z_wolnego_marginesu",
         "ea_stop_dokladek_przy_stracie",
         "ea_stop_dokladek_powrot",
@@ -2167,6 +2397,7 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "tp_price_only_strict",
         "rf_level_sanity_max_usd",
         "reply_graph_transitive",
+        // --- sekcja M z 18.08: wyjście runnera, próg BE, głębokość siatki ---
         "runner_max_hold_bez_reguly",
         "risk_free_be_min_profit",
         "entry_deep_frac_to_sl",
@@ -2241,6 +2472,8 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         // --- dołożone przy odtwarzaniu funkcji bot.py ---
         "entry_weights",
         "risk_per_basket_pct",
+        // CAŁA rodzina lota jedzie normalną drogą od 04.08.2026 — patrz
+        // komentarz przy „wielkość pozycji" w `core_from_ui`.
         "lot_mode_percent",
         "lot_fixed",
         "lot_percent",
@@ -2262,6 +2495,11 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "pending_resize_on_vol",
         "pending_resize_sec",
         "virtual_sl_all",
+        // PENDING-RELOT — bez tych dwóch wpisów wczytanie HYPER-X1 z panelu
+        // po cichu WYŁĄCZAŁO dokładkę: pola istnieją w pliku presetu i są
+        // czytane przez `core_from_ui`, ale `preset_to_ui` ich nie przepuszczał,
+        // więc panel dostawał preset bez nich i zapisywał z powrotem `false`.
+        // Wyłapane przez `zaden_klucz_presetu_nie_ginie_po_tlumaczeniu` 03.08.2026.
         "pending_relot_on_balance",
         "pending_relot_topup",
         "pending_relot_up",
@@ -2292,12 +2530,14 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "honor_cancel",
         "honor_close_all",
         "honor_market_open",
+        // --- odzysk STORM (W30/W31/W33, 24.08.2026) ---
         "close_all_scope",
         "partials_wykonuj",
         "partials_pct",
         "parser_luz_interpunkcyjny",
         "recap_guard",
         "profit_update_telemetry_only",
+        // --- pełny obieg preset→panel→live (audyt 30.08.2026) ---
         "be_min_pozycji",
         "be_od_etapu",
         "cele_pomin_za_cena",
@@ -2331,12 +2571,18 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "dedup_edited_signals",
         "price_tol",
         "risk_free_smart_sl",
+        // --- Pakiet A: osie dedupu i edycji ---
+        // Pominięcie klucza na tej liście = panel zeruje pole (incydent ×3
+        // w historii) — dlatego wpis stoi tuż przy mapowaniu w `core_from_ui`.
         "dedup_pelny_status",
         "edycja_wykonuje_reszte_akcji",
         "dedup_klucz_z_wartoscia",
         "edycja_sieroty_nie_otwiera",
         "entry_idempotencja",
         "dedup_management_po_restarcie",
+        // --- Pakiet B: osie z audytu TYLER ---
+        // Pominięcie klucza na tej liście = panel zeruje pole (incydent ×3
+        // w historii) — dlatego wpis stoi tuż przy mapowaniu w `core_from_ui`.
         "rf_wymaga_wykonania",
         "market_entry_units",
         "market_hybrid_now_units",
@@ -2469,6 +2715,9 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "journal_buffer_cap",
         // --- czyta je `live.rs`, nie rdzeń ---
         "archive_retention_days",
+        // Katalog docelowy scalania alllogs — czyta go `alllogs.rs` przy
+        // zapisie; puste = katalog `logs` bota. Ścieżka SERWERA (panel bywa
+        // na innej maszynie), wybierana modalem `GET /api/fs/dirs`.
         "alllogs_dir",
         // Próg OSTRZEŻENIA mailem o obsunięciu. Świadomie poza `Settings`, bo
         // nie zmienia ani jednej decyzji handlowej — nie zatrzymuje bota,
@@ -2476,7 +2725,14 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         // (0/0), gdzie bez niego kategoria „drawdown" nie wysłałaby niczego,
         // cokolwiek działoby się z kontem w nocy.
         "alert_dd_pct",
+        // Bramka WIEKU sygnału. Tak samo jak `alert_dd_pct` — świadomie poza
+        // `Settings`, bo pilnuje jej `live.rs`, a nie rdzeń. Do 07.08.2026
+        // klucz był czytany, ale NIE ISTNIAŁ w panelu ani w `defaultSettings`:
+        // działał wyłącznie sztywny próg 5 minut z kodu, którego nie dało się
+        // ani zobaczyć, ani zmienić — a po każdej dłuższej przerwie w moście
+        // do MT5 cicho odrzucał całą zaległą kolejkę otwarć.
         "signal_max_age_min",
+        // --- RISK FREE jako reguła (RDZEŃ, 29.07) ---
         "riskfree_enabled",
         "riskfree_trigger_usd",
         "riskfree_trigger_r",
@@ -2521,6 +2777,7 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "entry_weights_rr_power",
         "entry_weights_rr_cap",
         "drop_unplaceable_levels",
+        // --- niezmiennik krawędzi strefy (25.08.2026) ---
         "zakaz_ponizej_krawedzi",
         // --- parametry liczone z sygnału ---
         "adaptive_params",
@@ -2617,6 +2874,23 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "reenter_stop_after_riskfree",
         "lot_max_z_salda",
         "trail_atr_mult",
+        "trail_adaptive_enabled",
+        "trail_adaptive_runners_only",
+        "trail_adaptive_window_s",
+        "trail_adaptive_min_samples",
+        "trail_adaptive_trend_er",
+        "trail_adaptive_reversal_er",
+        "trail_adaptive_trend_gap_mult",
+        "trail_adaptive_chop_gap_mult",
+        "trail_adaptive_reversal_gap_mult",
+        "trail_adaptive_fast_vol_s",
+        "trail_adaptive_slow_vol_s",
+        "trail_adaptive_vol_ratio",
+        "trail_adaptive_vol_favorable_mult",
+        "trail_adaptive_vol_adverse_mult",
+        "trail_adaptive_min_peak",
+        "trail_adaptive_min_gap",
+        "trail_adaptive_max_gap",
         // Klucz liczbowy obok `trail_after_tp2`: `core_from_ui` czyta go,
         // a `preset_to_ui` wypisuje od dnia powstania (`smart_sl_delay = 2`
         // w NEWALPHA-2/OMEGA-1 musi przeżyć obieg) — brak wpisu tutaj zapalał
@@ -2637,11 +2911,46 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
 //  PRESET (kształt SILNIKA) → DOKUMENT PANELU
 // ============================================================
 
+/// Tłumaczy preset zapisany w kluczach SILNIKA na klucze PANELU.
+///
+/// # Po co to w ogóle istnieje
+///
+/// `bt.exe` wczytuje preset wprost do [`Settings`] przez serde, więc backtest
+/// widzi dokładnie to, co w pliku. Bot na żywo idzie inną drogą: preset ląduje
+/// w `settings.json`, a silnik dostaje wynik [`core_from_ui`] — który czyta
+/// klucze PANELU. Dla większości pól obie nazwy są takie same i nic się nie
+/// dzieje, ale kilkanaście pól panel trzyma pod inną nazwą albo rozbite na
+/// kilka przełączników. Te pola po wczytaniu presetu **wracały do wartości
+/// domyślnych**, choć w pliku miały inną wartość.
+///
+/// Skutek był dokładnie taki, jakiego nikt nie chce zobaczyć na koncie:
+/// preset zmierzony jako `AllRunners` z `pending_lifetime = UntilTp1`
+/// handlował na żywo drabinką `Ladder`, bo `tp_schedule` i `pending_lifetime`
+/// nie mają w panelu pól o tej nazwie. Backtest i bot liczyły dwie różne
+/// konfiguracje pod jedną nazwą.
+///
+/// Funkcja NIE zmienia zachowania silnika — zmienia to, czy silnik w ogóle
+/// dostaje ustawienia z presetu.
+/// Nazwa trybu zapadki w konwencji PANELU, przyjmowana w obu konwencjach.
+///
+/// `preset_to_ui` dostaje dwa rodzaje dokumentów: preset z pliku (kształt
+/// SILNIKA — `"Tiered"`) oraz katalog presetów wbudowany w interfejs, który
+/// przychodzi w `ApplyPreset { values }` już w kształcie PANELU (`"tiered"`).
+/// Rozpoznawanie wyłącznie nazw rdzenia dawało przy tych drugich cichą
+/// podmianę: `"tiered"` nie pasowało do żadnej gałęzi, więc wpadało do
+/// przypadku „Off" i zapisywało `runner_trail = false` z nazwą `"gap"` —
+/// czyli **wyłączało zapadkę** w presecie, który ją miał włączoną, i robiło
+/// to bez jednego słowa w dzienniku.
+///
+/// `None` znaczy „tryb wyłączony albo nierozpoznany" — wywołujący decyduje,
+/// co z tym zrobić.
 fn nazwa_trybu_zapadki(tryb: &str) -> Option<&'static str> {
     match tryb {
         "Gap" | "gap" => Some("gap"),
         "LockPct" | "lock_pct" => Some("lock_pct"),
         "Tiered" | "tiered" => Some("tiered"),
+        "Atr" | "atr" => Some("atr"),
+        "Chandelier" | "chandelier" => Some("chandelier"),
         _ => None,
     }
 }
@@ -2928,6 +3237,9 @@ pub fn preset_to_ui(preset: &Value) -> Value {
     // ---------- AI ----------
     kopiuj(preset, o, "ai_enabled", "ai_mode");
 
+    // ---------- symulacja ----------
+    // `stops_level` z presetu dotyczy backtestu; na żywo wartość i tak
+    // przychodzi z serwera brokera (patrz `live.rs`).
     kopiuj(preset, o, "stops_level", "sim_stops_level");
 
     // Klucze w nazewnictwie SILNIKA, które właśnie przetłumaczyliśmy, znikają
@@ -2986,12 +3298,31 @@ fn kopiuj(
     }
 }
 
+/// Wpisuje wielkość pozycji z karty panelu do konfiguracji SILNIKA.
+///
+/// `core_from_ui` świadomie pomija trzy pola lota (patrz komentarz przy
+/// „wielkość pozycji"), bo mają własny sterownik `Command::SetLot`. Tryb DEMO
+/// stosował je od początku — ścieżka ŻYWA nie stosowała ich NIGDZIE, więc
+/// `lot_mode_percent` zostawał przy domyślnym `false`, a bot handlował stałym
+/// `lot_fixed = 0,01` NIEZALEŻNIE od presetu i od tego, co pokazywał panel.
+///
+/// Objaw z 30.07.2026: 72 transakcje na koncie mają wolumen dokładnie 0,01,
+/// choć ULTRA-X3 każe grać 0,5 % kapitału (0,02 przy saldzie 483 $, 0,04 przy
+/// 787 $). Backtest tego samego presetu przy 483 $ używa lotów 0,01–0,46.
+/// Konto nie miało więc prawa się złożyć — rosłoby liniowo zamiast wykładniczo,
+/// a wszystkie wyniki presetu zakładają skalowanie wolumenu saldem.
 pub fn apply_lot(core: &mut Settings, lot: &crate::ui::LotConfig) {
     core.lot_mode_percent = lot.mode == "percent";
     core.lot_fixed = lot.fixed;
     core.lot_percent = lot.percent;
 }
 
+/// Wielkość pozycji zapisana w presecie, w kształcie panelu.
+///
+/// Lot świadomie NIE przechodzi przez `core_from_ui` (ma własny sterownik
+/// `Command::SetLot`), więc wczytanie presetu musi ustawić go osobno — inaczej
+/// preset zmierzony na 0,5 % kapitału handlowałby lotem, który akurat został
+/// w panelu z poprzedniego razu.
 pub fn preset_lot(preset: &Value) -> Option<crate::ui::LotConfig> {
     let percent = preset.get("lot_mode_percent")?.as_bool()?;
     Some(crate::ui::LotConfig {
@@ -3193,6 +3524,8 @@ mod tests {
 
     #[test]
     fn nieznane_klucze_sa_raportowane_a_nie_ciche() {
+        // `rev_exit_range` jest już obsługiwane; klucz spoza obu list nadal
+        // musi być zgłoszony, zamiast po cichu nic nie robić
         let brak = unmapped_keys(&json!({
             "max_dd_pct": 60,
             "rev_exit_range": 5,
@@ -3330,6 +3663,26 @@ mod tests {
         s.reenter_stop_after_riskfree = true;
         s.lot_max_z_salda = 400.0;
         s.trail_atr_mult = 1.5;
+        s.trail_adaptive_enabled = true;
+        s.trail_adaptive_runners_only = false;
+        s.trail_adaptive_window_s = 75.0;
+        s.trail_adaptive_min_samples = 11;
+        s.trail_adaptive_trend_er = 0.61;
+        s.trail_adaptive_reversal_er = 0.37;
+        s.trail_adaptive_trend_gap_mult = 1.7;
+        s.trail_adaptive_chop_gap_mult = 0.92;
+        s.trail_adaptive_reversal_gap_mult = 0.38;
+        s.trail_adaptive_fast_vol_s = 15.0;
+        s.trail_adaptive_slow_vol_s = 150.0;
+        s.trail_adaptive_vol_ratio = 2.1;
+        s.trail_adaptive_vol_favorable_mult = 1.35;
+        s.trail_adaptive_vol_adverse_mult = 0.55;
+        s.trail_adaptive_min_peak = 3.5;
+        s.trail_adaptive_min_gap = 1.25;
+        s.trail_adaptive_max_gap = 28.0;
+        // sekcja M z 18.08 + FAZA 1 poz. 7 — te pola też idą przez most bez
+        // słownika, więc literówka w kluczu byłaby niewidoczna bez wartości
+        // NIE-domyślnej tutaj
         s.entry_deep_frac_to_sl = 0.4;
         s.risk_free_be_min_profit = 21.0;
         s.runner_max_hold_bez_reguly = true;
@@ -3347,6 +3700,10 @@ mod tests {
             ("tiered", "tiered"),
             ("LockPct", "lock_pct"),
             ("lock_pct", "lock_pct"),
+            ("Atr", "atr"),
+            ("atr", "atr"),
+            ("Chandelier", "chandelier"),
+            ("chandelier", "chandelier"),
         ] {
             let ui = preset_to_ui(&json!({ "trail_mode": wejscie, "trail_runner_mode": wejscie }));
             assert_eq!(ui["trail_mode"], oczekiwane, "trail_mode dla {wejscie}");
@@ -3372,10 +3729,15 @@ mod tests {
             "gap" => TrailMode::Gap,
             "lock_pct" => TrailMode::LockPct,
             "tiered" => TrailMode::Tiered,
+            "atr" => TrailMode::Atr,
+            "chandelier" => TrailMode::Chandelier,
             _ => TrailMode::Off,
         }
     }
 
+    /// REGRESJA: cała rodzina `smart_exit_*` przechodziła przez `settings.json`
+    /// nietknięta, ale `core_from_ui` jej nie czytało. Preset zmierzony
+    /// z mądrym wyjściem handlowałby na żywo bez niego — pod tą samą nazwą.
     #[test]
     fn madre_wyjscie_dociera_z_panelu_do_silnika() {
         let c = core_from_ui(&json!({
@@ -3405,6 +3767,13 @@ mod tests {
         assert!(!core_from_ui(&json!({})).smart_exit);
     }
 
+    /// NAJWAŻNIEJSZY test tego pliku: preset wczytany w panelu ma dawać
+    /// DOKŁADNIE tę konfigurację, którą zmierzył backtest.
+    ///
+    /// Bez `preset_to_ui` ten test przechodził tylko dla pól o zgodnych
+    /// nazwach, a `tp_schedule`, `pending_lifetime` czy `trail_start` cicho
+    /// wracały do domyślnych — czyli bot na żywo grał inną konfiguracją niż
+    /// ta, której wynik pokazywał raport.
     #[test]
     fn preset_przechodzi_przez_panel_bez_strat() {
         let oczekiwane = preset_probny();
@@ -3427,6 +3796,16 @@ mod tests {
         assert_eq!(a, b, "preset zgubił ustawienia po drodze przez panel");
     }
 
+    /// Dokument, który mimo wszystko niesie klucze w nazewnictwie SILNIKA,
+    /// ma dawać tę samą konfigurację, co przejście przez `preset_to_ui`.
+    ///
+    /// Historia: przez długi czas było odwrotnie i test w tym miejscu
+    /// SPRAWDZAŁ, że surowy preset gubi ustawienia (`tp_schedule` wracało do
+    /// `Ladder`, `trail_start` do domyślnej). Dowodziło to, że problem jest
+    /// realny — ale zostawiało otwartą dziurę: `settings.json` zapisany bez
+    /// tłumaczenia dawał bota grającego inną konfiguracją niż zmierzona.
+    /// Dokładnie to zastano 30.07.2026 w `PACKAGE/settings.json`.
+    /// Dziś `core_from_ui` sam wykrywa taki dokument i go tłumaczy.
     #[test]
     fn dokument_w_nazewnictwie_silnika_tez_dziala() {
         let p = serde_json::to_value(preset_probny()).unwrap();
@@ -3441,6 +3820,13 @@ mod tests {
         assert_eq!(surowo, przez_panel, "obie drogi muszą dać ten sam silnik");
     }
 
+    /// Pola o WSPÓLNEJ nazwie klucza, ale różnym SŁOWNIKU WARTOŚCI.
+    ///
+    /// Audyt `unmapped_keys` pokazywał je jako „podpięte", bo klucz się zgadza
+    /// — a mimo to nie działały, bo panel zapisuje `"counter"`, preset niesie
+    /// `"CounterMa"`, i nierozpoznana wartość po cichu wracała do domyślnej.
+    /// Zmierzony koszt na ULTRA-X3 (okno czerwiec–lipiec, tryb dzienny):
+    /// 1936 $ → −7 $.
     #[test]
     fn slownik_wartosci_dziala_w_obu_konwencjach() {
         for (klucz, rdzen, panel) in [
@@ -3466,6 +3852,10 @@ mod tests {
         }
     }
 
+    /// `trail_runner_mode = Off` to JEDYNY sposób na wyłączenie rodziny
+    /// runnerowej — a domyślną wartością rdzenia jest `Tiered`, więc
+    /// nierozpoznane „off" WŁĄCZAŁO to, co miało wyłączyć. Zmierzone −923 $
+    /// na ULTRA-X3 (okno czerwiec–lipiec, tryb dzienny).
     #[test]
     fn wylaczenie_runnera_nie_moze_go_wlaczac() {
         assert_eq!(Settings::default().trail_runner_mode, TrailMode::Tiered);
@@ -3491,6 +3881,12 @@ mod tests {
     /// zapali ten test — zamiast po cichu wyciąć ustawienie z presetu.
     #[test]
     fn zaden_klucz_presetu_nie_ginie_po_tlumaczeniu() {
+        // Lista wyjątków jest PUSTA od 04.08.2026. Trzy pola lota
+        // (`lot_mode_percent`, `lot_fixed`, `lot_percent`) miały tu zwolnienie
+        // z uzasadnieniem „mają własny sterownik `Command::SetLot`" — a skutek
+        // był taki, że zapis dowolnego pola presetu z panelu cofał jego lot do
+        // domyślnego 0,01. Jeśli ktoś chce tu dopisać nazwę, musi najpierw
+        // odpowiedzieć, co się stanie z tym polem przy edycji presetu.
         const WYJATKI: &[&str] = &[];
 
         let pelny = serde_json::to_value(Settings::default()).unwrap();
@@ -3505,6 +3901,18 @@ mod tests {
         );
     }
 
+    /// Przełączniki z audytu Fable (Z-3, Z-5…Z-10) plus weto odpowiedzi
+    /// z Pakietu F muszą przejść przez panel bez zmiany znaczenia — a BRAK
+    /// klucza musi zostawić DOMYŚLNĄ WARTOŚĆ SILNIKA nietkniętą.
+    /// To jest ta sama klasa błędu, przez którą przepadło
+    /// `drop_unplaceable_levels`.
+    ///
+    /// Do 18.08.2026 test pisał „brak klucza musi zostawić `false`", bo
+    /// wszystkie te osie miały wtedy domyślne `false`. Od naprawy semantyki
+    /// wypełnienia `sync_only_live_levels` jest domyślnie `true`, więc
+    /// właściwym odniesieniem jest `Settings::default()`, a nie stała.
+    /// Zapisanie odniesienia na sztywno zamieniłoby test „panel nie gubi
+    /// klucza" w test „domyślna nigdy się nie zmieni".
     #[test]
     fn przelaczniki_z_audytu_dociera_do_silnika() {
         const KLUCZE: &[&str] = &[
@@ -3631,6 +4039,8 @@ mod tests {
 
     #[test]
     fn rozklad_wejscia_rynkowego_dociera_do_silnika() {
+        // Pole dołożone 31.07.2026. Bez wpisu w `core_from_ui` panel gubiłby
+        // je po cichu — tak właśnie przepadło `drop_unplaceable_levels`.
         for (wpis, oczekiwany) in [
             ("Single", MarketEntryMode::Single),
             ("single", MarketEntryMode::Single),
@@ -3648,6 +4058,10 @@ mod tests {
         assert_eq!(c.market_entry_mode, MarketEntryMode::GridAtOnce);
     }
 
+    /// Poziom stopu od sygnalisty ma własny przełącznik i musi przejść przez
+    /// panel bez zmiany znaczenia. Nierozpoznana wartość spada na `Off`,
+    /// czyli NIE zmienia zachowania handlowego (odwrotnie niż `risk_free_mode`,
+    /// gdzie gałąź `_` kosztowała −976 $ — patrz `REGULY_AUDYT.md` §2.7).
     #[test]
     fn poziom_stopu_z_spp_dociera_do_silnika() {
         for (wpis, oczekiwany) in [
@@ -3665,6 +4079,7 @@ mod tests {
                 "wpis {wpis:?}"
             );
         }
+        // BRAK klucza = zachowanie sprzed 31.07.2026
         assert_eq!(
             core_from_ui(&json!({ "entry_units": 3 })).spp_sl_mode,
             SppSlMode::Off
@@ -3676,6 +4091,24 @@ mod tests {
         assert_eq!(c.spp_sl_pad, 1.5);
     }
 
+    /// PACKAGE MUSI STARTOWAĆ NA TYM PRESECIE, KTÓRY DEKLARUJE — dowód, nie
+    /// deklaracja.
+    ///
+    /// `settings.json` zapisuje panel, a pliki presetów pisze backtest, i te
+    /// dwa źródła używają RÓŻNEJ pisowni enumów: panel `"counter"`, preset
+    /// `"CounterMa"`. Mapowanie zna obie konwencje, ale to trzeba sprawdzać,
+    /// a nie zakładać — nierozpoznana wartość spada po cichu na wariant
+    /// domyślny i bot gra czymś, czego nikt nie wybrał.
+    ///
+    /// Zmierzone 31.07.2026: przestawiając PACKAGE z ULTRA-X3 na HYPER-2
+    /// trzeba było przepisać 47 pól, w tym siedem enumów właśnie tej klasy
+    /// (`risk_free_mode`, `out_at_entry_mode`, `sl_hit_mode`, `trail_mode`,
+    /// `side_filter`, `regime_filter`, `dd_guard_scope`).
+    ///
+    /// Test NIE ZNA nazwy czempiona — czyta ją z `presetId` i porównuje rdzeń
+    /// zbudowany dwiema drogami. Dzięki temu przeniesienie korony (np. na
+    /// HYPER-X1 01.08.2026) nie zapala go bez powodu, ale podmiana samego
+    /// `presetId` bez przepisania pól — owszem.
     #[test]
     fn package_startuje_na_presecie_ktory_deklaruje() {
         let baza = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../PACKAGE");
@@ -3702,16 +4135,32 @@ mod tests {
         let sekcja = preset.get("settings").unwrap_or(&preset);
         let z_presetu = core_from_ui(sekcja);
 
+        // Pola, które ustawia UŻYTKOWNIK w panelu, a preset ich nie dyktuje:
+        // progi DD (wyzerowane w presetach od zawsze) oraz — od 04.08 —
+        // KREDYT BONUSOWY. Kredyt to pole RACHUNKU (`POLA_RACHUNKU`): bonus
+        // daje broker kontu, nie strategii, więc `odlicz_kredyt: true`
+        // w settings.json przy `false` w presecie NIE jest rozjazdem
+        // konfiguracji handlu — jest decyzją właściciela konta. Bez tej
+        // neutralizacji włączenie kredytu w panelu wywracałoby bramkę
+        // wydania, choć rdzeń HANDLOWY zgadza się co do pola.
         let recznie = |c: &mut conduit_core::Settings| {
             c.max_dd_pct = 0.0;
             c.max_dd_usd = 0.0;
             c.odlicz_kredyt = false;
             c.credit_balance_separate = false;
             c.kredyt_reczny = 0.0;
+            // Straż ekspozycji — od 24.08 pole RACHUNKU (`POLA_RACHUNKU`,
+            // uzasadnienie przy wpisie): bezpiecznik ostatniej linii liczy
+            // procent od wspólnego equity konta, więc 80 w settings.json przy
+            // 0 w NEWALPHA-1 to decyzja właściciela konta, nie rozjazd
+            // strategii. Preset wolno mieć ostrzejszy własnymi pułapami —
+            // nie luźniejszy od konta.
             c.expo_cap_pct = 0.0;
             for field in ["expo_cap_close", "expo_cap_ml_pct"] {
-                assert!(conduit_core::wielosilnik::POLA_RACHUNKU.contains(&field),
-                    "test may neutralize only an explicitly classified account override");
+                assert!(
+                    conduit_core::wielosilnik::POLA_RACHUNKU.contains(&field),
+                    "test may neutralize only an explicitly classified account override"
+                );
             }
             c.expo_cap_close = false;
             c.expo_cap_ml_pct = 0.0;
@@ -3886,7 +4335,7 @@ mod tests {
                 continue;
             };
             if !korzen
-                .join(format!("config/presets/{nazwa}.json"))
+                .join(format!("PACKAGE/presets/{nazwa}.json"))
                 .exists()
             {
                 brakuje.push(nazwa.to_string());
@@ -3984,6 +4433,21 @@ mod tests {
         assert!(po.ea_dozor_sl, "zapis przez panel zgasił dozór SL");
     }
 
+    /// RODZINA A PRZEŻYWA OBIEG PANELU — osie A1–A4 (25.08.2026).
+    ///
+    /// # Dlaczego ten test istnieje osobno
+    ///
+    /// `unmapped_keys` sprawdza klucze OBECNE W DOKUMENCIE, więc dopóki żaden
+    /// preset nie niósł pól rodziny A, alarm milczał — a pola i tak ginęły,
+    /// bo `core_from_ui` startuje od `Settings::default()` i przypisuje
+    /// wyłącznie to, co zna. Backtest (serde wprost do `Settings`) je
+    /// honorował, bot na żywo zerował. Preset zmierzony jako zyskowny grałby
+    /// więc BEZ warstwy, która dała mu ten wynik.
+    ///
+    /// Test idzie od strony `Settings`, a nie dokumentu: ustawia każde pole
+    /// na wartość RÓŻNĄ od domyślnej i sprawdza, że wraca po pełnym obiegu.
+    /// Wartość różna od domyślnej jest tu warunkiem sensu — pole zerowane
+    /// przez brak mapowania i pole o wartości domyślnej wyglądają identycznie.
     #[test]
     fn rodzina_a_przezywa_obieg_panelu() {
         let mut zrodlo = Settings::default();
@@ -4059,6 +4523,8 @@ mod tests {
         }
     }
 
+    /// Regresja audytu 30.08: pola obecne w presetach muszą przejść pełną
+    /// drogę, nie tylko znaleźć się na białej liście diagnostyki.
     #[test]
     fn osie_god_x4_i_nowsze_przezywaja_obieg_panelu() {
         let mut z = Settings::default();
@@ -4124,27 +4590,37 @@ mod credit_balance_separate_tests {
     use super::*;
     #[test]
     fn credit_balance_separate_chain_account_overrides_watchdog_and_autostart() {
-        let preset=conduit_core::Settings {mt5_autostart:true,mt5_watchdog:true,credit_balance_separate:false,..Default::default()};
-        let mut account=core_from_ui(&serde_json::json!({"mt5_autostart":false,"mt5_watchdog":false,"credit_balance_separate":true}));
-        apply_lot(&mut account,&crate::ui::LotConfig::default());
-        let effective=conduit_core::wielosilnik::ustawienia_formatu(&preset,&account);
-        assert!(!effective.mt5_autostart);assert!(!effective.mt5_watchdog);
+        let preset = conduit_core::Settings {
+            mt5_autostart: true,
+            mt5_watchdog: true,
+            credit_balance_separate: false,
+            ..Default::default()
+        };
+        let mut account = core_from_ui(
+            &serde_json::json!({"mt5_autostart":false,"mt5_watchdog":false,"credit_balance_separate":true}),
+        );
+        apply_lot(&mut account, &crate::ui::LotConfig::default());
+        let effective = conduit_core::wielosilnik::ustawienia_formatu(&preset, &account);
+        assert!(!effective.mt5_autostart);
+        assert!(!effective.mt5_watchdog);
         assert!(effective.credit_balance_separate);
     }
     #[test]
     fn credit_balance_separate_maps_roundtrips_and_is_account_override() {
-        let doc=serde_json::json!({"credit_balance_separate":true,"odlicz_kredyt":true,"kredyt_reczny":300.0});
-        let cfg=core_from_ui(&doc);
+        let doc = serde_json::json!({"credit_balance_separate":true,"odlicz_kredyt":true,"kredyt_reczny":300.0});
+        let cfg = core_from_ui(&doc);
         assert!(cfg.credit_balance_separate);
         assert!(unmapped_keys(&doc).is_empty());
-        let raw=serde_json::to_value(&cfg).unwrap();
+        let raw = serde_json::to_value(&cfg).unwrap();
         assert!(core_from_ui(&raw).credit_balance_separate);
-        let preset=conduit_core::Settings::default();
-        let merged=conduit_core::wielosilnik::ustawienia_formatu(&preset,&cfg);
+        let preset = conduit_core::Settings::default();
+        let merged = conduit_core::wielosilnik::ustawienia_formatu(&preset, &cfg);
         assert!(merged.credit_balance_separate);
-        assert_eq!(merged.saldo_wlasne(159.8,300.0),159.8);
-        let off=core_from_ui(&serde_json::json!({"credit_balance_separate":false}));
-        assert!(!conduit_core::wielosilnik::ustawienia_formatu(&merged,&off).credit_balance_separate);
+        assert_eq!(merged.saldo_wlasne(159.8, 300.0), 159.8);
+        let off = core_from_ui(&serde_json::json!({"credit_balance_separate":false}));
+        assert!(
+            !conduit_core::wielosilnik::ustawienia_formatu(&merged, &off).credit_balance_separate
+        );
     }
 }
 
@@ -4169,7 +4645,8 @@ mod close_receipt_reconcile_mapping_tests {
             assert_eq!(core_from_ui(&ui).close_receipt_reconcile, enabled);
             let mut contradictory_preset = Settings::default();
             contradictory_preset.close_receipt_reconcile = !enabled;
-            let effective = conduit_core::wielosilnik::ustawienia_formatu(&contradictory_preset, &account);
+            let effective =
+                conduit_core::wielosilnik::ustawienia_formatu(&contradictory_preset, &account);
             assert_eq!(effective.close_receipt_reconcile, enabled);
         }
     }
@@ -4187,7 +4664,9 @@ mod ui_contract_flags_3108_tests {
         assert!(!empty.retarget_respects_final_target);
         assert!(conduit_core::wielosilnik::POLA_RACHUNKU.contains(&"order_volume_contract_v2"));
         assert!(!conduit_core::wielosilnik::POLA_RACHUNKU.contains(&"be_never_loosen"));
-        assert!(!conduit_core::wielosilnik::POLA_RACHUNKU.contains(&"retarget_respects_final_target"));
+        assert!(
+            !conduit_core::wielosilnik::POLA_RACHUNKU.contains(&"retarget_respects_final_target")
+        );
 
         for volume in [false, true] {
             for be in [false, true] {
@@ -4212,10 +4691,17 @@ mod ui_contract_flags_3108_tests {
                         retarget_respects_final_target: !retarget,
                         ..Default::default()
                     };
-                    let effective = conduit_core::wielosilnik::ustawienia_formatu(&preset, &account);
-                    assert_eq!(effective.order_volume_contract_v2, volume, "global broker contract wins");
+                    let effective =
+                        conduit_core::wielosilnik::ustawienia_formatu(&preset, &account);
+                    assert_eq!(
+                        effective.order_volume_contract_v2, volume,
+                        "global broker contract wins"
+                    );
                     assert_eq!(effective.be_never_loosen, !be, "selected strategy wins");
-                    assert_eq!(effective.retarget_respects_final_target, !retarget, "selected strategy wins");
+                    assert_eq!(
+                        effective.retarget_respects_final_target, !retarget,
+                        "selected strategy wins"
+                    );
                 }
             }
         }
@@ -4228,14 +4714,24 @@ mod deferred_relot_ui_mapping_tests {
 
     #[test]
     fn deferred_and_relot_defaults_legacy_roundtrip_and_strategy_owner() {
-        for empty in [Settings::default(), core_from_ui(&serde_json::json!({})),
-            serde_json::from_value::<Settings>(serde_json::json!({})).unwrap()] {
+        for empty in [
+            Settings::default(),
+            core_from_ui(&serde_json::json!({})),
+            serde_json::from_value::<Settings>(serde_json::json!({})).unwrap(),
+        ] {
             assert!(!empty.defer_entry_until_receipts);
             assert_eq!(empty.deferred_entry_max_age_s, 300.0);
             assert!(!empty.pending_relot_reconcile_target);
         }
-        for key in ["defer_entry_until_receipts", "deferred_entry_max_age_s", "pending_relot_reconcile_target"] {
-            assert!(!conduit_core::wielosilnik::POLA_RACHUNKU.contains(&key), "strategy field {key}");
+        for key in [
+            "defer_entry_until_receipts",
+            "deferred_entry_max_age_s",
+            "pending_relot_reconcile_target",
+        ] {
+            assert!(
+                !conduit_core::wielosilnik::POLA_RACHUNKU.contains(&key),
+                "strategy field {key}"
+            );
         }
         for defer in [false, true] {
             for relot in [false, true] {
@@ -4260,7 +4756,8 @@ mod deferred_relot_ui_mapping_tests {
                         pending_relot_reconcile_target: !relot,
                         ..Default::default()
                     };
-                    let effective = conduit_core::wielosilnik::ustawienia_formatu(&preset, &account);
+                    let effective =
+                        conduit_core::wielosilnik::ustawienia_formatu(&preset, &account);
                     assert_eq!(effective.defer_entry_until_receipts, !defer);
                     assert_eq!(effective.deferred_entry_max_age_s, max_age + 17.0);
                     assert_eq!(effective.pending_relot_reconcile_target, !relot);
@@ -4269,7 +4766,11 @@ mod deferred_relot_ui_mapping_tests {
         }
         // The mapper must not silently turn invalid zero into unlimited or 300.
         // Execution validates the strict positive/finite contract separately.
-        assert_eq!(core_from_ui(&serde_json::json!({"deferred_entry_max_age_s":0})).deferred_entry_max_age_s, 0.0);
+        assert_eq!(
+            core_from_ui(&serde_json::json!({"deferred_entry_max_age_s":0}))
+                .deferred_entry_max_age_s,
+            0.0
+        );
     }
 }
 
@@ -4279,8 +4780,11 @@ mod closed_profit_net_costs_mapping_tests {
 
     #[test]
     fn closed_net_default_off_account_owner_and_no_implicit_prerequisite_changes() {
-        for empty in [Settings::default(), core_from_ui(&serde_json::json!({})),
-            serde_json::from_value::<Settings>(serde_json::json!({})).unwrap()] {
+        for empty in [
+            Settings::default(),
+            core_from_ui(&serde_json::json!({})),
+            serde_json::from_value::<Settings>(serde_json::json!({})).unwrap(),
+        ] {
             assert!(!empty.closed_profit_net_costs);
         }
         assert!(conduit_core::wielosilnik::POLA_RACHUNKU.contains(&"closed_profit_net_costs"));
@@ -4295,16 +4799,32 @@ mod closed_profit_net_costs_mapping_tests {
                     let raw = serde_json::to_value(&account).unwrap();
                     for roundtrip in [core_from_ui(&raw), core_from_ui(&preset_to_ui(&raw))] {
                         assert_eq!(roundtrip.closed_profit_net_costs, net);
-                        assert_eq!(roundtrip.close_receipt_reconcile, receipt, "mapping never enables a prerequisite");
+                        assert_eq!(
+                            roundtrip.close_receipt_reconcile, receipt,
+                            "mapping never enables a prerequisite"
+                        );
                         assert_eq!(roundtrip.basket_realized_broker_only, ledger);
                     }
-                    let preset = Settings { closed_profit_net_costs: !net,
-                        close_receipt_reconcile: !receipt, basket_realized_broker_only: !ledger,
-                        ..Default::default() };
-                    let effective = conduit_core::wielosilnik::ustawienia_formatu(&preset, &account);
-                    assert_eq!(effective.closed_profit_net_costs, net, "global convention wins");
-                    assert_eq!(effective.close_receipt_reconcile, receipt, "global receipt contract wins");
-                    assert_eq!(effective.basket_realized_broker_only, !ledger, "strategy-owned ledger prerequisite is not silently overwritten");
+                    let preset = Settings {
+                        closed_profit_net_costs: !net,
+                        close_receipt_reconcile: !receipt,
+                        basket_realized_broker_only: !ledger,
+                        ..Default::default()
+                    };
+                    let effective =
+                        conduit_core::wielosilnik::ustawienia_formatu(&preset, &account);
+                    assert_eq!(
+                        effective.closed_profit_net_costs, net,
+                        "global convention wins"
+                    );
+                    assert_eq!(
+                        effective.close_receipt_reconcile, receipt,
+                        "global receipt contract wins"
+                    );
+                    assert_eq!(
+                        effective.basket_realized_broker_only, !ledger,
+                        "strategy-owned ledger prerequisite is not silently overwritten"
+                    );
                 }
             }
         }
@@ -4317,8 +4837,11 @@ mod strategy_continuation_mapping_tests {
 
     #[test]
     fn continuation_roundtrips_as_account_state_without_enabling_other_contracts() {
-        for empty in [Settings::default(), core_from_ui(&serde_json::json!({})),
-            serde_json::from_value::<Settings>(serde_json::json!({})).unwrap()] {
+        for empty in [
+            Settings::default(),
+            core_from_ui(&serde_json::json!({})),
+            serde_json::from_value::<Settings>(serde_json::json!({})).unwrap(),
+        ] {
             assert!(!empty.restore_strategy_continuation);
         }
         assert!(conduit_core::wielosilnik::POLA_RACHUNKU.contains(&"restore_strategy_continuation"));
@@ -4331,12 +4854,17 @@ mod strategy_continuation_mapping_tests {
                 let raw = serde_json::to_value(&account).unwrap();
                 for copy in [core_from_ui(&raw), core_from_ui(&preset_to_ui(&raw))] {
                     assert_eq!(copy.restore_strategy_continuation, enabled);
-                    assert_eq!(copy.close_receipt_reconcile, receipts,
-                        "a mapper must not silently change another runtime contract");
+                    assert_eq!(
+                        copy.close_receipt_reconcile, receipts,
+                        "a mapper must not silently change another runtime contract"
+                    );
                     assert!(!copy.closed_profit_net_costs);
                 }
-                let preset = Settings { restore_strategy_continuation: !enabled,
-                    close_receipt_reconcile: !receipts, ..Default::default() };
+                let preset = Settings {
+                    restore_strategy_continuation: !enabled,
+                    close_receipt_reconcile: !receipts,
+                    ..Default::default()
+                };
                 let effective = conduit_core::wielosilnik::ustawienia_formatu(&preset, &account);
                 assert_eq!(effective.restore_strategy_continuation, enabled);
                 assert_eq!(effective.close_receipt_reconcile, receipts);
@@ -4370,11 +4898,17 @@ mod entry_edit_sr_v2_mapping_tests {
                     for copy in [core_from_ui(&raw), core_from_ui(&preset_to_ui(&raw))] {
                         assert_eq!(copy.entry_edit_geometry_v2, edit);
                         assert_eq!(copy.sr_warmup_exact_ticks, warmup);
-                        assert_eq!(copy.trail_sr_enabled, sr, "never implicitly enable a parent");
+                        assert_eq!(
+                            copy.trail_sr_enabled, sr,
+                            "never implicitly enable a parent"
+                        );
                     }
-                    let account = Settings { entry_edit_geometry_v2: !edit,
-                        sr_warmup_exact_ticks: !warmup, trail_sr_enabled: !sr,
-                        ..Default::default() };
+                    let account = Settings {
+                        entry_edit_geometry_v2: !edit,
+                        sr_warmup_exact_ticks: !warmup,
+                        trail_sr_enabled: !sr,
+                        ..Default::default()
+                    };
                     let effective = conduit_core::wielosilnik::ustawienia_formatu(&core, &account);
                     assert_eq!(effective.entry_edit_geometry_v2, edit);
                     assert_eq!(effective.sr_warmup_exact_ticks, warmup);

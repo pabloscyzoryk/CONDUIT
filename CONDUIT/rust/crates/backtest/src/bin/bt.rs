@@ -23,17 +23,26 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Jedyny pisarz pliku oglądanego na żywo przez `postep.exe`.
+///
+/// Wszystkie wątki Rayona kończą presety niezależnie, ale mapa, serializacja i
+/// podmiana pliku przechodzą przez TEN SAM mutex. Dzięki temu dwa kończące się
+/// naraz przebiegi nie nadpiszą sobie wyników ani wspólnego pliku `.tmp`.
+/// Trzymamy wyłącznie [`Metrics`], nigdy transakcje, koszyki ani krzywe — także
+/// `--summary-only` dostaje więc pełne liczby do selekcji bez dużych artefaktów.
 struct PisarzWynikowCzastkowych {
     cel: PathBuf,
     wyniki: HashMap<String, Metrics>,
+    quick_tick_stride: usize,
     blad_zgloszony: bool,
 }
 
 impl PisarzWynikowCzastkowych {
-    fn nowy(katalog: &Path) -> Self {
+    fn nowy(katalog: &Path, quick_tick_stride: usize) -> Self {
         Self {
             cel: katalog.join("wyniki_czastkowe.json"),
             wyniki: HashMap::new(),
+            quick_tick_stride,
             blad_zgloszony: false,
         }
     }
@@ -52,7 +61,20 @@ impl PisarzWynikowCzastkowych {
 
     fn zapisz(&self) -> std::io::Result<()> {
         let tmp = self.cel.with_file_name("wyniki_czastkowe.json.tmp");
-        let txt = serde_json::to_vec(&self.wyniki).map_err(std::io::Error::other)?;
+        let txt = if self.quick_tick_stride > 1 {
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "conduit.quick-sweep-partial.v1",
+                "approximate": true,
+                "coronation_eligible": false,
+                "quick_tick_stride": self.quick_tick_stride,
+                "warning": "APPROXIMATE SCREENING ONLY — rerun finalists with N=1",
+                "results": &self.wyniki,
+            }))
+        } else {
+            // Exact N=1 retains the historical direct name -> Metrics shape.
+            serde_json::to_vec(&self.wyniki)
+        }
+        .map_err(std::io::Error::other)?;
         std::fs::write(&tmp, txt)?;
         match std::fs::rename(&tmp, &self.cel) {
             Ok(()) => Ok(()),
@@ -130,7 +152,7 @@ fn replay_clock_contract(
              --signal-time-offset-min {cli_offset_min:+} min + efektywny \
              Settings::msg_offset() {:+} ms ({:+.3} min) = suma {:+} ms ({:+.3} min). \
              Runner dodaje offset presetu PO normalizacji CLI. Użyj oryginalnego \
-             danych UTC z --signal-time-offset-min 0, jeśli preset już zawiera przesunięcie, \
+             korpusu UTC z --signal-time-offset-min 0 (GOD-X4 już dodaje +180 min) \
              albo jawnie ustaw msg_clock_offset_ms=0 w efektywnym presecie/rachunku \
              i normalizuj zegar wyłącznie przez CLI. Nie uruchomiono backtestu.",
             preset_offset_ms,
@@ -158,12 +180,17 @@ fn replay_clock_contract(
 struct Args {
     ticks: PathBuf,
     signals: PathBuf,
+    /// Jawna normalizacja zegara strumienia replayu. To właściwość
+    /// korpusu danych, nie strategii; 0 zachowuje historyczne zachowanie.
     signal_time_offset_min: i64,
     signal_time_offset_explicit: bool,
     sim_limit_price_improvement: bool,
     sim_new_pending_sl_next_tick: bool,
     sim_native_swap_cash_digits: Option<u32>,
+    /// Raw Telegram replay uses the exact VPS content-dedup ingress.
     live_telegram_ingress: bool,
+    /// Explicit approximate screening stride; 1 is the exact legacy path.
+    quick_tick_stride: usize,
     sim_price_digits: Option<u32>,
     /// początek okna WŁĄCZNIE (północka tego dnia)
     from: Option<i64>,
@@ -179,6 +206,11 @@ struct Args {
     sweep: Option<PathBuf>,
     balance: f64,
     daily_reset: bool,
+    /// TRYB AUTO-EA (`--auto-ea`) — patrz `RunConfig::auto_ea`.
+    ///
+    /// Istnieje po to i wyłącznie po to, żeby punkt (c) potrójnego kontraktu
+    /// zera („AUTO-EA bez osi = AUTO co do centa") dało się UDOWODNIĆ na
+    /// korpusie, a nie tylko na atrapie brokera.
     auto_ea: bool,
     /// „dzień po dniu, ale saldo przechodzi" — patrz `RunConfig::flat_na_dobie`
     flat_na_dobie: bool,
@@ -248,6 +280,23 @@ struct Args {
     drabinka_histereza_pct: f64,
     /// katalog z presetami dla nóg łańcuchów drabinki
     presety_dir: PathBuf,
+    /// ROZGRZEWKA HISTORII RYNKU: ile godzin ceny SPRZED `--from` wsypać do
+    /// silnika, zanim zacznie handlować. **0 = ZIMNY START i to jest domyślna**,
+    /// bo na niej stoi bramka parytetu (1936,47 / 1178,02 / 2527,07).
+    ///
+    /// # Po co ta flaga powstała (SENTINEL-0, 03.08.2026)
+    ///
+    /// Bez niej okno `--from 2026-07-01` mierzy co innego niż okno
+    /// `--from 2026-06-01`, i to nie dlatego, że lipiec był gorszy, tylko
+    /// dlatego, że przy `regime_ma_hours = 72` silnik startujący 1 lipca ma
+    /// przez pierwsze trzy doby filtr reżimu ŚLEPY. Zmierzone na tym samym
+    /// presecie i tych samych dniach: noga ZEN w oknie lipcowym schodziła na
+    /// dno 2,75 $ przy RYZ 1153 %, a w oknie pełnym te same dni dawały dno
+    /// 112,00 $ przy RYZ 314 %. Różnica NIE była własnością lipca.
+    ///
+    /// `live.rs::rozgrzej_historie` i `lotto --rozgrzewka-h` mają to od
+    /// 03.08.2026; backtest był ostatnim miejscem, w którym okno krótsze niż
+    /// `regime_ma_hours` cicho mierzyło ślepy filtr.
     rozgrzewka_h: usize,
 }
 
@@ -328,6 +377,7 @@ fn main_run_config(a: &Args, p: &Wariant, from: i64, to: i64,
         sim_new_pending_sl_next_tick: a.sim_new_pending_sl_next_tick,
         sim_native_swap_cash_digits: a.sim_native_swap_cash_digits,
         live_telegram_ingress: a.live_telegram_ingress,
+        quick_tick_stride: a.quick_tick_stride,
         settings: p.settings.clone(),
         ea_konfig: p.ea.clone(),
         formaty: p.formaty.clone(),
@@ -388,6 +438,7 @@ fn parse_args() -> Result<Args> {
         sim_new_pending_sl_next_tick: false,
         sim_native_swap_cash_digits: None,
         live_telegram_ingress: false,
+        quick_tick_stride: 1,
         sim_price_digits: None,
         from: None,
         to: None,
@@ -413,7 +464,8 @@ fn parse_args() -> Result<Args> {
         formaty: Vec::new(),
         pulapy: Vec::new(),
         rachunek: None,
-        // ZIMNY START — domyślna ścieżka parytetu.
+        // ZIMNY START — domyślna ścieżki parytetu. Nie zmieniać bez przeliczenia
+        // 1936,47 / 1178,02 / 2527,07.
         rozgrzewka_h: 0,
         drabinka: None,
         drabinka_histereza_pct: 0.0,
@@ -439,6 +491,12 @@ fn parse_args() -> Result<Args> {
                 a.sim_native_swap_cash_digits = Some(digits);
             }
             "--live-telegram-ingress" => a.live_telegram_ingress = true,
+            "--quick-tick-stride" => {
+                a.quick_tick_stride = next()?.parse()?;
+                if a.quick_tick_stride == 0 {
+                    bail!("--quick-tick-stride musi być >= 1 (1 = dokładny backtest)");
+                }
+            }
             "--sim-price-digits" => a.sim_price_digits = Some(next()?.parse()?),
             "--signals" => a.signals = next()?.into(),
             "--signal-time-offset-min" => {
@@ -513,6 +571,10 @@ fn parse_args() -> Result<Args> {
                      \x20                     Precyzja waluty rachunku; brak flagi zachowuje legacy.\n\
                      --live-telegram-ingress  raw replay przechodzi przez te sama bramke odbiorcza\n\
                      \x20                     Telegrama co aplikacja LIVE (zwykly backtest: OFF).\n\
+                     --quick-tick-stride <N>  PRZYBLIŻONE sito: bloki N ticków zachowują\n\
+                     \x20                     first/last + min/max BID/ASK i granice zdarzeń.\n\
+                     \x20                     N=1 (domyślne) = dokładny stary przebieg. Wyniku\n\
+                     \x20                     N>1 NIE WOLNO koronować; finaliści muszą przejść N=1.\n\
                      --signals <plik>      domyślnie data/signals.json\n\
                      --signal-time-offset-min <N>  JAWNE przesunięcie całego strumienia\n\
                      \x20                     replayu o N minut (np. 180 dla UTC → UTC+3).\n\
@@ -595,6 +657,20 @@ fn parse_args() -> Result<Args> {
     Ok(a)
 }
 
+/// Mówi głośno, w których POLACH RACHUNKU presety formatów się różnią.
+///
+/// Rachunek jest jeden: nie da się mieć dwóch dźwigni, dwóch swapów ani dwóch
+/// opóźnień realizacji naraz. Warstwa żywa rozstrzyga to dokumentem panelu;
+/// backtest bierze pierwszy podany format (albo `--rachunek`). Cisza w tym
+/// miejscu znaczyłaby, że drugi preset po cichu mierzy inny świat, niż mierzył
+/// sam — i że nikt się o tym nie dowie.
+///
+/// # Ta sama funkcja co na żywo (EA-21, 24.08.2026)
+///
+/// Samo porównanie robi [`conduit_core::formaty::rozjazd_rachunku`] w rdzeniu,
+/// bo warstwa żywa musi mówić DOKŁADNIE to samo. Do 24.08.2026 ta funkcja była
+/// jedynym miejscem, które o rozjeździe w ogóle wspominało — pomiar widział
+/// ostrzeżenie, konto nie widziało nic.
 fn ostrzez_o_rozjezdzie_rachunku(fmt: &[FormatCfg], rach: &Settings) {
     let nogi: Vec<(&str, &Settings)> = fmt
         .iter()
@@ -612,6 +688,10 @@ fn ostrzez_o_rozjezdzie_rachunku(fmt: &[FormatCfg], rach: &Settings) {
     for z in &lista {
         eprintln!("{z}");
     }
+    // Rozjazd, po którym noga ma MNIEJ ochrony, niż deklarował jej preset, nie
+    // jest kosmetyką — to jest ta sama klasa co „preset niezwiązany gra
+    // dokumentem". Na żywo zatrzymuje handel (`live.rs`); tutaj musi
+    // przynajmniej dać się znaleźć `grep`-em w logu przebiegu.
     let ile = lista.iter().filter(|x| x.oslabia).count();
     if ile > 0 {
         eprintln!(
@@ -633,6 +713,8 @@ fn ostrzez_o_rozjezdzie_rachunku(fmt: &[FormatCfg], rach: &Settings) {
 fn wypisz_statystyki_e(r: &conduit_backtest::runner::RunResult) {
     let s = &r.metrics.stat_sygnalow;
     let l = &s.lejek;
+    // Cisza przy pustym przebiegu jest zamierzona — drukowanie samych zer
+    // sugerowałoby pomiar, którego nie było.
     if l.sygnaly_widziane == 0 && l.koszyki == 0 {
         return;
     }
@@ -873,6 +955,10 @@ fn main() -> Result<()> {
 
     let a = parse_args()?;
 
+    if a.quick_tick_stride > 1 && a.reset_co > 0 {
+        bail!("--quick-tick-stride N>1 nie obsługuje osobnego silnika --reset-co; użyj zwykłego sweepu albo N=1");
+    }
+
     let mut ticks = TickData::open(&a.ticks)?;
     ticks.set_price_digits(a.sim_price_digits)?;
     let messages = load_messages_with_time_offset(&a.signals, a.signal_time_offset_min)?;
@@ -926,6 +1012,22 @@ fn main() -> Result<()> {
         );
     }
 
+    // ---------- PUSTE OKNO ----------
+    //
+    // Do 17.08.2026 okno bez ani jednego ticka kończyło się CICHO: `run`
+    // zwracał `Metrics::default()`, tabela pokazywała same zera, a wiersz
+    // „equity końcowe 0.00 $ · różnica (pozycje otwarte) −400.00 $" czytało się
+    // jak wyzerowane konto — czyli jak NAJGORSZY MOŻLIWY WYNIK — podczas gdy
+    // znaczył „nie było czego mierzyć". Najczęstsza droga do tego stanu to
+    // `--from X --to X`: `--to` jest granicą WYŁĄCZNĄ, więc takie okno wybiera
+    // zero ticków. Pomyłka w wierszu polecenia ma się kończyć błędem, nie
+    // liczbą, którą da się wkleić do raportu.
+    //
+    // Cichy zwrot w `run_with_progress` ZOSTAJE nietknięty i to jest celowe:
+    // w trybie okien (`--reset-co`) puste podokno — weekend, święto, luka w
+    // danych — jest normalne i nie może przerywać całego przemiatania. Głośne
+    // jest CAŁE okno przebiegu, nie jego fragment; dlatego bramka stoi tutaj,
+    // w CLI, a nie w bibliotece.
     let pustka = ticks.index_at(to).min(ticks.len()) <= ticks.index_at(from);
     if pustka {
         let podpowiedz = if ticks.is_empty() {
@@ -986,6 +1088,13 @@ fn main() -> Result<()> {
         bail!("nie znalazłem żadnych presetów");
     }
 
+    // ---------- CO JEST JEDNYM PRZEBIEGIEM ----------
+    //
+    // Do 03.08.2026 jeden przebieg = jeden preset. Odkąd `--preset-format`
+    // pozwala grać kilkoma presetami naraz, oś przemiatania robi się DRUGA:
+    // przy jednym łańcuchu presetów chcemy przemieść PUŁAPY. Wariant zbiera
+    // jedno i drugie, więc równoległa pętla niżej nie musi wiedzieć, którą oś
+    // akurat przemiatamy.
     let warianty: Vec<Wariant> = if let Some(spec) = &a.drabinka {
         if a.preset.is_some() || a.sweep.is_some() || !a.formaty.is_empty() {
             bail!(
@@ -1109,6 +1218,9 @@ fn main() -> Result<()> {
         bail!("nie ma czego liczyć");
     }
 
+    // P0: walidujemy WSZYSTKIE warianty przed pierwszym przebiegiem,
+    // zerowaniem tabeli wyników i również przed odgałęzieniem --reset-co.
+    // Ustawienia nóg nie sterują zegarem: runner i okna używają rachunku.
     let clock_contracts: Vec<ReplayClockContract> = warianty
         .iter()
         .map(|w| replay_clock_contract(a.signal_time_offset_min, &w.nazwa, &w.settings))
@@ -1147,6 +1259,33 @@ fn main() -> Result<()> {
         "window_from_ms": from,
         "window_to_exclusive_ms": to,
     });
+    if a.quick_tick_stride > 1 {
+        replay_manifest["approximate"] = serde_json::Value::Bool(true);
+        replay_manifest["quick_backtest"] = serde_json::json!({
+            "schema": "conduit.quick-backtest.v1",
+            "requested_stride": a.quick_tick_stride,
+            "method": "causal block extrema: first/last + min/max BID/ASK in original order",
+            "forced_boundaries": ["effective message arrival", "broker trading day", "feed gap > 60 seconds"],
+            "coronation_eligible": false,
+            "warning": "APPROXIMATE SCREENING ONLY; every finalist must be rerun with --quick-tick-stride 1"
+        });
+        eprintln!(
+            "\n╔══ QUICK BACKTEST N={} — WYNIK PRZYBLIŻONY ══\n\
+             ║ tylko sito kandydatów; KORONACJA/WYDANIE ZABRONIONE\n\
+             ║ finalistów uruchom ponownie z --quick-tick-stride 1\n\
+             ╚══════════════════════════════════════════════\n",
+            a.quick_tick_stride
+        );
+        std::fs::write(
+            a.out.join("APPROXIMATE_DO_NOT_CROWN.txt"),
+            format!(
+                "QUICK BACKTEST N={} — APPROXIMATE SCREENING ONLY.\n\
+                 Wynik nie kwalifikuje się do koronacji ani wydania.\n\
+                 Każdy finalista wymaga niezależnego przebiegu N=1.\n",
+                a.quick_tick_stride
+            ),
+        )?;
+    }
     // Preserve the old manifest byte-contract when disabled.  When enabled,
     // record exactly which production Telegram gates the raw replay executed.
     if a.live_telegram_ingress {
@@ -1187,11 +1326,22 @@ fn main() -> Result<()> {
     // ---------- OKNA PRZESUWANE („n-ki") + ZZN ----------
     //
     // Osobna gałąź, nie kolejna flaga w głównej ścieżce. Główna ścieżka jest
-    // bazą odniesienia całego projektu i nie ma powodu,
+    // bazą odniesienia całego projektu (1936 / 1178 / 2527) i nie ma powodu,
     // żeby przybywało w niej warunków. Zgodność jest pilnowana liczbą, nie
     // wspólnym kodem: `--reset-co 1` bez ZZN musi dać co do centa to samo, co
     // `--daily-reset`.
     if a.reset_co > 0 {
+        // WIELOSILNIK W OKNACH — podpięty 07.08.2026.
+        //
+        // Do tego dnia okna chodziły jednym silnikiem, więc KAŻDY łańcuch
+        // wielonogowy (SENTINEL-0/0A/0C/2) był w tym trybie niemierzalny —
+        // a odsetek dodatnich okien i najgorsze okno to jedno z trzech
+        // kryteriów oceny presetu. Teraz `okna.rs` buduje `Silniki` tą samą
+        // drogą co `runner.rs` i routuje po polu `kanal`.
+        //
+        // Drabinka nadal nie wchodzi: przełączanie szczebla wymaga adopcji
+        // koszyków przy wymianie ustawień, a to jest osobna praca. Blokada
+        // niżej (`--drabinka` + `--reset-co`) zostaje świadomie.
         return tryb_okien(&a, &ticks, &messages, &warianty, from, to);
     }
     if a.zzn {
@@ -1214,6 +1364,16 @@ fn main() -> Result<()> {
             warianty.len()
         );
     }
+    // ---------- okienko postępu ----------
+    //
+    // Sweep po kilkudziesięciu presetach liczy się minutami i do tej pory
+    // terminal milczał aż do końca. Tu wisi cała komunikacja z `postep.exe`:
+    // wątek raportujący czyta liczniki atomowe i zapisuje plik stanu, a gdy
+    // okno poprosi o przerwanie, ustawia flagę, którą widzi `ProgressFn`.
+    //
+    // Wątki liczące NIE dotykają dysku ani muteksów w gorącej pętli — robią
+    // jeden `fetch_add` na 262 144 ticki. Pomiar czasu przebiegu zostaje więc
+    // porównywalny z tym sprzed dołożenia postępu.
     let tickow_na_przebieg = ticks
         .index_at(to)
         .min(ticks.len())
@@ -1246,7 +1406,10 @@ fn main() -> Result<()> {
     // po `par_iter().collect()`. Pisarz jest wspólny także w `--summary-only`:
     // ten tryb usuwa ciężkie szczegóły przebiegu, lecz pełne `Metrics` są małe
     // i właśnie ich potrzebuje selekcja live.
-    let pisarz_czastkowy = Arc::new(Mutex::new(PisarzWynikowCzastkowych::nowy(&a.out)));
+    let pisarz_czastkowy = Arc::new(Mutex::new(PisarzWynikowCzastkowych::nowy(
+        &a.out,
+        a.quick_tick_stride,
+    )));
     if let Ok(mut p) = pisarz_czastkowy.lock() {
         if let Err(e) = p.wyzeruj() {
             eprintln!("  !! nie udało się wyzerować wyników cząstkowych: {e}");
@@ -1293,6 +1456,10 @@ fn main() -> Result<()> {
         } else {
             "compounding"
         };
+        // Okno rozdziela trzy różne zakresy, których nie wolno zlewać w jedno
+        // „okres": dane na dysku, zdarzenia eksportu i ticki faktycznie
+        // mierzone. Koniec pomiaru pokazujemy jako OSTATNI REALNY TICK, nie
+        // wyłączną granicę `to`, która przy `t_last + 1` wygląda jak inny czas.
         let i_od = ticks.index_at(from).min(ticks.len());
         let i_do = ticks.index_at(to).min(ticks.len());
         let zakres_mierzony = if i_od < i_do {
@@ -1351,7 +1518,12 @@ fn main() -> Result<()> {
             .out
             .join(format!(
                 "wyniki_{}.json",
-                if a.daily_reset { "daily" } else { "compound" }
+                if a.quick_tick_stride > 1 {
+                    format!("APPROX_N{}_{}", a.quick_tick_stride,
+                        if a.daily_reset { "daily" } else { "compound" })
+                } else {
+                    if a.daily_reset { "daily" } else { "compound" }.to_string()
+                }
             ))
             .display()
             .to_string();
@@ -1603,6 +1775,21 @@ fn main() -> Result<()> {
         );
     }
 
+    if a.quick_tick_stride > 1 {
+        let observed: Vec<f64> = results
+            .iter()
+            .filter_map(|(_, result)| result.approximation.as_ref().map(|info| info.observed_pct))
+            .collect();
+        if !observed.is_empty() {
+            let min_pct = observed.iter().copied().fold(f64::INFINITY, f64::min);
+            let max_pct = observed.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            println!(
+                "QUICK N={}: zachowano {:.2}%..{:.2}% surowych ticków (first/last + extrema BID/ASK; granice wiadomości/dnia). WYNIK PRZYBLIŻONY — NIE DO KORONACJI.",
+                a.quick_tick_stride, min_pct, max_pct
+            );
+        }
+    }
+
     if let Some(jp) = &journal {
         let linie: u64 = results.iter().map(|(_, r)| r.journal_lines).sum();
         if linie > 0 {
@@ -1837,7 +2024,12 @@ fn main() -> Result<()> {
     }
 
     // ---------- zapis ----------
-    let tag = if a.daily_reset { "daily" } else { "compound" };
+    let tag = if a.quick_tick_stride > 1 {
+        format!("APPROX_N{}_{}", a.quick_tick_stride,
+            if a.daily_reset { "daily" } else { "compound" })
+    } else {
+        if a.daily_reset { "daily" } else { "compound" }.to_string()
+    };
     // nazwa presetu → format sygnałów; `results` niesie samą nazwę
     let formaty: HashMap<&str, String> = warianty
         .iter()
@@ -1864,6 +2056,16 @@ fn main() -> Result<()> {
             );
             std::fs::write(a.out.join(format!("{safe}_{tag}.svg")), svg)?;
 
+            // SUROWE DANE WYKRESU, nie tylko obrazek.
+            //
+            // SVG jest do oglądania; do analizy trzeba liczb. Bez tego pliku
+            // jedyną drogą do wartości dziennych było odczytywanie WSPÓŁRZĘDNYCH
+            // PIKSELI z krzywej — próbowaliśmy 31.07 i pierwsza kalibracja
+            // pomyliła saldo startowe o rząd wielkości (4 685 $ zamiast 300 $),
+            // bo etykieta osi to linia bazowa pisma, nie kreska siatki.
+            //
+            // Tu wychodzi dokładnie to, co policzył silnik: pełna krzywa
+            // kapitału ze znacznikami czasu i statystyki każdego dnia.
             let dane = serde_json::json!({
                 "preset": name,
                 "od": fmt_ts(from),
@@ -1875,6 +2077,12 @@ fn main() -> Result<()> {
                 // od „ten przebieg w ogóle nie ma rozdzielczości minutowej" —
                 // a to dwa zupełnie różne wnioski z tego samego pustego słupka.
                 "krok_ms": a.krzywa_ms,
+                // ŹRÓDŁO SYGNAŁÓW. Od 03.08 mamy pięć zbiorów (ATFX, Synergy,
+                // ZEN, NOVA, PULSEX) i sama nazwa presetu przestała wystarczać
+                // do rozpoznania przebiegu: „HYPER-2" na ATFX i „HYPER-2" na
+                // NOVA to dwie różne rzeczy, a na wykresie wyglądają tak samo.
+                // Bez tych dwóch pól porównanie dwóch krzywych obok siebie
+                // wymaga wiedzy spoza pliku — czyli jest nieweryfikowalne.
                 "sygnaly": a.signals.file_name().map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default(),
                 "sygnaly_sciezka": a.signals.display().to_string(),
@@ -1984,9 +2192,42 @@ fn main() -> Result<()> {
         std::fs::write(a.out.join(format!("porownanie_{tag}.svg")), svg)?;
     }
 
+    let quick_observation = results
+        .iter()
+        .find_map(|(_, result)| result.approximation.as_ref())
+        .cloned();
+    let quick_observed_pct: Vec<f64> = results
+        .iter()
+        .filter_map(|(_, result)| result.approximation.as_ref().map(|info| info.observed_pct))
+        .collect();
+    let quick_observed_pct_min = quick_observed_pct
+        .iter()
+        .copied()
+        .reduce(f64::min);
+    let quick_observed_pct_max = quick_observed_pct
+        .iter()
+        .copied()
+        .reduce(f64::max);
+    let summary_json = if a.quick_tick_stride > 1 {
+        serde_json::json!({
+            "schema": "conduit.quick-sweep-results.v1",
+            "approximate": true,
+            "coronation_eligible": false,
+            "quick_tick_stride": a.quick_tick_stride,
+            "quick_backtest": quick_observation,
+            "observed_pct_min": quick_observed_pct_min,
+            "observed_pct_max": quick_observed_pct_max,
+            "warning": "APPROXIMATE SCREENING ONLY — rerun finalists with N=1",
+            "results": summary,
+        })
+    } else {
+        // Preserve the exact historical JSON shape byte-for-byte: a direct
+        // map name -> Metrics, with no quick wrapper or extra fields.
+        serde_json::to_value(&summary)?
+    };
     std::fs::write(
         a.out.join(format!("wyniki_{tag}.json")),
-        serde_json::to_string_pretty(&summary)?,
+        serde_json::to_string_pretty(&summary_json)?,
     )?;
 
     // Wynik cząstkowy MUSI się sam przedstawiać. Plik `wyniki_*.json` wygląda
@@ -2022,6 +2263,9 @@ fn main() -> Result<()> {
     }
 
     {
+        //  SITO BROKERA — patrz `odsiew_sita` (engine.rs). Linia istnieje po
+        //  to, zeby pytanie „czy `drop_unplaceable_levels` cokolwiek wycina"
+        //  nigdy wiecej nie bylo rozstrzygane rozumowaniem zamiast pomiarem.
         let (szczeble, koszyki) = conduit_core::odsiew_sita();
         eprintln!(
             "sito brokera: odsiano {szczeble} szczebli w {koszyki} koszykach (suma po wszystkich przebiegach)"
@@ -2254,7 +2498,7 @@ where
              okien dodatnich {:.1} % · najlepsze {} $ · NAJGORSZE {} $\n  \
              — po oknach Z HANDLEM ({} z {}): mediana {} $ · dodatnich {:.1} %\n    \
                (to jest mianownik, którego używa Metrics::win_days_pct — bez tego\n    \
-                nie da się porównać z bazową metodą liczenia)\n  \
+                nie da się porównać z bazą 1936 / 1178 / 2527)\n  \
              min. equity w najgorszym oknie {:.2} $ · najniższe w ogóle {:.2} $\n  \
              dni handlowych {} · {} okien · {:.1} s",
             zn(w.suma, 2),
@@ -2360,6 +2604,30 @@ fn score(m: &conduit_backtest::metrics::Metrics) -> f64 {
     let typowe_konto = ((kap + m.end_equity.max(kap)) * 0.5).max(kap);
     let realna_strata = (m.worst_day.min(0.0).abs()) / typowe_konto;
 
+    // 3a. POZIOM MARGINESU — ODLEGŁOŚĆ OD LIKWIDACJI, a nie od zera.
+    //
+    // # Dlaczego to musiało wejść do rankingu (07.08.2026)
+    //
+    // Symulator MIERZYŁ `min_margin_level` i liczniki ticków pod 200/150/100 %
+    // od dawna, `bt` je DRUKOWAŁ, a ta funkcja ich NIE CZYTAŁA. Skutek jest
+    // policzalny: HYPER-2 na korpusie Synergy (714 sygnałów, 23.06–07.08)
+    // robi +21 140 $ ze 300 $ i spędza przy tym **176 ticków poniżej 100 %
+    // poziomu marginesu**, przy dnie equity 119 $ i szczycie 11,45 lota.
+    // Broker wzywa przy 50 % i likwiduje przy 20 % — ten przebieg przeżył,
+    // ale ranking nie miał jak odróżnić go od takiego, który nigdy nie zszedł
+    // poniżej 800 %. Wygrywał, bo equity się odrobiło.
+    //
+    // `min_equity` tego nie zastępuje. Equity mówi, ile zostało; poziom
+    // marginesu mówi, ile zostało W STOSUNKU DO TEGO, CO TRZYMAMY OTWARTE —
+    // i tylko ta druga liczba decyduje, czy broker zamknie pozycje za nas.
+    // Konto z 5 000 $ equity i 4 800 $ marginesu jest w śmiertelnym
+    // niebezpieczeństwie; konto ze 150 $ equity i 20 $ marginesu nie jest.
+    //
+    // Kara jest MNOŻNIKIEM, nie odjęciem: przebieg ocierający się o stop-out
+    // ma spaść na dno rankingu niezależnie od tego, ile zarobił.
+    //
+    // `min_margin_level` bez ani jednej otwartej pozycji jest nieskończonością
+    // (patrz `metrics.rs:231`) — wtedy człon wynosi 1,0 i nic nie zmienia.
     let margines_ml = {
         let ml = m.min_margin_level;
         if !ml.is_finite() || ml <= 0.0 {
@@ -2391,6 +2659,7 @@ fn score(m: &conduit_backtest::metrics::Metrics) -> f64 {
     zwrot * margines * margines_ml * czas_w_ryzyku * stalosc / (1.0 + 3.0 * realna_strata)
 }
 
+/// Dokładny czas do rozdzielenia końca eksportu, danych i pomiaru.
 fn data_czas_ludzki(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|d| d.format("%d.%m.%Y %H:%M:%S").to_string())
@@ -2435,6 +2704,7 @@ mod testy_konfiguracji_walk_forward {
         sim_new_pending_sl_next_tick: false,
         sim_native_swap_cash_digits: None,
         live_telegram_ingress: false,
+        quick_tick_stride: 1,
         sim_price_digits: None,
         from: None,
         to: None,
@@ -2460,7 +2730,8 @@ mod testy_konfiguracji_walk_forward {
         formaty: Vec::new(),
         pulapy: Vec::new(),
         rachunek: None,
-        // ZIMNY START — domyślna ścieżka parytetu.
+        // ZIMNY START — domyślna ścieżki parytetu. Nie zmieniać bez przeliczenia
+        // 1936,47 / 1178,02 / 2527,07.
         rozgrzewka_h: 0,
         drabinka: None,
         drabinka_histereza_pct: 0.0,
@@ -2517,7 +2788,7 @@ mod testy_konfiguracji_walk_forward {
         let RunConfig {
             from,to,start_balance,sim_limit_price_improvement,
             sim_new_pending_sl_next_tick,sim_native_swap_cash_digits,
-            live_telegram_ingress,
+            live_telegram_ingress,quick_tick_stride,
             settings,formaty,pulapy,daily_reset,source_name,curve_interval_ms,
             rozgrzewka_h,drabinka,drabinka_histereza_pct,drabinka_kredyt,
             flat_na_dobie,journal_path,auto_ea,ea_konfig,
@@ -2528,6 +2799,7 @@ mod testy_konfiguracji_walk_forward {
             "sim_new_pending_sl_next_tick":sim_new_pending_sl_next_tick,
             "sim_native_swap_cash_digits":sim_native_swap_cash_digits,
             "live_telegram_ingress":live_telegram_ingress,
+            "quick_tick_stride":quick_tick_stride,
             "settings":settings,"formaty":legs(formaty),"pulapy":pulapy,
             "daily_reset":daily_reset,"source_name":source_name,
             "curve_interval_ms":curve_interval_ms,"rozgrzewka_h":rozgrzewka_h,
@@ -2671,7 +2943,8 @@ mod testy_konfiguracji_walk_forward {
         p.ea=None;p.formaty.clear();p.pulapy=PulapyGlobalne::default();
         let from=1_787_777_999_000;let to=1_787_796_001_017;
         let messages=[conduit_backtest::data::ReplayMessage {
-            kanal:"ATFX VIP SIGNALS".into(),ts:from,telegram_published_ts:None,msg_id:1,reply_to:None,edit_of:None,
+            kanal:"ATFX VIP SIGNALS".into(),ts:from,telegram_published_ts:None,
+            msg_id:1,reply_to:None,edit_of:None,
             text:"BUY LIMITS GOLD @ 4000/4000 AREA\nTP 4030\nTP 4060\nTP 4090\nSL 3980".into()
         }];
         let base=main_run_config(&a,&p,from,to,None);
@@ -2878,7 +3151,7 @@ mod testy_wynikow_czastkowych {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
 
-        let mut p = PisarzWynikowCzastkowych::nowy(&d);
+        let mut p = PisarzWynikowCzastkowych::nowy(&d, 1);
         p.wyzeruj().unwrap();
         let p = Arc::new(Mutex::new(p));
 
@@ -2914,6 +3187,30 @@ mod testy_wynikow_czastkowych {
         assert_eq!(m.stop_outs, 3);
         assert_eq!(m.trades, 13);
         assert!(!d.join("wyniki_czastkowe.json.tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn quick_partial_is_explicitly_wrapped_and_cannot_look_exact() {
+        let d = std::env::temp_dir().join(format!(
+            "conduit-bt-wyniki-quick-live-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+
+        let mut p = PisarzWynikowCzastkowych::nowy(&d, 20);
+        p.wyzeruj().unwrap();
+        p.dodaj("candidate".into(), Metrics::default()).unwrap();
+
+        let txt = std::fs::read_to_string(d.join("wyniki_czastkowe.json")).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        assert_eq!(doc["approximate"], true);
+        assert_eq!(doc["coronation_eligible"], false);
+        assert_eq!(doc["quick_tick_stride"], 20);
+        assert!(doc["results"]["candidate"].is_object());
+        assert!(doc.get("candidate").is_none());
 
         let _ = std::fs::remove_dir_all(&d);
     }

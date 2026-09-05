@@ -44,7 +44,11 @@ export const DEFAULT_SETTINGS: Settings = {
      ma dawac mozliwosc WYLACZENIA jednej strony, a nie zmieniac domyslne. */
   pending_relot_up: true,
   pending_relot_down: true,
-  
+  /* Cel wg PLANU (wagi RR + limit ryzyka koszyka) zamiast golego lota.
+     Domyslnie ON od 03.08 wieczorem (werdykt RELOT-NAPRAWA): cel z golego
+     lota pozwalal dokladkom ladowac PONAD capem ryzyka koszyka — cale
+     "2,6x przewagi" HYPER-X1 bylo obchodzeniem limitu. Musi zgadzac sie
+     z Settings::default() w crates/core/src/settings.rs (tam tez true). */
   pending_relot_wg_planu: true,
   pending_relot_reconcile_target: false,
   /* Prog kapitalu dla kierunku w gore; 0 = bez progu. */
@@ -84,6 +88,24 @@ export const DEFAULT_SETTINGS: Settings = {
   trail_runner_lock_pct: 50,
   trail_runner_gap: 8,
   trail_runner_tiers: "5:1,10:4,20:12,35:26,60:50,100:88",
+  /* Adaptacyjny trailing rynku — cała rodzina OFF = zachowanie historyczne. */
+  trail_adaptive_enabled: false,
+  trail_adaptive_runners_only: true,
+  trail_adaptive_window_s: 90,
+  trail_adaptive_min_samples: 8,
+  trail_adaptive_trend_er: 0.55,
+  trail_adaptive_reversal_er: 0.45,
+  trail_adaptive_trend_gap_mult: 1.6,
+  trail_adaptive_chop_gap_mult: 0.85,
+  trail_adaptive_reversal_gap_mult: 0.45,
+  trail_adaptive_fast_vol_s: 20,
+  trail_adaptive_slow_vol_s: 120,
+  trail_adaptive_vol_ratio: 1.8,
+  trail_adaptive_vol_favorable_mult: 1.25,
+  trail_adaptive_vol_adverse_mult: 0.65,
+  trail_adaptive_min_peak: 0,
+  trail_adaptive_min_gap: 0,
+  trail_adaptive_max_gap: 0,
   /* trailing S/R po strukturze 1M — wyłączony (kontrakt zera co do centa) */
   trail_sr_enabled: false,
   sr_warmup_exact_ticks: false,
@@ -233,7 +255,11 @@ export const DEFAULT_SETTINGS: Settings = {
   /* Ostrzezenie mailem dziala TEZ przy wylaczonym strazniku (0/0) — i wlasnie
      wtedy jest jedyna informacja, ze cos sie dzieje z kontem w nocy. */
   alert_dd_pct: 15,
-  
+  /* Bramka WIEKU sygnalu. Czyta ja `live.rs` (prog_wieku_sygnalu) — do
+     07.08.2026 klucza NIE BYLO w panelu, wiec dzialal na sztywno wpisany
+     w kod prog 5 minut, ktorego nie dalo sie ani zobaczyc, ani zmienic.
+     0 = bez bramki. Dotyczy WYLACZNIE wiadomosci OTWIERAJACYCH koszyk;
+     komunikaty zarzadzajace i edycje przechodza niezaleznie od wieku. */
   signal_max_age_min: 5,
   max_open_positions: 0,
   exposure_count_pendings: true,
@@ -269,7 +295,10 @@ export const DEFAULT_SETTINGS: Settings = {
   lot_min: 0.01,
   lot_max: 100,
 
-  
+  /* --- kredyt bonusowy ---
+     WYLACZONE i na AUTOMACIE: przy `false` podstawa lota to pelne saldo,
+     czyli zachowanie sprzed 03.08.2026 co do centa. Zero w `kredyt_reczny`
+     znaczy AUTOMAT (bierz z terminala), a NIE „kredytu nie ma". */
   odlicz_kredyt: false,
   credit_balance_separate: false,
   kredyt_reczny: 0,
@@ -304,9 +333,10 @@ export const DEFAULT_SETTINGS: Settings = {
   sl_hit_mode: "cancel_pendings",
   honor_cancel: true,
   honor_close_all: true,
-  
+  /* W33: zasieg CLOSE ALL. Global = zachowanie sprzed 24.08.2026 co do centa. */
   close_all_scope: "Global",
-  
+  /* W31b: komenda "Take partials" jest dzis tylko informacja (~-62 $ na oknie
+     17-24.08). Kontrakt zera: os wylaczona, transza 0 %. */
   partials_wykonuj: false,
   partials_pct: 0,
   honor_market_open: false,
@@ -333,7 +363,7 @@ export const DEFAULT_SETTINGS: Settings = {
   bank_all_at_stage: 0,
   /* --- Pakiet E: statystyki (0 = tylko dokładne zero jest remisem) --- */
   stat_be_prog_usd: 0,
-  
+  /* --- Pakiet F: błędy z żywego bota (domyślne = kontrakt parytetu) --- */
   reply_veto: false,
   risk_free_runner_target: "last",
   risk_free_trail: true,
@@ -342,7 +372,8 @@ export const DEFAULT_SETTINGS: Settings = {
 
   /* --- stopy --- */
   be_offset: 0,
-  
+  /* W31a: komenda "set BE" kryje takze pozycje wypelnione PO niej (~-99 $
+     brutto na oknie 17-24.08). Kontrakt zera: wylaczone. */
   be_covers_late_fills: false,
   be_never_loosen: false,
   sltp_retry_s: 3,
@@ -383,7 +414,10 @@ export const DEFAULT_SETTINGS: Settings = {
   mt5_restart_after: 1,
   mt5_health_interval_s: 5,
 
-  
+  /* --- polaczenie z terminalem (most `mt5_sidecar.py`) ---
+     Te cztery pola decyduja, NA CZYM bot handluje. Do niedawna dalo sie je
+     ustawic tylko recznie w settings.json, co na obcym VPS-ie bylo pulapka:
+     broker nazywa zloto "XAUUSD.m", a Python nie stoi w PATH. */
   mt5_symbol: "XAUUSD",
   // Runtime connection policy, not a strategy knob. OFF preserves fixed login.
   mt5_follow_terminal_account: false,
@@ -426,12 +460,18 @@ export const DEFAULT_SETTINGS: Settings = {
     signal_formats: true,
     backup_memory: true,
     poll_interval: true,
-    
+    /* Czas petli w ms, pisany przy KAZDYM obrocie petli. Zalewa scalony plik
+       dziesiatkami tysiecy linii bez wartosci diagnostycznej i topi w nich
+       to, po co ktokolwiek otwiera alllogs.txt. Domyslnie POZA scaleniem. */
     update_performance: false,
     price_log: true,
     session_string: false,
     smtp: false,
-    
+    /* --- ZRODLA PLIKOWE (04.08.2026) ---
+       Domyslnie WSZYSTKIE wlaczone: „alllogs" ma znaczyc all logs. Backend
+       traktuje brak klucza jako TAK (poza wrazliwymi), wiec starsze
+       `settings.json` bez tych pol tez dostanie komplet — aktualizacja bota
+       nie ma prawa po cichu wyciac zrodla ze zrzutu. */
     journal: true,
     kronika: true,
     wiadomosci: true,
@@ -462,7 +502,10 @@ export const DEFAULT_SETTINGS: Settings = {
      wazy ulamek tego, co zdarzenia silnika, a jest JEDYNA kopia tresci kanalu
      (eksport z Telegrama zwija edycje i gubi wiadomosci skasowane). */
   archive_retention_days: 365,
-  
+  /* ===== RISK FREE JAKO REGULA (RDZEN 29.07) =====
+     Automat: koszyk sam sie uwalnia po osiagnieciu progu zysku, bez czekania
+     na komunikat z kanalu. Domyslnie WYLACZONE — wlaczenie zmienia strategie,
+     wiec musi byc swiadoma decyzja, a nie skutek aktualizacji. */
   riskfree_enabled: false,
   riskfree_trigger_usd: 0,
   riskfree_trigger_r: 0,
@@ -477,14 +520,23 @@ export const DEFAULT_SETTINGS: Settings = {
   runner_max_hold_bez_reguly: false,
   basket_max_age_min: 0,
 
-  
-  
+  /* MODEL KOSZTOW BROKERA. Parametry swapu i poslizgu sa konfigurowalne.
+     Wartosci referencyjne nie zastepuja aktualnej specyfikacji symbolu
+     i pomiarow wykonania na rachunku uzytkownika. */
+  /* TRUE, bo TAKA JEST DOMYSLNA W RDZENIU (`settings.rs`) — panel nie ma
+     prawa po cichu zmieniac zachowania silnika inna wartoscia domyslna.
+     Zalecany tryb to `false` (model ROWNOLEGLE z regulami), dopoki model
+     nie bije presetow w dolarach — ale to jest decyzja uzytkownika,
+     podjeta w panelu, a nie skutek rozjazdu dwoch plikow. */
   ai_replaces_management: true,
   swap_enabled: true,
   swap_long_points: -75.82,
   swap_short_points: 27.41,
   swap_point_value: 1.0,
-  
+  /* 3 = CZWARTEK w konwencji „doba wejścia" (0 = pon.). Do 18.08.2026 stało
+     tu 2 — wartość sprzed poprawki z 29.07, której silnik już nie ma. Panel
+     wysyłał ją przy każdym zapisie ustawień, czyli po cichu COFAŁ silnikowi
+     dobę potrójnego swapu o jeden dzień. */
   swap_rollover_weekday: 3,
   swap_rollover_mult: 3,
   /* --- Pakiet D1/D1b: wyłączone = liczby zgodne z archiwum --- */
@@ -498,14 +550,15 @@ export const DEFAULT_SETTINGS: Settings = {
   stop_out_level_pct: 20,
   margin_call_level_pct: 50,
   entry_depth_curve: 1.0,
-  /* W30: opcjonalna warstwa allowance przed strefą. Dwa pola, bo kwota
+  /* W30: warstwa allowance 1 $ przed strefa (kanon Tylera). Dwa pola, bo kwota
      mowi GDZIE, a jednostki ILE; zero w ktorymkolwiek = warstwy nie ma. */
   entry_allowance_usd: 0,
   entry_allowance_units: 0,
 
-  /* Filtr trendu wyższego rzędu. Domyślnie WYŁĄCZONY, a tryb domyślny to
-     `Shrink`, nie `Block`: twarda blokada przeciw dominującemu kierunkowi
-     sygnałów może usunąć większość handlu zamiast zmniejszyć ekspozycję. */
+  /* Filtr trendu wyzszego rzedu. Domyslnie WYLACZONY, a tryb domyslny to
+     `Shrink`, nie `Block`: w kanale, gdzie 93 % sygnalow to BUY, twarda
+     blokada przy spadajacym rynku wycina prawie wszystko — wtedy nie mierzy
+     sie juz filtra, tylko brak handlu. */
   trend_filter_enabled: false,
   trend_filter_window_h: 24,
   trend_filter_drop_pct: 0,

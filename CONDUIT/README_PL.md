@@ -14,7 +14,7 @@ wyników sweepów ani binarek.
 `config/presets/` zawiera **109 publicznych presetów** zebranych w toku rozwoju.
 `GOD-X7.json` jest aktualnie rekomendowanym punktem odniesienia dla formatu
 Synergy, ale nie jest osobnym botem i nie wyczerpuje możliwości projektu. Rdzeń CONDUIT ma
-**498 osi** konfiguracyjnych: wejścia i siatki, sizing, limity ekspozycji,
+**515 osi** konfiguracyjnych: wejścia i siatki, sizing, limity ekspozycji,
 TP/SL, partiale, break-even/risk-free, runnery, trailing, re-entry, filtry
 reżimu i sesji, koszty brokera, zachowanie zleceń pending, dziennik i wiele
 kontraktów zgodności live/backtest. Oś wpływa na wynik tylko wtedy, gdy jest
@@ -160,7 +160,7 @@ Preset jest zwykłym JSON-em z wartościami osi. Najbezpieczniejszy proces:
 
 Żaden z dołączonych presetów nie jest obietnicą optimum dla innego brokera,
 miesiąca, formatu lub ryzyka. GOD-X7 jest rekomendacją bieżącej wersji, nie
-gwarancją wyniku. 498 osi tworzy bardzo dużą przestrzeń interakcji; wynik
+gwarancją wyniku. 515 osi tworzy bardzo dużą przestrzeń interakcji; wynik
 jednego sweepu może być nadstrojony.
 
 ## Bezpieczeństwo: DEMO → REAL

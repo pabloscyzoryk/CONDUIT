@@ -3,8 +3,8 @@
   "self_reference": "SOURCE_MANIFEST.json is deliberately excluded; hash the final manifest separately.",
   "source_only": true,
   "totals": {
-    "files_excluding_manifest": 499,
-    "bytes_excluding_manifest": 10691097,
+    "files_excluding_manifest": 503,
+    "bytes_excluding_manifest": 10561891,
     "public_preset_json_files": 109
   },
   "privacy_audit": {
@@ -15,33 +15,33 @@
   "files": [
     {
       "path": ".gitignore",
-      "bytes": 1285,
-      "sha256": "7346ca8d5d088fe8aff72e831423bf730028a25d28fe196ca749a7816e8611d2"
+      "bytes": 1292,
+      "sha256": "1a5aec595d50919ceeb51fd17b7957f13368fb54645ca3a9c5c361d6b3111c23"
     },
     {
       "path": "PRIVACY_AUDIT.md",
-      "bytes": 3094,
-      "sha256": "a63c9c2f55ecb03282b14bb77c6024fc02fb65e8f77f70be7670f1de1f19c11a"
+      "bytes": 3161,
+      "sha256": "2d1c2d68c0fa0a329c03e47d7c3e338a7ca247731a8d2562866a064e4e3a9a05"
     },
     {
       "path": "README.md",
       "bytes": 1116,
-      "sha256": "e5dcea77629399f4bd6b0accbbf91f2e8c36c1438208dcf613c66b4623303094"
+      "sha256": "fa99c77bd6c866eba885a4866ba3918fe5fb4b7c0b527e0c995e68c44a53ba9a"
     },
     {
       "path": "README_EN.md",
       "bytes": 10436,
-      "sha256": "c5bd62d3a18d552ae549eba780cba59cbe1a7c6e67b9a62cc823d88da16f842d"
+      "sha256": "b9489e417da664bd6b113127713e160541b5604b951e71fee8eabd28063bd2ed"
     },
     {
       "path": "README_PL.md",
       "bytes": 11361,
-      "sha256": "fc7e7b85039815551f1589557d015465a475bf52d8361318d5848fa80701f2fa"
+      "sha256": "c867e7de03c0b34dfe7c1e023a891470506bc8ae60f475ac38240b87823655ad"
     },
     {
       "path": "SANITIZATION_REPORT.md",
-      "bytes": 3650,
-      "sha256": "968cb352737e53370e614bb06c6d27791316a363cdeed199b55eaa6eb4717aca"
+      "bytes": 3864,
+      "sha256": "988d634fc32663852f86781e4b96a8c3f9039d020b86be8f2199c25fac2fd679"
     },
     {
       "path": "config/examples/README.md",
@@ -649,6 +649,26 @@
       "sha256": "cac8192b6f448912b961a6c0c594c75b73eb99665488f6b370a563dbbc14d378"
     },
     {
+      "path": "narzedzia/quick_backtest/README.md",
+      "bytes": 965,
+      "sha256": "1c195828f3043b1ace46ee246f7a148c71783fc64d974bcb585deac3833075de"
+    },
+    {
+      "path": "narzedzia/quick_backtest/finalize_quick_sweep.py",
+      "bytes": 5808,
+      "sha256": "6469145312250c9547ba2ee802048323f604294e7764eef1da40c9220bc714ea"
+    },
+    {
+      "path": "narzedzia/quick_backtest/prepare_quick_sweep.py",
+      "bytes": 18221,
+      "sha256": "71b086043010dd21dccf218a411dc2041f142cc5d524fd17e8cb2b180240c720"
+    },
+    {
+      "path": "narzedzia/quick_backtest/run_quick_sweep.py",
+      "bytes": 22327,
+      "sha256": "5532ddd6f00fd62cef339d6651c1b06590892ef88b5a67df773b15de4522bb72"
+    },
+    {
       "path": "package-lock.json",
       "bytes": 60775,
       "sha256": "58868b078962e27ab1055174689f79108a7d043368eb24f425a2d4e0d374b738"
@@ -875,8 +895,8 @@
     },
     {
       "path": "rust/crates/backtest/src/bin/bt.rs",
-      "bytes": 127645,
-      "sha256": "b2e8fae327636af0fc177b034758ba55f71cdf82a7827f1268c6f80b2cbf2587"
+      "bytes": 143972,
+      "sha256": "ff7d515131d4756854282c9b2c40090d8de300a8691a0112d0de01b0ada3599d"
     },
     {
       "path": "rust/crates/backtest/src/bin/inwsyg.rs",
@@ -925,8 +945,8 @@
     },
     {
       "path": "rust/crates/backtest/src/data.rs",
-      "bytes": 36669,
-      "sha256": "6f320bcaf44dee8a2b4b3efa44d1e211409605e90e5b6a5e20bfd5d3abd7a384"
+      "bytes": 52371,
+      "sha256": "39a66f08695f77d50001f47830e80736bc880dfe5853fc953405b920e55b67bd"
     },
     {
       "path": "rust/crates/backtest/src/journal_dump.rs",
@@ -965,8 +985,8 @@
     },
     {
       "path": "rust/crates/backtest/src/runner.rs",
-      "bytes": 125746,
-      "sha256": "dbe19c43a5277f11891e1f0da71a218a6c8f19cebf111dae644323135377a342"
+      "bytes": 152080,
+      "sha256": "c93cc5eb166ddaebf0eea62be11798210d808060a52ded77d6da2e7c01182cc9"
     },
     {
       "path": "rust/crates/backtest/src/sim.rs",
@@ -1170,8 +1190,8 @@
     },
     {
       "path": "rust/crates/core/src/engine.rs",
-      "bytes": 759643,
-      "sha256": "1c6fae28144dbac94b1ee86f1be6e53e34fb12de636b4b14c2ddf8b7e8a65720"
+      "bytes": 566545,
+      "sha256": "b688e439f1cc83dcc7ed0797a36b867c0fadb68c805410453f646f37b78e1071"
     },
     {
       "path": "rust/crates/core/src/entry_edit.rs",
@@ -1240,8 +1260,8 @@
     },
     {
       "path": "rust/crates/core/src/settings.rs",
-      "bytes": 240359,
-      "sha256": "5e963aeefcb2ee4f98f69d8fcaa179adb77112168148cf4c60c7645d1aa4f19d"
+      "bytes": 148141,
+      "sha256": "dba17547f97c05af8934c71d192e14762f84b137f43c64f065eb9af7d8c2f4f0"
     },
     {
       "path": "rust/crates/core/src/sr_state.rs",
@@ -1276,7 +1296,7 @@
     {
       "path": "rust/crates/core/src/wielosilnik.rs",
       "bytes": 25550,
-      "sha256": "be06af8d823aff94995e373d032897d22ba07c3ec0872609bbe5f858cd26816f"
+      "sha256": "46d0a4804d5477a7a04f8dfcba95b33f20e4ed67d7c9b3a6edff7c9a7df7f27f"
     },
     {
       "path": "rust/crates/core/tests/ea_core.rs",
@@ -1335,8 +1355,8 @@
     },
     {
       "path": "rust/crates/monitor/src/bin/postep.rs",
-      "bytes": 114462,
-      "sha256": "6f5a49cfc87e1802594b99ded218b5815306e4af0ee1ee31aecae197a456d71c"
+      "bytes": 116308,
+      "sha256": "8268ed6ab274d49d4c229fa1c561e8372b7b2efb9096163ddb8d979b55edd0a7"
     },
     {
       "path": "rust/crates/monitor/src/kolejka.rs",
@@ -1350,8 +1370,8 @@
     },
     {
       "path": "rust/crates/monitor/src/przesiane.rs",
-      "bytes": 20958,
-      "sha256": "f5aa0362292be4d509c49af7b01ebabdba4f71438932673e8dc6c8264f8ed987"
+      "bytes": 25198,
+      "sha256": "867bfe31618fb55e45a332d31d940fa070b46eb4abbb939ee94be40c6db75e84"
     },
     {
       "path": "rust/crates/monitor/src/zbiorczy.rs",
@@ -1810,8 +1830,8 @@
     },
     {
       "path": "rust/crates/server/src/settings_map.rs",
-      "bytes": 167944,
-      "sha256": "f0e71c4bbe76df11ab36878ccf822186994bc84526dd426bd1294a16259909cf"
+      "bytes": 197848,
+      "sha256": "418de8b453113f4aa234adb9a301238142e28806d9dd7a40c6c91b8b477ff16e"
     },
     {
       "path": "rust/crates/server/src/state.rs",
@@ -2105,8 +2125,8 @@
     },
     {
       "path": "src/data/defaultSettings.ts",
-      "bytes": 21514,
-      "sha256": "77a00ac029801385d1141031f0e2ed3a1a5b37b6847ac3b69caf4f913e40f103"
+      "bytes": 26027,
+      "sha256": "d34dc0737ccacff16cd525d51f677f4c1999f20fafdced168021667cd3cb0143"
     },
     {
       "path": "src/data/formaty.ts",
@@ -2120,8 +2140,8 @@
     },
     {
       "path": "src/data/settingsSchema.ts",
-      "bytes": 152077,
-      "sha256": "acb8daa3362b1905cced2ec0d081763d440c85ff7f6a1129266f5178deb8b768"
+      "bytes": 155312,
+      "sha256": "b28d7a5f36a149cdca7fadc7530fe4f1f4b6274e232b00c3ff1e064d19a0755c"
     },
     {
       "path": "src/data/symbols.ts",
@@ -2175,8 +2195,8 @@
     },
     {
       "path": "src/i18n/settingsSchema.en.ts",
-      "bytes": 105607,
-      "sha256": "0ea4c03d5983d1dfad76039e836fced77a7349a9179cfa22dfdd9f6b4418a06e"
+      "bytes": 107323,
+      "sha256": "0844d2d965d95aaed62d52ca5259a013e0947741731160c703124423347cd5f0"
     },
     {
       "path": "src/i18n/silnik.ts",
@@ -2290,8 +2310,8 @@
     },
     {
       "path": "src/types/index.ts",
-      "bytes": 41837,
-      "sha256": "30c0d4148d38e7a40f4195c4043282164525c970c280aced0d3e8f838ddfaff4"
+      "bytes": 46521,
+      "sha256": "f916e584efcfa2070457119b765c57ecb009a281aba4795ba1e44c0681123d39"
     },
     {
       "path": "src/types/kronika.ts",

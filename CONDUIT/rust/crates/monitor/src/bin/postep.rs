@@ -1184,8 +1184,18 @@ impl Apka {
                 } else {
                     String::new()
                 };
+                let tryb = if dane.approximate {
+                    format!(
+                        "APPROX N={} · NIE DO KORONACJI · ",
+                        dane.quick_tick_stride
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "?".into())
+                    )
+                } else {
+                    String::new()
+                };
                 let naglowek = format!(
-                    "przesiane presety · {}   ·   czoło: {}  {}{}",
+                    "{tryb}przesiane presety · {}   ·   czoło: {}  {}{}",
                     ile,
                     dane.wyniki[czolo].nazwa,
                     dane.wyniki[czolo].napis(kryt),
@@ -1217,6 +1227,25 @@ impl Apka {
                 }
 
                 ui.add_space(4.0);
+                if dane.approximate {
+                    let n = dane
+                        .quick_tick_stride
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".into());
+                    let warning = dane.warning.as_deref().unwrap_or(
+                        "Wynik przybliżony: finalista musi przejść dokładny backtest N=1.",
+                    );
+                    etykieta(
+                        ui,
+                        &format!(
+                            "APPROX N={n} · coronation_eligible={} · {warning}",
+                            dane.coronation_eligible
+                        ),
+                        CZERWIEN,
+                        11.0,
+                    );
+                    ui.add_space(4.0);
+                }
 
                 // ---------- rząd sterujący ----------
                 //
@@ -1239,7 +1268,11 @@ impl Apka {
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("NAJLEPSZY PRESET").size(11.5).color(TLO).strong(),
+                                egui::RichText::new(if dane.approximate {
+                                    "CZOŁO SITA (APPROX)"
+                                } else {
+                                    "NAJLEPSZY PRESET"
+                                }).size(11.5).color(TLO).strong(),
                             )
                             .fill(ZIELEN),
                         )
@@ -2432,6 +2465,11 @@ impl eframe::App for Apka {
                 }
             });
 
+        // ---------- stopka: co robia klawisze ----------
+        //
+        //  Funkcja, o ktorej nie wiadomo, ze istnieje, jest funkcja, ktorej
+        //  nie ma. Przewijanie klawiatura dodano 26.08.2026 i bez tej linijki
+        //  nikt by go nie znalazl — okno nie ma menu ani pomocy.
         egui::Panel::bottom(egui::Id::new("stopka-klawisze"))
             .frame(
                 egui::Frame::default()
@@ -2701,6 +2739,8 @@ mod testy {
         assert!(t.contains("≥1m57"), "dolna granica musi być oznaczona: {t}");
     }
 
+    /// Brak skali to „bez skali", a nie zero procent, i nie ma wtedy nitki —
+    /// pasek narysowany na zero udawałby pomiar, którego nie ma.
     #[test]
     fn brak_skali_nie_udaje_zera() {
         let z = m::zbiorczy::Zbiorczy {

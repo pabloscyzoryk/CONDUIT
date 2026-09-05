@@ -5,7 +5,10 @@
    ============================================================ */
 
 /* ---------------- TRYBY PRACY ---------------- */
-
+/* AUTO-EA (24.08.2026): „potwór" — kierunek i punkty szczególne z sygnałów
+   traderów + zarządzanie klasy EA. DZIŚ zachowuje się identycznie jak AUTO
+   (kontrakt zera); różni go wyłącznie flaga silnika `tryb_auto_ea`, którą
+   będą konsultować nadchodzące osie warstwy EA (trailing S/R, harvest). */
 export type TradingMode = "MANUAL" | "AUTO" | "AUTO-EA" | "AI";
 
 export type ThemeName = "dark" | "light";
@@ -434,7 +437,10 @@ export type LogCategory =
   | "price_log"
   | "session_string"
   | "smtp"
-  
+  /* --- ZRODLA PLIKOWE (dolozone 04.08.2026) ---
+     Do tej pory `alllogs` bral wylacznie migawke procesu, dziennik decyzji
+     i log panelu. Wszystko ponizej bot produkuje na dysku, a scalanie tego
+     nie widzialo — w tym KRONIKA, zgloszona przez uzytkownika wprost. */
   /** logs/journal/*.jsonl — rozumowanie silnika */
   | "journal"
   /** logs/journal/*.log — lustro tekstowe tego samego (duplikat tresci) */
@@ -478,7 +484,19 @@ export interface Stats {
   creditSource: "terminal" | "reczny" | "off";
   /** Podstawa lota wg Balance/Equity/MinOfBoth i kontraktu oddzielnego kredytu. */
   lotBase: number;
-  
+  /** Loty per noga lancucha — kafel LOT AUTO sumuje, dymek rozbija.
+      wolumenWykonany = suma wolumenu ZAMKNIETYCH tej nogi w pamieci panelu
+      (mianownik "% dynamicznego"). zamrozona = tylko zarzadza, bez sumy.
+      handluje = bierze NOWE sygnaly (falsz takze dla silnika bez formatu).
+      zPliku = pola handlu z PLIKU presetu (nie z dokumentu panelu).
+      pulapLancucha = `max_lotow` lancucha; to BRAMKA WEJSCIA, nie sufit
+      wolumenu pojedynczego zlecenia — patrz `ui::LotNogi` po stronie Rusta.
+
+      UWAGA NA `lot` (sprawa z 18.08.2026): to jest wolumen JEDNEGO ZLECENIA,
+      nie ekspozycja koszyka. Jeden sygnal stawia `poziomyWejscia` szczebli
+      i KAZDY dostaje wlasny lot, a `lotMax` tnie POJEDYNCZE zlecenie — wiec
+      koszyk siega `poziomyWejscia` x `lotMax`. Ekspozycje mowi `lotKoszyka`;
+      panel ma podpisywac slowami „tyle wejdzie na rachunek" WYLACZNIE ja. */
   lotNogi: {
     format: string;
     preset: string;
@@ -494,7 +512,11 @@ export interface Stats {
     /** Ile szczebli stawia jeden sygnal tej nogi (`entry_units` po bramkach). */
     poziomyWejscia?: number;
     pulapLancucha: number;
-    
+    /* MIEJSCE NOGI W DRABINCE (od 05.08.2026).
+       stan: "aktywna" | "kolejka" | "nieaktywna".
+       powod: kod, nie zdanie — tlumaczy panel ("brakZrodla", "zamrozona",
+       "kolejka", "minieta", "brakFormatu"); pusty = noga gra.
+       prog: prog BALANCE szczebla; -1 = laniuch spoza drabinki. */
     stan?: string;
     powod?: string;
     lancuch?: string;
@@ -580,16 +602,34 @@ export interface Settings {
   runner_trail: boolean;
   runner_trail_start: number;
   runner_trail_gap: number;
-  trail_mode: "gap" | "lock_pct" | "tiered";
+  trail_mode: "gap" | "lock_pct" | "tiered" | "atr" | "chandelier";
   trail_lock_pct: number;
   trail_tiers: string;
   trail_split: boolean;
   trail_runners_n: number;
-  trail_runner_mode: "gap" | "lock_pct" | "tiered";
+  trail_runner_mode: "gap" | "lock_pct" | "tiered" | "atr" | "chandelier";
   trail_runner_start: number;
   trail_runner_lock_pct: number;
   trail_runner_gap: number;
   trail_runner_tiers: string;
+  /** Causal market-quality adaptation for Gap/ATR/Chandelier trailing. */
+  trail_adaptive_enabled: boolean;
+  trail_adaptive_runners_only: boolean;
+  trail_adaptive_window_s: number;
+  trail_adaptive_min_samples: number;
+  trail_adaptive_trend_er: number;
+  trail_adaptive_reversal_er: number;
+  trail_adaptive_trend_gap_mult: number;
+  trail_adaptive_chop_gap_mult: number;
+  trail_adaptive_reversal_gap_mult: number;
+  trail_adaptive_fast_vol_s: number;
+  trail_adaptive_slow_vol_s: number;
+  trail_adaptive_vol_ratio: number;
+  trail_adaptive_vol_favorable_mult: number;
+  trail_adaptive_vol_adverse_mult: number;
+  trail_adaptive_min_peak: number;
+  trail_adaptive_min_gap: number;
+  trail_adaptive_max_gap: number;
   /* trailing S/R po strukturze 1M (OS_SR_SPEC.md) — wartości w konwencji
      rdzenia (bez tłumaczenia w preset_to_ui) */
   trail_sr_enabled: boolean;
@@ -833,7 +873,7 @@ export interface Settings {
   sl_hit_mode: "cancel_pendings" | "close_all" | "verify" | "ignore";
   honor_cancel: boolean;
   honor_close_all: boolean;
-  
+  /** W33: zasieg komendy CLOSE ALL. Global = zachowanie sprzed 24.08.2026. */
   close_all_scope: "Global" | "Basket";
   /** W31b: czy wykonywac komende "Take partials" z kanalu (dzis tylko Info). */
   partials_wykonuj: boolean;
@@ -862,9 +902,9 @@ export interface Settings {
   market_unfilled_cancel_stage: number;
   pending_cancel_on_riskfree: boolean;
   bank_all_at_stage: number;
-  
+  /* --- Pakiet E: statystyki (oś POMIARU, nie handlu) --- */
   stat_be_prog_usd: number;
-  
+  /* --- Pakiet F: błędy złapane na żywym bocie --- */
   reply_veto: boolean;
   risk_free_runner_target: "last" | "keep" | "next" | "none";
   risk_free_trail: boolean;
@@ -922,7 +962,10 @@ export interface Settings {
   mt5_magic: number;
   mt5_python: string;
   mt5_deviation_points: number;
-  
+  /* Tozsamosc rachunku: bot ODMAWIA handlu, gdy terminal jest na innym
+     koncie niz mt5_login (0 = brak weryfikacji, ZOLTY stan wskaznika).
+     04.08.2026: bot cala noc gral na Vantage, gdy uzytkownik myslal,
+     ze na PUPrime — zielona kropka bez tozsamosci to polowa informacji. */
   mt5_login: number;
   mt5_server: string;
   /* SKRZYNKA PODAWCZA hasla rachunku: serwer przenosi wartosc do
@@ -933,7 +976,9 @@ export interface Settings {
      ciszy nie przebudowuje mostu, gdy rynek po prostu spi. */
   przerwa_dobowa_od_h: number;
   przerwa_dobowa_do_h: number;
-  
+  /* Katalog docelowy scalania alllogs (sciezka SERWERA; puste = katalog
+     logs bota). Wybierany modalem /api/fs/dirs, walidowany plikiem-sonda
+     przy zapisie. */
   alllogs_dir: string;
   /* PULS: mail "zyje" co N godzin (0 = wylaczony). Cisza bez pulsu
      znaczy smierc bota, nie spokojna noc. */
@@ -972,7 +1017,9 @@ export interface Settings {
   /** Ile dob trzymac wlasne archiwum wiadomosci (logs/wiadomosci/*.jsonl). */
   archive_retention_days: number;
 
-  
+  /* ===== RISK FREE JAKO REGULA (RDZEN, 29.07) =====
+     Automat, nie reakcja na komunikat z kanalu. Wszystko domyslnie
+     neutralne, wiec wlaczenie jest swiadoma decyzja. */
   riskfree_enabled: boolean;
   riskfree_trigger_usd: number;
   riskfree_trigger_r: number;
@@ -1126,7 +1173,14 @@ export interface Preset {
   tagline: string;
   badge?: string;
   family: string;
-  
+  /**
+   * FORMAT SYGNALOW, DLA KTOREGO TEN PRESET POWSTAL.
+   *
+   * Brak pola = `"ATFX"` — dokladnie jak `#[serde(default)]` po stronie Rusta.
+   * Wszystkie presety sprzed 03.08.2026 powstaly pod ATFX i tylko pod niego
+   * byly mierzone, wiec to jest wlasciwa domyslnosc, a nie wygodny skrot.
+   * Czytaj przez `formatPresetu()` z `data/presets.ts`, nie wprost.
+   */
   format?: string;
   /** metryki z backtestu (do karty presetu) */
   metrics: {
@@ -1135,7 +1189,8 @@ export interface Preset {
     maxDd: number;
     profitFactor: number;
     worstDay: number;
-    
+    /** Ocena czterotrybowa. Brak trybu = NIE ZMIERZONO — panel ma to napisac
+     *  wprost, a nie podstawiac zera. */
     tryby?: Partial<Record<TrybOceny, WynikTrybu>>;
   };
   risk: "low" | "medium" | "high" | "extreme";
@@ -1161,7 +1216,10 @@ export interface SimInstance {
   id: string;
   name: string;
   preset: string;
-  
+  /** WŁASNY tryb handlu instancji (AUTO / AUTO-EA / AI). Brak pola =
+   *  dziedziczenie trybu głównego bota — kontrakt zera: każda instancja
+   *  sprzed 24.08 zachowuje się jak dotąd. MANUAL w symulacji nie istnieje
+   *  (nie ma komu klikać „Wykonaj"), serwer go odrzuca. */
   mode?: TradingMode;
   balance: number;
   startBalance: number;
@@ -1272,7 +1330,12 @@ export interface ConnectionState {
     leverage: number;
     type: "DEMO" | "REAL";
   };
-  
+  /* CZY KONTO TERMINALA JEST TYM, KTOREGO OCZEKUJE UZYTKOWNIK.
+     "ok" = numer rachunku ustawiony i zgodny; "brak" = pole puste, bot
+     przyjmuje kazde konto (ZOLTY stan); "rozjazd" = terminal na INNYM koncie
+     (CZERWONY, handel zablokowany); "" = MT5 niepodlaczony. Zielona kropka
+     bez tozsamosci to polowa informacji — 04.08.2026 bot cala noc pokazywal
+     "MT5 OK" grajac na innym brokerze, niz uzytkownik myslal. */
   accountVerified?: "" | "ok" | "brak" | "rozjazd";
   /** Opaque broker binding generation, never reused after reconnect/switch. */
   accountSession?: string;
@@ -1298,7 +1361,7 @@ export interface ConnectionState {
 }
 
 /* ---------------- TOASTY ---------------- */
-
+/** Klikalny przycisk w chmurce — np. „Pokaz plik" po scaleniu alllogs. */
 export interface ToastAction {
   label: string;
   onClick: () => void;

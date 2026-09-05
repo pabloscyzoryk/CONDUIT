@@ -14,6 +14,9 @@ runs it. It is not a copy of a working private installation.
   preset, but it is one selectable configuration among many.
 - Self-contained synthetic test fixtures needed to test parsing, routing,
   account-following and execution semantics.
+- Source for the adaptive trailing family and approximate quick-backtest
+  screening/monitoring workflow. Approximate results are explicitly ineligible
+  for preset coronation until rerun with exact tick stride 1.
 
 ## Excluded or neutralized
 

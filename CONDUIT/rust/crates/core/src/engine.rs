@@ -1,9 +1,3 @@
-//! Silnik: cała logika decyzyjna bota.
-//!
-//! Determinizm jest wymuszony strukturalnie:
-//!  * czas przychodzi wyłącznie w zdarzeniu (`Ts`), nigdzie nie ma zegara,
-//!  * broker jest cechą — backtest i live idą tą samą ścieżką,
-//!  * brak nieograniczonych cache'ów i stanu globalnego.
 
 use crate::broker::*;
 use crate::journal::{
@@ -24,8 +18,10 @@ pub use entry_edit::EntryEditOutcome;
 
 #[path = "strategy_continuation.rs"]
 mod strategy_continuation;
-pub use strategy_continuation::{EngineContinuationV1, ContinuationOrigin,
-    ContinuationReviewScope, ContinuationReview, ContinuationImportReport};
+pub use strategy_continuation::{
+    ContinuationImportReport, ContinuationOrigin, ContinuationReview, ContinuationReviewScope,
+    EngineContinuationV1,
+};
 
 #[path = "deferred_entry.rs"]
 mod deferred_entry;
@@ -35,38 +31,56 @@ pub use deferred_entry::{DeferredEntryState, DeferredEntryStatus};
 mod sr_state;
 #[path = "sr_warmup.rs"]
 mod sr_warmup;
-pub use sr_warmup::{SrWarmupContextV2, SrWarmupMinuteV2, SrWarmupSnapshotV2,
-    SrWarmupSourceV2, SrWarmupAppliedV2};
+pub use sr_warmup::{
+    SrWarmupAppliedV2, SrWarmupContextV2, SrWarmupMinuteV2, SrWarmupSnapshotV2, SrWarmupSourceV2,
+};
 
 use conduit_mozg_cien::aktuator as cakt;
 use conduit_mozg_cien::diag as cien;
 use conduit_mozg_cien::zrodlo as czr;
 
-/// Wolumen dociągnięty do kroku 0.01 lota.
-///
-/// Broker i tak zaokrągli — lepiej, żeby silnik liczył ryzyko z tej samej
-/// liczby, którą naprawdę wyśle, niż z ułamka, którego nie da się kupić.
 #[inline]
 fn round_lot(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
-// ============================================================
-//  DIAGNOSTYKA KRAWĘDZI STREFY — ZA ZMIENNĄ ŚRODOWISKOWĄ
-// ============================================================
-//
-// `KRAWEDZ_DIAG=<plik>` włącza zrzut JEDNEJ LINII na każde utworzone
-// wejście: skąd przyszło, po jakiej cenie i jak głęboko względem strefy
-// Z SYGNAŁU. Powstał, żeby odpowiedzieć na pytanie „skąd biorą się pozycje
-// poniżej dolnej krawędzi strefy" LICZBAMI, a nie z lektury kodu.
-//
-// Bez zmiennej cały mechanizm kosztuje jeden odczyt `OnceLock` i nie dotyka
-// ani stanu silnika, ani dziennika, ani brokera — parytet nietknięty.
-//
-// Kolumny (średnik): ts;koszyk;ścieżka;strona;sig_lo;sig_hi;cena;rynek;poziom;głębokość
-// Głębokość: 0 = bliższa krawędź (BUY: `hi`), 1 = DALSZA (BUY: `lo`),
-// wartość > 1 znaczy „za dalszą krawędzią", czyli dokładnie ten przypadek,
-// dla którego ten zrzut powstał.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TrailAdaptiveSnapshot {
+    price_efficiency: f64,
+    vol_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MovementAccumulator {
+    first_ts: Option<Ts>,
+    first_px: Px,
+    last_ts: Ts,
+    last_px: Px,
+    path: f64,
+    samples: u32,
+}
+
+impl MovementAccumulator {
+    #[inline]
+    fn push(&mut self, ts: Ts, px: Px) {
+        if self.samples == 0 {
+            self.first_ts = Some(ts);
+            self.first_px = px;
+        } else {
+            self.path += (px - self.last_px).abs();
+        }
+        self.last_ts = ts;
+        self.last_px = px;
+        self.samples += 1;
+    }
+
+    #[inline]
+    fn path_rate(&self) -> Option<f64> {
+        let dt_s = (self.last_ts - self.first_ts?) as f64 / 1000.0;
+        (self.samples >= 3 && dt_s > 0.0 && self.path > 0.0).then_some(self.path / dt_s)
+    }
+}
+
 static DIAG_KRAWEDZ: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
     std::sync::OnceLock::new();
 
@@ -80,11 +94,6 @@ fn diag_plik() -> Option<&'static std::sync::Mutex<std::fs::File>> {
         .as_ref()
 }
 
-/// Zapisuje jedno utworzone wejście do zrzutu diagnostycznego.
-///
-/// `cena` to cena, po której wejście REALNIE powstanie: dla zlecenia
-/// rynkowego bieżące kwotowanie, dla limitu — poziom zlecenia (symulator
-/// realizuje limit dokładnie na nim, `sim.rs:567`).
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn diag_wejscie(
@@ -117,40 +126,16 @@ fn diag_wejscie(
     }
 }
 
-/// STAN RODZINY „ROZMIAR STEROWANY ZMIENNOŚCIĄ".
-///
-/// Trzymany w jednym miejscu z dwóch powodów. Po pierwsze: przy
-/// [`VolSizeMode::Off`] cały stan jest wartością domyślną i nikt go nie
-/// dotyka — parytet widać wtedy w jednej linijce, a nie w siedmiu polach
-/// rozsypanych po strukturze silnika. Po drugie: musi PRZEŻYĆ WYMIANĘ
-/// SILNIKA, tak samo jak `price_hist` i `regime_hist`.
-///
-/// # Dlaczego to musi przeżyć północ
-///
-/// Tryb „każdy dzień osobno" tworzy nowy silnik co dobę. Profil sezonowy
-/// potrzebuje co najmniej trzech zamkniętych godzin w kubełku, żeby w ogóle
-/// zacząć działać — jedna doba daje dokładnie JEDNĄ. Bez przeniesienia
-/// odsezonowanie w trybie dziennym byłoby MARTWE, a jego sygnaturą byłby
-/// wynik identyczny co do centa z wariantem bez odsezonowania. Dokładnie ten
-/// błąd popełniono wcześniej przy bramce reżimu piramidy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StanZmiennosci {
-    /// suma zakresów H−L ZAMKNIĘTYCH godzin kalendarzowych, per godzina serwera
     pub sezon_suma: [f64; 24],
-    /// ile zamkniętych godzin wpadło do kubełka
     pub sezon_ile: [u32; 24],
-    /// klucz godziny, którą właśnie zbieramy (`i64::MIN` = jeszcze żadnej)
     pub sezon_klucz: i64,
     pub sezon_hi: Px,
     pub sezon_lo: Px,
-    /// próbki zmienności ODSEZONOWANEJ do rangi percentylowej, jedna na
-    /// kubełek pięciominutowy
     pub proby: Vec<f64>,
-    /// klucz ostatniego kubełka pięciominutowego, z którego wzięto próbkę
     pub proba_klucz: i64,
-    /// BIEŻĄCY MNOŻNIK LOTA. Jedyna liczba, którą czyta `lot_size()`.
     pub mult: f64,
-    // --- diagnostyka przebiegu (nikt na niej nie decyduje) ---
     pub ile_policzono: u64,
     pub suma_mult: f64,
     pub min_mult: f64,
@@ -168,8 +153,6 @@ impl Default for StanZmiennosci {
             sezon_lo: 0.0,
             proby: Vec::new(),
             proba_klucz: i64::MIN,
-            // JEDYNKA, NIE ZERO. Gdyby tu stało zero, jeden przeoczony
-            // `return` w ścieżce liczenia wyzerowałby każdy lot w bocie.
             mult: 1.0,
             ile_policzono: 0,
             suma_mult: 0.0,
@@ -180,59 +163,26 @@ impl Default for StanZmiennosci {
     }
 }
 
-// ============================================================
-//  TRAILING S/R PO STRUKTURZE 1M — STAŁE MECHANIZMU (OS_SR_SPEC.md pkt 3)
-// ============================================================
-//
-// STAŁE, nie pola: sąd anty-nadstrojeniowy (spec pkt 2) zostawił polami
-// wyłącznie osie z żywą, spójną krzywą (scope, aktywacja, min_dist_price).
-// Parametry z krzywą płaską lub sprzeczną (k, fractal_n, offset, min_dist_tp,
-// tf) jako pola byłyby zaproszeniem do nadstrojenia.
 
-/// Długość świecy struktury: 1 minuta (treść zlecenia właściciela).
 const TRAIL_SR_TF_MS: i64 = 60_000;
 const TRAIL_SR_FRACTAL_N: usize = 3;
-/// SL = poziom − offset (BUY) / + offset (SELL).
 const TRAIL_SR_OFFSET: f64 = 0.5;
 const TRAIL_SR_MIN_DIST_TP: f64 = 2.0;
-/// Ile potwierdzonej struktury trzymamy wstecz (po czasie potwierdzenia).
 const TRAIL_SR_STRUCT_WINDOW_MS: i64 = 24 * 3_600_000;
 
-/// STAN TRAILINGU S/R — agregator OHLC 1M + potwierdzone swingi.
-///
-/// Przy `trail_sr_enabled = false` NIKT tego nie dotyka (bramka stoi
-/// w `on_tick` PRZED karmieniem) — parytet jest strukturalny, jak przy
-/// [`StanZmiennosci`] i `VolSizeMode::Off`.
-///
-/// Pamięć: ring 2·n+1 zamkniętych świec (okno detekcji) + deque
-/// potwierdzonych swingów przycinane do 24 h — O(setki), nie O(tiki).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct StanSr {
-    /// kubełek bieżącej świecy: `ts / TRAIL_SR_TF_MS` (`i64::MIN` = brak)
     kubelek: i64,
-    /// high/low bieżącej (OTWARTEJ) świecy — po mid, bo mierzymy STRUKTURĘ;
-    /// egzekucja SL zostaje po bid/ask (to robi broker, nie my)
     high: Px,
     low: Px,
-    /// close i ostatni (zamykający) spread bieżącej świecy. Pola są karmione tylko,
-    /// gdy działa co najmniej jedna dynamiczna oś S/R; przy samym legacy
-    /// pozostają nietknięte, co zachowuje kontrakt zera starej ścieżki.
     close: Px,
     spread_close: Px,
-    /// (high, low) ostatnich 2·n+1 ZAMKNIĘTYCH świec — okno detekcji
     zamkniete: std::collections::VecDeque<(Px, Px)>,
-    /// potwierdzone swingi: (poziom, t_potwierdzenia). Swing staje się
-    /// widzialny dopiero od `t_potw` = zamknięcie n-tej świecy PO szczytowej
-    /// — zero lookahead jest konstrukcyjne, ale test i tak obowiązuje.
     swingi_low: std::collections::VecDeque<(Px, Ts)>,
     swingi_high: std::collections::VecDeque<(Px, Ts)>,
-    /// Jakość swingów zapamiętana W CHWILI POTWIERDZENIA. Osobne kolejki
-    /// zachowują format legacy `swingi_*`; brak wpisu oznacza fail-closed dla
-    /// dodatniego progu prominence (np. stan z wersji sprzed tej osi).
     prominence_low: std::collections::VecDeque<(Px, Ts, f64)>,
     prominence_high: std::collections::VecDeque<(Px, Ts, f64)>,
-    /// Causal ATR i referencja spreadu: wyłącznie domknięte świece.
     prev_close: Option<Px>,
     atr_true_ranges: std::collections::VecDeque<f64>,
     spread_closed: std::collections::VecDeque<f64>,
@@ -264,21 +214,15 @@ impl Default for StanSr {
     }
 }
 
-/// Jedna DOMKNIĘTA świeca M1 do rozgrzania dynamicznego S/R po restarcie.
-/// `ts` jest czasem otwarcia w tym samym zegarze serwera co ticki. Warstwa
-/// live pobiera ją z MT5; rdzeń tylko deterministycznie agreguje do TF osi.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SrWarmupBar {
     pub ts: Ts,
     pub high: Px,
     pub low: Px,
     pub close: Px,
-    /// spread w jednostkach ceny, nie w punktach instrumentu
     pub spread: Px,
 }
 
-/// Świeży koszyk. Jedno miejsce konstrukcji, żeby dołożenie pola do `Basket`
-/// nie wymagało poprawiania kilku literałów rozsianych po pliku.
 #[allow(clippy::too_many_arguments)]
 fn new_basket(
     id: u32,
@@ -354,17 +298,11 @@ fn new_basket(
     }
 }
 
-/// Jaka CZĘŚĆ węższej z dwóch stref leży w drugiej.
-///
-/// Odnosimy do węższej, nie do sumy: sygnał ze strefą 1 $ w całości zawarty
-/// w strefie 8 $ to ten sam poziom opisany dwa razy, a nie dwa różne setupy —
-/// i tak właśnie ma go widzieć reguła łączenia koszyków.
 #[inline]
 fn zone_overlap(a_lo: Px, a_hi: Px, b_lo: Px, b_hi: Px) -> f64 {
     let wspolne = (a_hi.min(b_hi) - a_lo.max(b_lo)).max(0.0);
     let wezsza = (a_hi - a_lo).min(b_hi - b_lo);
     if wezsza <= 1e-9 {
-        // strefa punktowa: liczy się samo trafienie w drugą
         if wspolne > 0.0 || (a_lo >= b_lo && a_hi <= b_hi) {
             1.0
         } else {
@@ -375,17 +313,6 @@ fn zone_overlap(a_lo: Px, a_hi: Px, b_lo: Px, b_hi: Px) -> f64 {
     }
 }
 
-/// Migawka KOSZYKA jako całości — JEDYNE miejsce liczenia tych wielkości.
-///
-/// Wolna funkcja, a nie metoda `Engine`, i to jest celowe: moduł obserwacji
-/// (cechy modelu) musi liczyć DOKŁADNIE to samo, co silnik przy podejmowaniu
-/// decyzji, a nie ma pod ręką ani `&self`, ani `Broker`a. Gdyby istniały dwa
-/// rachunki, rozjechałyby się o parę centów akurat wtedy, gdy ktoś porówna
-/// decyzję bota z cechą modelu — czyli w najgorszym możliwym momencie.
-///
-/// Powstało z zamówienia właściciela: „brakuje liczenia, ile w sumie są warte
-/// wszystkie pozycje z poszczególnego koszyka, zamiast patrzenia na pozycje
-/// osobno". Silnik decydował per pozycja, a kanał zarządza KOSZYKIEM.
 pub fn widok_koszyka(bk: &Basket, pozycje: &[Position], q: &Quote) -> BasketView {
     let poz: Vec<&Position> = pozycje.iter().filter(|p| p.basket == Some(bk.id)).collect();
 
@@ -399,7 +326,6 @@ pub fn widok_koszyka(bk: &Basket, pozycje: &[Position], q: &Quote) -> BasketView
         bk.mid()
     };
 
-    // Ryzyko BIEŻĄCE: ile jeszcze można stracić na tym, co stoi w rynku.
     let risk_usd: f64 = poz
         .iter()
         .filter_map(|p| {
@@ -412,9 +338,6 @@ pub fn widok_koszyka(bk: &Basket, pozycje: &[Position], q: &Quote) -> BasketView
         risk_usd
     };
 
-    // Ile ZAPLANOWANEGO ryzyka jest już w rynku. Bierzemy je z planu siatki,
-    // a nie z liczby zleceń: warstwy różnią się wolumenem i odległością do
-    // stopa, więc „3 z 5 warstw" nie znaczy „60 % ryzyka".
     let plan_risk: f64 = bk
         .levels
         .iter()
@@ -457,12 +380,6 @@ pub fn widok_koszyka(bk: &Basket, pozycje: &[Position], q: &Quote) -> BasketView
     }
 }
 
-/// Powód zablokowania nowych wejść.
-///
-/// Wariant `Blocked` niesie DWIE rzeczy: zdanie dla człowieka i kod z
-/// zamkniętej listy. Samo zdanie nie nadaje się do zliczania — a wtedy nie
-/// da się odpowiedzieć na pytanie „ile sygnałów straciłem na limicie
-/// ekspozycji, a ile na godzinach sesji".
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gate {
     Open,
@@ -470,8 +387,6 @@ pub enum Gate {
     Blocked(String, RejectCode),
 }
 
-/// Jedno zlecenie leżące na szczeblu — skopiowane z brokera, żeby dało
-/// się je czytać po tym, jak pożyczka `&mut b` zacznie żyć własnym życiem.
 #[allow(dead_code)]
 struct Szczebel {
     t: Ticket,
@@ -486,7 +401,6 @@ struct Szczebel {
 }
 
 impl Gate {
-    /// Zdanie i kod, gdy bramka zamknięta. `None`, gdy wolno wchodzić.
     pub fn blocked(&self) -> Option<(&str, RejectCode)> {
         match self {
             Gate::Open => None,
@@ -503,7 +417,6 @@ pub struct LogLine {
     pub text: String,
 }
 
-/// Wejście wiadomości z kanału.
 #[derive(Debug, Clone)]
 pub struct IncomingMessage {
     pub ts: Ts,
@@ -511,21 +424,10 @@ pub struct IncomingMessage {
     pub source_name: String,
     pub msg_id: i64,
     pub reply_to: Option<i64>,
-    /// gdy `Some`, to jest EDYCJA wiadomości o tym id — nie nowa wiadomość
     pub edit_of: Option<i64>,
     pub text: String,
 }
 
-/// ODRZUCONE WEJŚCIE — geometria sygnału, który nie wszedł (Pakiet E3).
-///
-/// Tyle i tylko tyle, ile trzeba, żeby WYCENIĆ filtr: od kiedy patrzeć
-/// w ticki, po której stronie, z jakiej strefy, do jakiego celu i z jakim
-/// stopem. Sam kod powodu (`kod`) jest tym samym napisem, którym liczy
-/// `Engine::odrzuty` — dzięki temu wycena sumuje się dokładnie po tych
-/// kubełkach, które widać w raporcie.
-///
-/// Rekord jest MARTWY dla rdzenia: nic go nie czyta i żadna decyzja od niego
-/// nie zależy.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OdrzuconeWejscie {
     pub ts: Ts,
@@ -535,16 +437,9 @@ pub struct OdrzuconeWejscie {
     pub lo: Px,
     pub hi: Px,
     pub sl: Option<Px>,
-    /// pierwszy cel z sygnału — `None`, gdy kanał nie podał żadnego
     pub tp1: Option<Px>,
 }
 
-/// SL/TP, które MAJĄ być na pozycji — niezależnie od tego, czy broker je przyjął.
-///
-/// Broker odrzuca modyfikację, gdy poziom jest bliżej ceny niż stops level albo
-/// gdy trwa requote. Jedna próba i cisza oznacza, że podciągnięty stop po
-/// prostu ZNIKA — a to jest różnica między „zamknięte na +18" a „zamknięte na
-/// SL". Dlatego zamiar jest zapamiętywany i ponawiany.
 #[derive(Debug, Clone, Copy)]
 struct DesiredStops {
     sl: Option<Px>,
@@ -552,152 +447,53 @@ struct DesiredStops {
     last_try: Ts,
 }
 
-/// Wyjście, które CZEKA na lepszą cenę zamiast płacić spread.
-///
-/// Odpowiednik zlecenia LIMIT po drugiej stronie spreadu, ale bez wysyłania
-/// czegokolwiek do brokera: `target` to cena, przy której taki limit by się
-/// wypełnił, `deadline` to moment, w którym rezygnujemy i wychodzimy po rynku.
-/// Dzięki temu symulator i most robią dokładnie to samo — obie strony widzą
-/// wyłącznie zwykłe `close_position`, tylko w innej chwili.
 #[derive(Debug, Clone, Copy)]
 struct QueuedExit {
     target: Px,
     deadline: Ts,
     reason: CloseReason,
-    /// cena, po której wyszlibyśmy od razu — do rozliczenia oszczędności
     market_at_decision: Px,
 }
 
 pub struct Engine {
     pub cfg: Settings,
 
-    /// HISTORIA REŻIMU — czy kolejne oceniane koszyki były przelotami.
-    ///
-    /// ⚠ To pole MUSI przeżywać dobowy reset konta. Bramka reżimu czytająca
-    /// `tempo_fast` wprost z listy koszyków jest w trybie dzień-po-dniu
-    /// **martwa**, bo reset odtwarza silnik i kasuje koszyki. Sygnatura tej
-    /// awarii: warianty bramkowane dają wynik **identyczny co do centa** jak
-    /// niebramkowane w trybie dziennym, a różny w compoundingu.
-    ///
-    /// Zasada ogólna, wyciągnięta z tego błędu: **każdy stan, z którego czyta
-    /// bramka reżimowa, musi być przenoszony przez reset dobowy** — resetujemy
-    /// konto, nie wiedzę o rynku. Tak samo jak historia ceny.
     pub regime_hist: Vec<(Ts, bool)>,
 
     pub baskets: Vec<Basket>,
-    /// Wyłącznie cache adresowania, nigdy źródło prawdy o koszyku. Każdy
-    /// trafiony slot jest sprawdzany po ID; publiczny reorder/restore może
-    /// unieważnić położenie bez zmiany długości, wtedy działa stary skan.
     basket_slots: HashMap<u32, usize>,
     basket_slots_len: usize,
     pub stats: Stats,
     pub logs: Vec<LogLine>,
     pub halted: Option<String>,
-    /// RAM-only accounting quarantine. Not cleared by ordinary trading Resume.
-    /// Durable checkpoint/reconciliation is a separate live readiness gate.
     pub cost_reconciliation_required: Option<String>,
     pub cost_quarantine: Vec<ClosedTrade>,
     pub risk_override: bool,
-    /// DIAGNOSTYKA HAMULCA (nie wpływa na żadną decyzję).
-    ///
-    /// Ile milisekund konto przestało z blokadą `halted` i kiedy ostatnio
-    /// widzieliśmy tick. Bez tego licznika nie da się odpowiedzieć na pytanie
-    /// „ile czasu konto stało bezczynnie po zadziałaniu hamulca" — a to jest
-    /// najważniejsza liczba przy ocenie strażnika obsunięcia.
     halt_ms: i64,
     halt_prev_ts: Ts,
     halt_min_zapisane: i64,
     next_basket_id: u32,
     loss_streak: u32,
     paused_until: Ts,
-    /// Z-2: DOBA ZAMKNIĘTA DLA WEJŚĆ (indeks doby handlowej, `i64::MIN` = brak).
-    ///
-    /// Strażnik (`check_guards`) potrafił zamknąć wszystko po stopie dnia,
-    /// po godzinie EOD i przed weekendem — ale `entry_gate` nie miała o tym
-    /// POJĘCIA. Skutek: pierwszy sygnał po zamknięciu otwierał wszystko od
-    /// nowa, strażnik zamykał to na następnym ticku, i tak w kółko do końca
-    /// doby. Konto płaciło spread za każdą taką parę, a w dzienniku wyglądało
-    /// to jak normalny handel.
-    ///
-    /// Trzymamy INDEKS DOBY, nie znacznik czasu: doba liczy się tym samym
-    /// `day_of(ts, session_offset)`, którym silnik rotuje statystyki, więc
-    /// blokada zdejmuje się sama na granicy doby i nie da się jej rozjechać
-    /// z resztą księgowania dnia.
     day_stop: i64,
-    /// Doba, w której ostatnio zgłosiliśmy ROZJAZD KREDYTU (ręczny ≠ terminal).
-    ///
-    /// Bez tego licznika ostrzeżenie leciałoby do dziennika przy KAŻDYM
-    /// zamknięciu transakcji przez cały czas trwania rozjazdu — czyli
-    /// utopiłoby resztę dnia. Raz na dobę handlową wystarczy, żeby nie dało
-    /// się tego przeoczyć, i nie wystarczy, żeby zaszkodzić.
     kredyt_rozjazd_dzien: i64,
     last_vsl_eval: Ts,
-    /// Kiedy ostatnio kanał ogłosił trafiony cel. Reguła „trader trzyma
-    /// dłużej, gdy kanał potwierdza siłę" opiera się właśnie na tym.
     last_tp_hit_ts: Ts,
-    /// Bieżąca mediana spreadu, liczona przyrostowo z ostatniego okna.
-    /// Sam spread nic nie mówi — dopiero stosunek do własnej mediany
-    /// odróżnia normalny rynek od wysychającej płynności.
     spread_med: Px,
     spread_buf: Vec<Px>,
-    /// ROZMIAR STEROWANY ZMIENNOŚCIĄ — cały stan tej rodziny w jednym polu.
-    /// Przy `vol_size_mode = Off` nikt go nie dotyka i nikt z niego nie czyta.
     zmiennosc: StanZmiennosci,
-    /// TRAILING S/R PO STRUKTURZE 1M — cały stan rodziny `trail_sr_*`.
-    /// Przy `trail_sr_enabled = false` nikt go nie dotyka i nikt z niego
-    /// nie czyta (bramka w `on_tick` przed karmieniem agregatora).
     sr: StanSr,
-    /// historia ceny do filtra reżimu: (ts, mid) co godzinę
     price_hist: Vec<(Ts, Px)>,
-    /// CZY BIEŻĄCE WEJŚCIE IDZIE W MIĘKKIM REŻIMIE.
-    ///
-    /// Flaga żyje TYLKO na czas obsługi jednego sygnału: ustawia ją
-    /// `handle_entry`, gdy `regime_soft` jest włączone i sygnał nie przeszedł
-    /// bramki reżimu, i gasi ją przed wyjściem z tej funkcji. Czytają ją trzy
-    /// miejsca decydujące o rozmiarze wejścia (`units_base`, `lot_size`,
-    /// `max_open_positions_eff`).
-    ///
-    /// Świadomie NIE jest polem koszyka. Miękki reżim ma zmieniać to, JAK
-    /// DUŻO otwieramy w złym momencie, a nie jak zarządzamy tym, co już
-    /// otwarte — koszyk raz założony ma być prowadzony tymi samymi regułami
-    /// co każdy inny. Inaczej powstałyby dwa równoległe tryby zarządzania
-    /// i każda przyszła zmiana musiałaby być sprawdzana dwa razy.
     rezim_miekki: bool,
-    /// HAMULEC SL-HIT: licznik komunikatów „SL HIT" kanału w bieżącej dobie
-    /// serwera oraz znacznik, do kiedy trwa pauza wejść. Oba pola żyją tylko
-    /// przy `slhit_pause_n > 0`; reset na granicy doby razem z resztą statystyk.
     slhit_dnia: u32,
     slhit_pauza_do: Ts,
-    /// F2b: CZY BIEŻĄCE WEJŚCIE IDZIE POD MIĘKKIM HAMULCEM SL-HIT.
-    ///
-    /// Bliźniak `rezim_miekki` i żyje tak samo krótko: ustawiana na wejściu
-    /// do `handle_entry` / `handle_market_open`, gaszona zaraz po powrocie
-    /// z nich w `on_message` — ścieżka wyjścia jest JEDNA, więc nie ma jak
-    /// przeciec na kolejne wejście ani na przebieg tickowy.
-    ///
-    /// Przy `slhit_pause_lot_mult = 0` (domyślnie) NIGDY nie zapala się na
-    /// `true`, bo hamulec jest wtedy twardy i wejście nie dochodzi do lota.
     slhit_miekki: bool,
-    /// bufor ceny o krótkim kroku — reżim zmienności i reversal-exit liczą się
-    /// w minutach, a nie w godzinach, więc potrzebują własnej rozdzielczości
     vol_hist: Vec<(Ts, Px)>,
-    /// zamierzone SL/TP, ponawiane aż broker je przyjmie
     desired: HashMap<Ticket, DesiredStops>,
     last_resize: Ts,
     last_relot: Ts,
-    /// kadencja reguły `expo_cap_pct` (redukcja ekspozycji już istniejącej)
     last_expo: Ts,
-    /// Szczeble (koszyk, poziom) skasowane przez `enforce_position_limit`
-    /// w trybie `limit_kasuje_tylko_nadmiar`. Osobna lista, bo znacznik
-    /// `cancelled` na szczeblu nie mówi KTO skasował — a odznaczać wolno
-    /// wyłącznie ofiary limitu (TTL i expo-cap kasują na zawsze).
     limit_cancelled: Vec<(u32, i32)>,
-    /// Akcje wykonane dla danej wiadomości — dedup przy edycjach.
-    ///
-    /// Kluczowana PARĄ (źródło, msg_id) z tego samego powodu co
-    /// `msg_to_basket` niżej: identyfikatory Telegrama są PER CZAT, więc
-    /// w trybie wieloformatowym gołe `i64` skleja pamięć dwóch kanałów —
-    /// edycja z jednego deduplikowałaby akcje drugiego (Pakiet A1).
     done_actions: HashMap<(SourceKey, i64), Vec<String>>,
     deferred_entries: deferred_entry::DeferredEntries,
     msg_to_basket: HashMap<(SourceKey, i64), u32>,
@@ -705,71 +501,23 @@ pub struct Engine {
     budget_day: i64,
     queued_exits: HashMap<Ticket, QueuedExit>,
     continuation: strategy_continuation::ContinuationRuntime,
-    /// Obserwator cech (własność zespołu CECHY). Rdzeń tylko karmi go
-    /// zdarzeniami — NIC tu nie liczy i na niczym stąd nie opiera decyzji.
-    /// Dzięki temu włączenie modelu nie może zmienić zachowania bota inaczej
-    /// niż przez jawną ścieżkę AI.
     pub obs: crate::obserwacje::Obserwator,
     pub closed_today: Vec<f64>,
-    /// Dziennik zdarzeń — bufor, nie plik. Rdzeń nie ma prawa dotknąć dysku,
-    /// więc tylko produkuje zdarzenia; zabiera je warstwa, która ma zegar
-    /// i system plików (serwer, backtest, demo).
     pub journal: JournalBuf,
     pub odrzuty: std::collections::BTreeMap<String, u64>,
-    /// REJESTR ODRZUCONYCH WEJŚĆ (Pakiet E3) — surowiec do WYCENY filtrów.
-    ///
-    /// Sam licznik `odrzuty` mówi „filtr reżimu odrzucił 170 sygnałów"
-    /// i na tym koniec: nie wiadomo, czy oszczędził 3000 $, czy tyle kosztował.
-    /// Żeby to policzyć, trzeba znać GEOMETRIĘ odrzuconego sygnału (strona,
-    /// strefa, SL, pierwszy cel) i chwilę, od której liczyć ticki — i to jest
-    /// wszystko, co tu leży.
-    ///
-    /// Rdzeń niczego z tego NIE CZYTA i nie ma prawa czytać: to zapis
-    /// jednokierunkowy, dokładnie jak `obs`. Wycenę robi warstwa, która ma
-    /// ticki (`conduit_backtest::statystyki`).
     pub odrzucone_wejscia: Vec<OdrzuconeWejscie>,
     wejscie_w_obrobce: Option<OdrzuconeWejscie>,
-    /// Ile akcji ZIGNOROWANO (`jignore`) — wewnętrzny licznik Pakietu A2,
-    /// świadomie NIE w `Stats`. Razem z sumą `odrzuty` rozstrzyga, czy akcja
-    /// naprawdę się wykonała, zanim trafi do `done_actions`. Rośnie
-    /// BEZWARUNKOWO na początku `jignore`, niezależnie od poziomu dziennika —
-    /// inaczej wyciszenie dziennika zmieniałoby decyzje dedupu.
     zignorowane: u64,
     pub wygaszanie: bool,
 
     pub tryb_auto_ea: bool,
 
-    /// EA-CORE — szkielet warstwy EA (FALA 0, patrz [`crate::ea`]).
-    ///
-    /// Struktura jest tu ZAWSZE, ale przy `cfg.ea_enabled = false` nie jest
-    /// wołana ani razu: [`Engine::on_tick`] wchodzi do [`Engine::ea_puls`]
-    /// pod tym `if`, więc rachunek nie zostaje odczytany ani razu więcej niż
-    /// przed dodaniem modułu. To jest punkt (a) potrójnego kontraktu zera
-    /// i jest gwarancją STRUKTURALNĄ, nie deklaracją.
     pub ea: crate::ea::EaRdzen,
 
-    /// RODZINA A — stan i liczniki (FALA 1, `wiedza/EA_RODZINA_A.md`).
-    ///
-    /// Osobne pole od [`Engine::ea`], bo rodzina A żyje w INNYM rytmie niż
-    /// rdzeń: rdzeń pracuje na pulsie warstwy (`ea_enabled`), a rodzina A
-    /// zapada w fazie PLANOWANIA koszyka i przy każdej dokładce — także wtedy,
-    /// gdy warstwę włącza sam tryb AUTO-EA, bez `ea_enabled`.
-    ///
-    /// Jedyne pole tej struktury, które rośnie BEZWARUNKOWO, to licznik
-    /// stratnych stopów doby (`stopy_dnia`): jedno porównanie na zamkniętą
-    /// transakcję, bez odczytu rachunku i bez wpływu na decyzje. Reszta jest
-    /// dotykana wyłącznie zza bramy [`Engine::ea_osie_a`].
     pub ea_a: crate::ea::StanRodzinyA,
 
     slot: u32,
-    /// PUŁAPY ŁAŃCUCHA — sufit ponad limitami presetu, nie zamiennik.
-    ///
-    /// Limit skuteczny = `min(limit presetu, pułap)`, z konwencją „0 = brak
-    /// pułapu" po obu stronach ([`crate::formaty::PulapyGlobalne::sufit_u32`]).
-    /// Domyślnie same zera, więc rządzi wyłącznie preset.
     pub pulapy: crate::formaty::PulapyGlobalne,
-    /// CO ROBIĄ POZOSTAŁE SILNIKI. Podaje warstwa żywa raz na obrót pętli;
-    /// backtest zostawia zera.
     pub obce: crate::wielosilnik::ObceObciazenie,
 }
 
@@ -837,16 +585,6 @@ impl Engine {
         }
     }
 
-    /// Przypisuje silnikowi SLOT, czyli własną przestrzeń numerów koszyków.
-    ///
-    /// Wywoływane wyłącznie przez warstwę żywą, zaraz po `Engine::new`
-    /// i ZAWSZE przed przejęciem koszyków. Bez tego dwa silniki na jednym
-    /// rachunku wyprodukowałyby dwa różne koszyki `B1` — czyli dwa plany
-    /// siatki pod jednym numerem w `koszyki.json` i komentarz `CD1.0`,
-    /// po którym po restarcie nie da się powiedzieć, czyja jest pozycja.
-    ///
-    /// Odmawia, gdy koszyki już są: przenumerowanie żywego koszyka zerwałoby
-    /// jego związek z komentarzem zlecenia leżącego u brokera.
     pub fn przypisz_slot(&mut self, slot: u32) {
         debug_assert!(
             self.baskets.is_empty(),
@@ -859,20 +597,11 @@ impl Engine {
         self.next_basket_id = crate::wielosilnik::pierwszy_numer(slot);
     }
 
-    /// Slot tego silnika. `0` = numeracja jak przed wprowadzeniem formatów.
     pub fn slot(&self) -> u32 {
         self.slot
     }
 
-    // ============================================================
-    //  ZAMIAR SL/TP  (z ponawianiem)
-    // ============================================================
 
-    /// Próbuje ustawić SL/TP i **zapamiętuje zamiar**, jeśli się nie udało.
-    ///
-    /// Zwraca `true`, gdy broker przyjął od razu. Wszystkie ścieżki
-    /// zarządzania idą tędy, żeby nie dało się zgubić modyfikacji przez
-    /// pojedyncze odrzucenie.
     #[track_caller]
     fn try_modify<B: Broker>(
         &mut self,
@@ -882,11 +611,6 @@ impl Engine {
         tp: Option<Px>,
         ts: Ts,
     ) -> bool {
-        // E0: zamiar na StopPozycji / CelPozycji. Zgłaszamy TYLKO faktyczną
-        // zmianę pola — `modify_position` pisze SL i TP jednym wywołaniem,
-        // więc bez porównania z bieżącym stanem każdy zapis celu liczyłby się
-        // jako zapis stopu. Rodzinę odróżnia LINIA WOŁAJĄCEGO: `try_modify`
-        // ma szesnastu i to jest cała treść pytania „kto pisze po stopie".
         if cien::czynny() {
             let l = std::panic::Location::caller().line();
             let (csl, ctp) = b
@@ -900,17 +624,21 @@ impl Engine {
                 cien::z(cakt::A_CEL, t, czr::L_TRY_MODIFY, l);
             }
         }
-        let continuation_guard=self.cfg.restore_strategy_continuation
-            .then(||self.capture_continuation_guard(b,t));
+        let continuation_guard = self
+            .cfg
+            .restore_strategy_continuation
+            .then(|| self.capture_continuation_guard(b, t));
         match b.modify_position(t, sl, tp) {
             Ok(()) => {
                 self.desired.remove(&t);
-                self.forget_continuation_guard(t,false);
+                self.forget_continuation_guard(t, false);
                 true
             }
             Err(_) => {
                 if self.cfg.sltp_retry_s > 0.0 {
-                    if let Some(guard)=continuation_guard {self.remember_continuation_guard(t,guard,false);}
+                    if let Some(guard) = continuation_guard {
+                        self.remember_continuation_guard(t, guard, false);
+                    }
                     self.desired.insert(
                         t,
                         DesiredStops {
@@ -925,7 +653,6 @@ impl Engine {
         }
     }
 
-    /// Ponawia zamiary, których broker jeszcze nie przyjął.
     fn retry_stops<B: Broker>(&mut self, b: &mut B, ts: Ts) {
         if self.cfg.sltp_retry_s <= 0.0 || self.desired.is_empty() {
             return;
@@ -937,10 +664,11 @@ impl Engine {
             .filter(|(t, d)| ts - d.last_try >= gap && b.find_position(**t).is_some())
             .map(|(t, d)| (*t, *d))
             .collect();
-        // pozycje, których już nie ma, przestają nas obchodzić
         self.desired.retain(|t, _| b.find_position(*t).is_some());
         for (t, d) in due {
-            let Some(d)=self.continuation_retry_stops(b,t,d) else {continue;};
+            let Some(d) = self.continuation_retry_stops(b, t, d) else {
+                continue;
+            };
             if cien::czynny() {
                 let (csl, ctp) = b
                     .find_position(t)
@@ -955,22 +683,14 @@ impl Engine {
             }
             if b.modify_position(t, d.sl, d.tp).is_ok() {
                 self.desired.remove(&t);
-                self.forget_continuation_guard(t,false);
+                self.forget_continuation_guard(t, false);
             } else if let Some(e) = self.desired.get_mut(&t) {
                 e.last_try = ts;
             }
         }
     }
 
-    // ============================================================
-    //  REŻIM ZMIENNOŚCI
-    // ============================================================
 
-    /// Mnożnik liczby jednostek wynikający z zakresu ceny w oknie.
-    ///
-    /// 1.0 = rynek spokojny albo filtr wyłączony. Próg mierzymy na zakresie
-    /// H−L, a nie na odchyleniu: interesuje nas, jak daleko cena potrafi
-    /// uciec między postawieniem zlecenia a jego realizacją.
     fn vol_factor(&self, ts: Ts) -> f64 {
         if self.cfg.vol_window_min <= 0.0 {
             return 1.0;
@@ -987,7 +707,6 @@ impl Engine {
             hi = hi.max(*p);
             n += 1;
         }
-        // za mało próbek = brak wiedzy; brak wiedzy nie może zmieniać rozmiaru
         if n < 5 {
             return 1.0;
         }
@@ -999,17 +718,6 @@ impl Engine {
     }
 
 
-    /// Zastępczy ATR: zakres H−L bufora zmienności w oknie
-    /// `adaptive_atr_window_min`.
-    ///
-    /// Świadomie nie liczymy klasycznego ATR ze świec — silnik nie ma świec,
-    /// ma strumień ticków. Zakres w oknie odpowiada na to samo pytanie („jak
-    /// daleko cena potrafi uciec w kwadrans"), a przy okazji jest tą samą
-    /// miarą, której używa filtr reżimu zmienności, więc obie reguły mówią
-    /// o rynku w tych samych jednostkach.
-    ///
-    /// `None`, gdy próbek jest za mało — brak wiedzy nie może zmieniać
-    /// parametrów. To ta sama zasada, co w `vol_factor`.
     fn atr_proxy(&self, ts: Ts) -> Option<f64> {
         let win = if self.cfg.adaptive_atr_window_min > 0.0 {
             self.cfg.adaptive_atr_window_min
@@ -1040,13 +748,6 @@ impl Engine {
     }
 
 
-    /// SEZONOWY MNOŻNIK GODZINY — ile razy ta godzina serwera jest bardziej
-    /// ruchliwa od przeciętnej.
-    ///
-    /// Liczony wyłącznie z godzin, które silnik już PRZEŻYŁ. Próg trzech
-    /// zamkniętych godzin w kubełku i sześciu zapełnionych kubełków jest po
-    /// to, żeby na starcie przebiegu dzielić przez 1,0, a nie przez losową
-    /// liczbę z jednej próbki.
     fn sezon_mnoznik(&self, ts: Ts) -> f64 {
         let h = hour_of(ts, self.cfg.server_tz_offset_ms) as usize;
         let z = &self.zmiennosc;
@@ -1067,9 +768,6 @@ impl Engine {
         let sredni = suma / ile;
         let moj = z.sezon_suma[h] / z.sezon_ile[h] as f64;
         let m = moj / sredni;
-        // Dolne odcięcie chroni przed godziną przerwy technicznej brokera
-        // (u nas godzina 3 czasu serwera ma ZERO ticków w całym pliku):
-        // dzielenie przez mnożnik bliski zeru wystrzeliłoby lot pod sufit.
         if m.is_finite() && m > 0.10 {
             m
         } else {
@@ -1077,7 +775,6 @@ impl Engine {
         }
     }
 
-    /// Ranga percentylowa `x` w zebranych próbkach, w przedziale `[0, 1]`.
     fn ranga_percentylowa(proby: &[f64], x: f64) -> f64 {
         if proby.is_empty() {
             return 0.5;
@@ -1086,12 +783,6 @@ impl Engine {
         mniejszych / proby.len() as f64
     }
 
-    /// Przelicza [`StanZmiennosci::mult`]. Wołane raz na tick z `on_tick`.
-    ///
-    /// # Bramka parytetu
-    ///
-    /// Pierwsza linijka. Przy `Off` funkcja nie czyta ceny, nie dotyka stanu
-    /// i nie zapisuje niczego — a `lot_size()` i tak nie zajrzy do `mult`.
     fn aktualizuj_mnoznik_zmiennosci(&mut self, q: &Quote) {
         if self.cfg.vol_size_mode == VolSizeMode::Off {
             return;
@@ -1099,7 +790,6 @@ impl Engine {
         let ts = q.ts;
         let mid = q.mid();
 
-        // ---- PROFIL SEZONOWY: domykanie godziny kalendarzowej ----
         let klucz = (ts + self.cfg.server_tz_offset_ms).div_euclid(3_600_000);
         if self.zmiennosc.sezon_klucz == i64::MIN {
             self.zmiennosc.sezon_klucz = klucz;
@@ -1140,11 +830,6 @@ impl Engine {
             return;
         }
 
-        // ---- PRÓBKA DO PERCENTYLA: jedna na kubełek 5-minutowy ----
-        // Częściej nie ma sensu: kolejne ticki dają praktycznie tę samą
-        // wartość okna 60-minutowego, więc ranga liczyłaby się na próbie
-        // silnie skorelowanej i „percentyl 100 okresów" znaczyłby w praktyce
-        // „ostatnie osiem minut".
         let k5 = (ts + self.cfg.server_tz_offset_ms).div_euclid(300_000);
         if k5 != self.zmiennosc.proba_klucz {
             self.zmiennosc.proba_klucz = k5;
@@ -1156,9 +841,6 @@ impl Engine {
             }
         }
 
-        // ---- KLAMRY ----
-        // Konwencja zera jak w całej rodzinie lota: 0 = brak klamry. Twarde
-        // granice zostają, bo `lot_size` nie ma prawa dostać NaN ani zera.
         let dol = if self.cfg.vol_size_min_mult > 0.0 {
             self.cfg.vol_size_min_mult
         } else {
@@ -1186,15 +868,10 @@ impl Engine {
             }
             VolSizeMode::Percentile => {
                 let okno = self.cfg.vol_size_percentile_okno as usize;
-                // Zanim uzbiera się połowa okna, ranga jest zmyśleniem —
-                // przy trzech próbkach percentyl przyjmuje wyłącznie wartości
-                // 0, 1/3, 2/3 i 1, czyli mnożnik skacze skrajami klamry.
                 if okno == 0 || self.zmiennosc.proby.len() < (okno / 2).max(10) {
                     1.0
                 } else {
                     let p = Self::ranga_percentylowa(&self.zmiennosc.proby, odsez);
-                    // Cicho = duży lot, głośno = mały. Odwrotność percentyla,
-                    // liniowo między klamrami.
                     gora - p * (gora - dol)
                 }
             }
@@ -1215,35 +892,22 @@ impl Engine {
         }
     }
 
-    /// Odczyt stanu rodziny zmienności — do przeniesienia przez wymianę
-    /// silnika. Patrz [`StanZmiennosci`].
     pub fn stan_zmiennosci(&self) -> StanZmiennosci {
         self.zmiennosc.clone()
     }
 
-    /// Wstawia stan rodziny zmienności do świeżego silnika.
     pub fn set_stan_zmiennosci(&mut self, s: StanZmiennosci) {
         self.zmiennosc = s;
     }
 
-    /// Odczyt stanu trailingu S/R — do przeniesienia przez wymianę silnika
-    /// (tryb „każdy dzień osobno"). Ta sama klasa co [`Engine::stan_zmiennosci`]
-    /// i [`Engine::market_history`]: WIEDZA O RYNKU, nie stan konta. Bez
-    /// przeniesienia agregator 1M zaczynałby każdą dobę od zera — 7 minut
-    /// rozgrzewki i pusta struktura, czyli oś po cichu SŁABSZA w trybie
-    /// dziennym niż w compoundingu (sygnatura tej klasy błędów: rozjazd
-    /// dzienny/compounding bez żadnego śladu w logach).
     pub fn stan_sr(&self) -> StanSr {
         self.sr.clone()
     }
 
-    /// Wstawia stan trailingu S/R do świeżego silnika.
     pub fn set_stan_sr(&mut self, s: StanSr) {
         self.sr = s;
     }
 
-    /// PROFIL SEZONOWY do wypisania: 24 mnożniki i 24 liczniki próbek.
-    /// Tylko diagnostyka — silnik nic na tym nie opiera poza `sezon_mnoznik`.
     pub fn profil_godzinowy(&self) -> ([f64; 24], [u32; 24]) {
         let z = &self.zmiennosc;
         let mut suma = 0.0;
@@ -1265,13 +929,11 @@ impl Engine {
     }
 
 
-    /// Czy konto jest jeszcze „małe" wobec podanego progu.
     #[inline]
     fn kap_male(&self, mult: f64) -> bool {
         mult > 0.0 && self.stats.balance < self.stats.start_balance * mult
     }
 
-    /// Wartość liczbowa z uwzględnieniem bramki kapitałowej.
     #[inline]
     fn kap_f(&self, duze: f64, male: f64, mult: f64) -> f64 {
         if self.kap_male(mult) {
@@ -1281,7 +943,6 @@ impl Engine {
         }
     }
 
-    /// Wartość całkowita z uwzględnieniem bramki kapitałowej.
     #[inline]
     fn kap_u(&self, duze: u32, male: u32, mult: f64) -> u32 {
         if self.kap_male(mult) {
@@ -1291,7 +952,6 @@ impl Engine {
         }
     }
 
-    /// Liczba szczebli siatki po bramce kapitałowej.
     #[inline]
     fn units_base(&self, is_limit: bool) -> u32 {
         let u = self.kap_u(
@@ -1299,12 +959,6 @@ impl Engine {
             self.cfg.entry_units_small,
             self.cfg.entry_units_small_mult,
         );
-        // MIEKKI REZIM: plytsza siatka w zlym momencie.
-        //
-        // Podloga na jednym szczeblu jest istotna: siatka o zerowej liczbie
-        // szczebli to koszyk, ktorego nie ma, czyli twarda blokada pod inna
-        // nazwa — a caly sens tego trybu polega na tym, ze zamiast blokowac
-        // wchodzimy mniej.
         if self.rezim_miekki && self.cfg.regime_soft_units_mult != 1.0 {
             return ((u as f64) * self.cfg.regime_soft_units_mult)
                 .floor()
@@ -1313,7 +967,6 @@ impl Engine {
         u
     }
 
-    /// Limit ryzyka koszyka po bramce kapitałowej (0 = limit wyłączony).
     #[inline]
     fn risk_per_basket_pct_eff(&self) -> f64 {
         let r = self.kap_f(
@@ -1321,26 +974,14 @@ impl Engine {
             self.cfg.risk_per_basket_pct_small,
             self.cfg.risk_per_basket_pct_small_mult,
         );
-        // MIEKKI REZIM — mniejszy budzet ryzyka na koszyk w zlym momencie.
-        //
-        // TO jest miejsce, w ktorym rozmiar naprawde da sie zmniejszyc, gdy
-        // preset ma wlaczony limit ryzyka. Mnozenie lota bazowego nic wtedy nie
-        // daje: plan siatki i tak zostaje przeskalowany do `risk_per_basket_pct`,
-        // wiec mnoznik skraca sie w rachunku (przemiar 0,05x i 3,0x dal wyniki
-        // identyczne co do centa). Limit rowny zeru zostaje zerem — „polowa
-        // braku limitu" to nadal brak limitu.
         if self.rezim_miekki && r > 0.0 && self.cfg.regime_soft_risk_mult != 1.0 {
             return r * self.cfg.regime_soft_risk_mult;
         }
         r
     }
 
-    /// Limit pozycji naraz po bramce kapitałowej (0 = bez limitu).
     #[inline]
     fn max_open_positions_eff(&self) -> u32 {
-        // MIEKKI REZIM ma pierwszenstwo przed bramka kapitalowa: dotyczy
-        // JEDNEGO wejscia i jest wezszy z zalozenia. `0` znaczy „bez zmiany"
-        // i wtedy obowiazuje zwykla sciezka.
         if self.rezim_miekki && self.cfg.regime_soft_max_positions > 0 {
             return self.cfg.regime_soft_max_positions;
         }
@@ -1351,7 +992,6 @@ impl Engine {
         )
     }
 
-    /// Limit żywych koszyków po bramce kapitałowej (0 = bez limitu).
     #[inline]
     fn max_open_baskets_eff(&self) -> u32 {
         self.kap_u(
@@ -1361,17 +1001,6 @@ impl Engine {
         )
     }
 
-    /// WARUNKOWY LIMIT EKSPOZYCJI: przepustka na dodatkowe pozycje i koszyki,
-    /// ważna tylko wtedy, gdy otwarte pozycje są „mocno na plus".
-    ///
-    /// Zwraca `(bonus pozycji, bonus koszyków)`. Gdy reguła jest wyłączona
-    /// (`exposure_bonus_profit_pct == 0`) albo oba bonusy są zerowe, zwraca
-    /// `(0, 0)` **bez czytania pozycji** — to jest gwarancja parytetu: preset,
-    /// który tych pól nie ustawia, przechodzi bramkę tym samym kodem co przed
-    /// zmianą, bez ani jednej dodatkowej operacji zmiennoprzecinkowej.
-    ///
-    /// Próg jest liczony od SALDA, nie w dolarach bezwzględnych — reguła ma
-    /// znaczyć to samo przy 200 $ i po compoundingu do 20 000 $.
     #[inline]
     fn bonus_ekspozycji<B: Broker>(&self, b: &B) -> (u32, u32) {
         if self.cfg.exposure_bonus_profit_pct <= 0.0
@@ -1395,7 +1024,6 @@ impl Engine {
         }
     }
 
-    /// Twardy limit wieku koszyka po bramce kapitałowej (0 = brak).
     #[inline]
     fn basket_max_age_eff(&self) -> f64 {
         self.kap_f(
@@ -1405,7 +1033,6 @@ impl Engine {
         )
     }
 
-    /// Odstęp wejść rynkowych i re-entry po bramce kapitałowej.
     #[inline]
     fn market_step_eff(&self) -> f64 {
         if self.kap_male(self.cfg.market_entry_step_small_mult) {
@@ -1415,15 +1042,6 @@ impl Engine {
         }
     }
 
-    /// Minimalna odległość SL — stała z presetu albo funkcja sygnału.
-    ///
-    /// `sl_min_dist` ma ostre optimum (3,0 → +694 $, 3,5 → +1464 $, 4,0 →
-    /// +2943 $ ale traci czerwiec). Ostrość optimum przy zmieniającym się
-    /// reżimie sugeruje, że stała wartość jest kompromisem między dwoma
-    /// reżimami — a właściwą jednostką jest szerokość strefy albo zmienność.
-    ///
-    /// Gdy działają oba źródła, wygrywa WIĘKSZE. Stop ma być dość szeroki
-    /// z obu powodów naraz, a nie średnio szeroki.
     fn adaptive_sl_min_dist(&self, sig_width: f64, ts: Ts) -> f64 {
         let baza = self.kap_f(
             self.cfg.sl_min_dist,
@@ -1457,14 +1075,6 @@ impl Engine {
         v
     }
 
-    /// M3: dystans od LEPSZEJ krawędzi strefy do SL — oba końce z SUROWEGO
-    /// sygnału.
-    ///
-    /// Surowego, bo inaczej powstałoby równanie z samym sobą po obu stronach:
-    /// strefa rozszerzona zależy od `deep`, a `sl_min_dist` liczy się od
-    /// środka strefy rozszerzonej. `None`, gdy sygnał nie podał stopu albo
-    /// stop leży po stronie zysku (dane popsute) — brak wiedzy nie ma prawa
-    /// zmieniać geometrii.
     #[inline]
     fn dystans_do_sl(e: &EntrySignal) -> Option<f64> {
         let sl = e.sl?;
@@ -1479,9 +1089,6 @@ impl Engine {
 
     #[inline]
     fn adaptive_deep_offset(&self, sig_width: f64, dyst_do_sl: Option<f64>) -> f64 {
-        // Pierwszeństwo, bo `entry_deep_zone_mult` liczy z szerokości strefy
-        // i nadal potrafi zejść pod stop — a to jest dokładnie ten błąd,
-        // dla którego ta gałąź powstała.
         if self.cfg.entry_deep_frac_to_sl > 0.0 {
             if let Some(d) = dyst_do_sl {
                 return d * self.cfg.entry_deep_frac_to_sl;
@@ -1512,7 +1119,6 @@ impl Engine {
         (n as u32).clamp(1, base.saturating_mul(3).max(1))
     }
 
-    /// Ile jednostek postawić na poziomie PRZY DZISIEJSZEJ zmienności.
     #[inline]
     fn scaled_units(&self, base: u32, ts: Ts) -> u32 {
         let f = self.vol_factor(ts);
@@ -1526,25 +1132,11 @@ impl Engine {
         (self.price_hist.clone(), self.vol_hist.clone())
     }
 
-    /// Wstawia historię rynku do świeżego silnika. Patrz [`Engine::market_history`].
     pub fn set_market_history(&mut self, price: Vec<(Ts, Px)>, vol: Vec<(Ts, Px)>) {
         self.price_hist = price;
         self.vol_hist = vol;
     }
 
-    /// Przejmuje koszyki odtworzone ze stanu konta po restarcie.
-    ///
-    /// Numer koszyka nie jest ozdobnikiem: siedzi w komentarzu zlecenia
-    /// u brokera (`CD<koszyk>.<poziom>`) i jest JEDYNĄ rzeczą, po której
-    /// pozycja rozpoznaje swój koszyk po restarcie. Dlatego odtworzone
-    /// koszyki muszą zachować ORYGINALNE numery.
-    ///
-    /// Metoda istnieje po to, żeby nie dało się przy tym zapomnieć o liczniku:
-    /// gdyby `next_basket_id` został na 1, pierwszy nowy sygnał prędzej czy
-    /// później wszedłby w numer koszyka już istniejącego i pozycje dwóch
-    /// różnych sygnałów zlałyby się w jeden — z policzonym z pomieszanych
-    /// danych etapem celów i stop-lossem. Licznik podnosi się tutaj sam,
-    /// więc wywołujący nie ma jak tego pominąć.
     pub fn adopt_baskets(&mut self, baskets: Vec<Basket>) {
         for bk in baskets {
             self.next_basket_id = self.next_basket_id.max(bk.id.saturating_add(1));
@@ -1554,10 +1146,6 @@ impl Engine {
                 self.msg_to_basket
                     .insert((bk.source.clone(), *alias), bk.id);
             }
-            // A7: `done_actions` bylo dotad tylko w RAM. Wczytujemy je
-            // WYŁĄCZNIE za nowa osia, wiec brak klucza w starym presecie
-            // zachowuje przebieg legacy 1:1. Migawka niesie tylko akcje
-            // rzeczywiscie wykonane i tylko dla tego koszyka.
             if self.cfg.dedup_management_po_restarcie {
                 for zapis in &bk.persisted_done_actions {
                     let done = self
@@ -1576,14 +1164,9 @@ impl Engine {
                 None => self.baskets.push(bk),
             }
         }
-        // Adopcja może wymienić treść bez zmiany liczby koszyków.
         self.rebuild_basket_slots();
     }
 
-    /// Zapisuje wykonana akcje przy zywym koszyku, aby `adopt_baskets`
-    /// odtworzyl pamiec dedupu po restarcie procesu. Wektor zamiast HashMap
-    /// daje stabilny JSON, a liczba komunikatow jednego zywego koszyka jest
-    /// mala. Powtorzenie klucza nie powieksza zrzutu.
     fn persist_done_action(&mut self, basket_id: u32, msg_id: i64, action: &str) {
         let Some(bk) = self.baskets.iter_mut().find(|x| x.id == basket_id) else {
             return;
@@ -1609,28 +1192,14 @@ impl Engine {
         }
     }
 
-    /// Najwyższy dotąd użyty numer koszyka + 1. Do kontroli po odtworzeniu.
     pub fn next_basket_id(&self) -> u32 {
         self.next_basket_id
     }
 
-    // ============================================================
-    //  KOSZYK JAKO CAŁOŚĆ — wielkości pierwszej klasy
-    // ============================================================
 
-    /// Migawka jednego koszyka: ile w sumie warte są WSZYSTKIE jego pozycje.
-    ///
-    /// Silnik podejmował decyzje per pozycja, a kanał zarządza koszykiem.
-    /// To jest JEDYNE miejsce liczenia tych wielkości — reguła RISK FREE,
-    /// przezbrojenie siatki i moduł cech biorą je stąd, żeby nie powstały
-    /// trzy definicje „wyniku koszyka".
     pub fn basket_view<B: Broker>(&self, b: &B, id: u32) -> Option<BasketView> {
         let bk = self.basket(id)?;
         let mut v = widok_koszyka(bk, b.positions(), &b.quote());
-        // Liczba czekających zleceń to JEDYNA wielkość, której nie da się
-        // policzyć z samych pozycji — dlatego uzupełnia ją wariant znający
-        // brokera. Moduł obserwacji, który woła wolną funkcję, dostaje tu
-        // zero i musi to wiedzieć.
         v.pending_layers = b
             .pendings()
             .iter()
@@ -1639,7 +1208,6 @@ impl Engine {
         Some(v)
     }
 
-    /// Migawki wszystkich ŻYWYCH koszyków.
     pub fn basket_views<B: Broker>(&self, b: &B) -> Vec<BasketView> {
         self.baskets
             .iter()
@@ -1648,10 +1216,6 @@ impl Engine {
             .collect()
     }
 
-    /// Aktualizuje szczyt łącznego wyniku każdego żywego koszyka.
-    ///
-    /// Musi biec na bieżąco — z migawki szczytu nie da się odtworzyć. To jest
-    /// koszykowy odpowiednik `Position::peak_pts`.
     fn update_basket_peaks<B: Broker>(&mut self, b: &B, q: &Quote) {
         if self.baskets.is_empty() {
             return;
@@ -1667,10 +1231,6 @@ impl Engine {
             if pl > bk.peak_pl_usd {
                 bk.peak_pl_usd = pl;
             }
-            // CHWILA PIERWSZEGO DOTKNIĘCIA każdego celu. Zapisujemy niezależnie
-            // od `tp_source`, bo okna `lead`/`lag` muszą działać także wtedy,
-            // gdy etapy prowadzi kanał — inaczej nie byłoby do czego porównać
-            // znacznika komunikatu.
             if bk.tp_touch_ts.len() < bk.tps.len() {
                 bk.tp_touch_ts.resize(bk.tps.len(), 0);
             }
@@ -1687,8 +1247,6 @@ impl Engine {
                 };
                 if dotkniety {
                     bk.tp_touch_ts[i] = q.ts;
-                    // CENA, nie poziom: przy luce rynek bywa daleko za celem,
-                    // a wyjście rozlicza się po cenie, nie po poziomie.
                     bk.tp_touch_px[i] = q.exit(bk.side);
                 }
             }
@@ -1718,18 +1276,11 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  DZIENNIK ZDARZEŃ
-    // ============================================================
 
-    /// Identyfikator przebiegu — prefiks wszystkich `event_id`.
-    /// Ustawia go warstwa, która ma zegar; rdzeń nie umie wymyślić czegoś
-    /// unikalnego bez zaglądania do zegara, a od tego jest zależny determinizm.
     pub fn set_run_id(&mut self, id: impl Into<String>) {
         self.journal.run_id = id.into();
     }
 
-    /// Zabiera nazbierane zdarzenia. Pętla woła to i oddaje je do zapisu.
     pub fn drain_journal(&mut self) -> Vec<journal::JournalEvent> {
         self.journal.drain()
     }
@@ -1748,7 +1299,6 @@ impl Engine {
         ))
     }
 
-    /// Odrzucenie akcji z wiadomości — z POWODEM z zamkniętej listy.
     fn jreject<B: Broker>(
         &mut self,
         b: &B,
@@ -1759,9 +1309,6 @@ impl Engine {
     ) {
         let kod = format!("{code:?}");
         *self.odrzuty.entry(kod.clone()).or_insert(0) += 1;
-        // REJESTR DO WYCENY (Pakiet E3): tylko odrzucone WEJŚCIA i tylko te
-        // z tej samej wiadomości, którą właśnie obrabia `handle_entry` —
-        // dopisek jest ślepy i nie ma prawa niczego rozstrzygnąć.
         if action == "entry" {
             if let Some(w) = &self.wejscie_w_obrobce {
                 if w.msg_id == m.msg_id {
@@ -1793,8 +1340,6 @@ impl Engine {
         );
     }
 
-    /// Zignorowany komunikat zarządzający (dawne `TARGET_ignore_B` — 72
-    /// wystąpienia w logu i ani razu podany powód).
     fn jignore<B: Broker>(
         &mut self,
         b: &B,
@@ -1804,8 +1349,6 @@ impl Engine {
         code: RejectCode,
         text: impl Into<String>,
     ) {
-        // Pakiet A2: licznik PRZED bramką dziennika, bezwarunkowo — pamięć
-        // dedupu nie ma prawa zależeć od tego, czy dziennik jest wyciszony.
         self.zignorowane += 1;
         if !self.journal.wants(EventLevel::Warn) {
             return;
@@ -1829,7 +1372,6 @@ impl Engine {
         );
     }
 
-    /// Zwykła notatka silnika w dzienniku — bez migawki, żeby nie puchła.
     #[allow(dead_code)]
     fn jnote(&mut self, ts: Ts, level: EventLevel, cat: EventCategory, text: impl Into<String>) {
         if !self.journal.wants(level) {
@@ -1839,10 +1381,6 @@ impl Engine {
             .push(Ev::new(ts, level, cat, EventKind::Note).text(text).build());
     }
 
-    /// Zadziałał strażnik kapitału: zapisujemy PRÓG, WARTOŚĆ i stan konta.
-    ///
-    /// Samo „EMERGENCY STOP" nie mówi, czy limit był za ciasny, czy rynek za
-    /// szybki. Trzy liczby obok siebie odpowiadają na to od ręki.
     fn jguard<B: Broker>(
         &mut self,
         b: &B,
@@ -1877,51 +1415,31 @@ impl Engine {
         );
     }
 
-    // ============================================================
-    //  LOT
-    // ============================================================
 
-    /// KREDYT SKUTECZNY — nominalna kwota bonusu dla odliczania.
-    ///
-    /// `kredyt_reczny > 0` nadpisuje odczyt z terminala; **`0` znaczy AUTOMAT**,
-    /// a nie „kredytu nie ma" (patrz `Settings::kredyt_reczny`). Przy
-    /// wyłączonym `odlicz_kredyt` zawsze zero. Rzeczywisty odpis z wybranej
-    /// podstawy może być mniejszy; pokazuje go `kredyt_odliczony_od_podstawy`.
     #[inline]
     pub fn kredyt_skuteczny(&self) -> f64 {
         self.cfg.kredyt_skuteczny_z(self.stats.credit)
     }
 
-    /// PODSTAWA WIELKOŚCI POZYCJI według wybranego kontraktu kredytowego.
-    /// MT5: wpłata 300 + bonus 300 daje B=300, C=300, E=600 bez pozycji.
-    /// `credit_balance_separate` ON nie odejmuje C drugi raz od B. Equity
-    /// pomniejsza o skuteczny C tylko przy `odlicz_kredyt`; Min porównuje
-    /// własne B i E. OFF zachowuje dawny wzór max(wybrana podstawa−C,0).
     #[inline]
     pub fn podstawa_lota(&self) -> f64 {
-        self.cfg.podstawa_lota_z_konta(self.stats.balance, self.stats.equity, self.stats.credit)
+        self.cfg
+            .podstawa_lota_z_konta(self.stats.balance, self.stats.equity, self.stats.credit)
     }
 
-    /// Rzeczywisty odpis z WYBRANEJ podstawy lota, nie nominalny ACCOUNT_CREDIT.
-    /// Balance w modelu oddzielnego kredytu nie zawiera bonusu: odpis wynosi0.
-    /// OFF zachowuje dawną telemetryczną wartość, tak jak dawną arytmetykę.
     pub fn kredyt_odliczony_od_podstawy(&self) -> f64 {
-        if !self.cfg.credit_balance_separate { return self.kredyt_skuteczny(); }
+        if !self.cfg.credit_balance_separate {
+            return self.kredyt_skuteczny();
+        }
         let raw = match self.cfg.lot_base {
             crate::settings::PodstawaLota::Balance => self.stats.balance,
             crate::settings::PodstawaLota::Equity => self.stats.equity,
             crate::settings::PodstawaLota::MinOfBoth => self.stats.balance.min(self.stats.equity),
-        }.max(0.0);
+        }
+        .max(0.0);
         (raw - self.podstawa_lota()).max(0.0)
     }
 
-    /// SKUTECZNY SUFIT LOTA — stały `lot_max` albo policzony z salda.
-    ///
-    /// Patrz `lot_max_z_salda`. Bierzemy MNIEJSZY z dwóch, żeby ręcznie
-    /// wpisany sufit zawsze mógł jeszcze przyciąć — inaczej włączenie
-    /// automatu po cichu podnosiłoby limit, który ktoś ustawił świadomie.
-    ///
-    /// `f64::MAX` znaczy „bez sufitu" i taka jest konwencja `lot_max = 0`.
     #[inline]
     fn sufit_lota(&self) -> f64 {
         let staly = if self.cfg.lot_max.is_finite() && self.cfg.lot_max > 0.0 {
@@ -1933,7 +1451,6 @@ impl Engine {
         if dz <= 0.0 {
             return staly;
         }
-        // Od PODSTAWY LOTA, nie od surowego salda: kredyt ma zostać poduszką.
         let z_salda = self.podstawa_lota() / dz;
         if !z_salda.is_finite() || z_salda <= 0.0 {
             return staly;
@@ -1944,8 +1461,6 @@ impl Engine {
     #[inline]
     fn wolumen_zlecenia(&self, v: f64) -> f64 {
         if self.cfg.order_volume_contract_v2 {
-            // Only the final broker-aware normalizer quantizes V2 orders.
-            // Do not promote residual top-ups to lot_min here.
             return match self.volume_limits().bounds() {
                 Ok((_, maximum)) if v.is_finite() && v > 0.0 => v.min(maximum),
                 _ => 0.0,
@@ -1958,8 +1473,6 @@ impl Engine {
             0.01
         };
         let gora = self.sufit_lota();
-        // Odwrócone granice nie mogą panikować — panel pozwala wpisać dowolne
-        // dwie liczby. Ta sama ostrożność co w `lot_size`.
         let (dol, gora) = if dol <= gora {
             (dol, gora)
         } else {
@@ -1970,21 +1483,29 @@ impl Engine {
 
     fn volume_limits(&self) -> crate::volume_contract::StrategyVolumeLimits {
         crate::volume_contract::StrategyVolumeLimits {
-            minimum: self.cfg.lot_min, maximum: self.cfg.lot_max,
-            capital_per_lot: self.cfg.lot_max_z_salda, capital: self.podstawa_lota(),
+            minimum: self.cfg.lot_min,
+            maximum: self.cfg.lot_max,
+            capital_per_lot: self.cfg.lot_max_z_salda,
+            capital: self.podstawa_lota(),
         }
     }
 
     fn final_open_volume<B: Broker>(&mut self, b: &B, requested: f64) -> BResult<f64> {
-        // OFF does not query new broker metadata and preserves the old value.
-        if !self.cfg.order_volume_contract_v2 { return Ok(requested); }
+        if !self.cfg.order_volume_contract_v2 {
+            return Ok(requested);
+        }
         let spec = crate::volume_contract::VolumeSpec {
-            minimum: b.volume_min(), step: b.volume_step(), maximum: b.volume_max(),
+            minimum: b.volume_min(),
+            step: b.volume_step(),
+            maximum: b.volume_max(),
         };
         match crate::volume_contract::normalize_open_volume(requested, spec, self.volume_limits()) {
             Ok(volume) => Ok(volume),
             Err(reason) => {
-                *self.odrzuty.entry(format!("VolumeContract::{reason:?}")).or_insert(0) += 1;
+                *self
+                    .odrzuty
+                    .entry(format!("VolumeContract::{reason:?}"))
+                    .or_insert(0) += 1;
                 self.log(b.quote().ts, 2, format!(
                     "VOLUME CONTRACT: odmowa nowego zlecenia ({reason:?}); requested={requested:?}, \
                      broker min={:?}/step={:?}/max={:?}, strategy min={:?}/max={:?}/capital_per_lot={:?}",
@@ -1996,32 +1517,50 @@ impl Engine {
         }
     }
 
-    fn cost_entry_blocked<B:Broker>(&self,b:&B)->Option<&str> {
-        if let Some(reason)=self.cost_reconciliation_required.as_deref() {return Some(reason);}
-        if !self.cfg.closed_profit_net_costs {return None;}
-        if !self.cfg.basket_realized_broker_only {return Some("canonical net requires basket_realized_broker_only");}
-        if !b.cost_net_supported() {return Some("canonical net pipeline unsupported, inactive or requires review");}
+    fn cost_entry_blocked<B: Broker>(&self, b: &B) -> Option<&str> {
+        if let Some(reason) = self.cost_reconciliation_required.as_deref() {
+            return Some(reason);
+        }
+        if !self.cfg.closed_profit_net_costs {
+            return None;
+        }
+        if !self.cfg.basket_realized_broker_only {
+            return Some("canonical net requires basket_realized_broker_only");
+        }
+        if !b.cost_net_supported() {
+            return Some("canonical net pipeline unsupported, inactive or requires review");
+        }
         None
     }
 
-    fn latch_cost_fault<B:Broker>(&mut self,b:&mut B,ts:Ts,reason:String) {
+    fn latch_cost_fault<B: Broker>(&mut self, b: &mut B, ts: Ts, reason: String) {
         if self.cost_reconciliation_required.is_none() {
-            self.log(ts,2,format!("COST HOLD: {reason}; nowe ryzyko zablokowane, wyjścia pozostają czynne"));
-            self.cost_reconciliation_required=Some(reason.clone());
+            self.log(
+                ts,
+                2,
+                format!("COST HOLD: {reason}; nowe ryzyko zablokowane, wyjścia pozostają czynne"),
+            );
+            self.cost_reconciliation_required = Some(reason.clone());
         }
-        self.halted=Some(format!("COST HOLD: {reason}"));
+        self.halted = Some(format!("COST HOLD: {reason}"));
         b.report_cost_consumer_fault(&reason);
     }
 
-    /// Final boundary for every engine-owned opening path; never closes trades.
     fn open_market_order<B: Broker>(&mut self, b: &mut B, mut r: OrderReq) -> BResult<Ticket> {
-        if self.continuation_entry_blocked() {return Err(BrokerError::Rejected);}
-        if self.entry_edit_blocks(r.basket) { return Err(BrokerError::Rejected); }
-        if let Some(reason)=self.cost_entry_blocked(b).map(str::to_owned) {
-            self.latch_cost_fault(b,b.quote().ts,reason);return Err(BrokerError::Rejected);
+        if self.continuation_entry_blocked() {
+            return Err(BrokerError::Rejected);
+        }
+        if self.entry_edit_blocks(r.basket) {
+            return Err(BrokerError::Rejected);
+        }
+        if let Some(reason) = self.cost_entry_blocked(b).map(str::to_owned) {
+            self.latch_cost_fault(b, b.quote().ts, reason);
+            return Err(BrokerError::Rejected);
         }
         if self.relot_entry_requires_review(r.basket, r.level) {
-            if let Some(id)=r.basket { self.relot_note(id,b.quote().ts,"RequiresReviewEntryBlocked"); }
+            if let Some(id) = r.basket {
+                self.relot_note(id, b.quote().ts, "RequiresReviewEntryBlocked");
+            }
             return Err(BrokerError::Rejected);
         }
         r.volume = self.final_open_volume(b, r.volume)?;
@@ -2029,26 +1568,26 @@ impl Engine {
     }
 
     fn place_pending_order<B: Broker>(&mut self, b: &mut B, mut r: PendingReq) -> BResult<Ticket> {
-        if self.continuation_entry_blocked() {return Err(BrokerError::Rejected);}
-        if self.entry_edit_blocks(r.basket) { return Err(BrokerError::Rejected); }
-        if let Some(reason)=self.cost_entry_blocked(b).map(str::to_owned) {
-            self.latch_cost_fault(b,b.quote().ts,reason);return Err(BrokerError::Rejected);
+        if self.continuation_entry_blocked() {
+            return Err(BrokerError::Rejected);
+        }
+        if self.entry_edit_blocks(r.basket) {
+            return Err(BrokerError::Rejected);
+        }
+        if let Some(reason) = self.cost_entry_blocked(b).map(str::to_owned) {
+            self.latch_cost_fault(b, b.quote().ts, reason);
+            return Err(BrokerError::Rejected);
         }
         if self.relot_entry_requires_review(r.basket, r.level) {
-            if let Some(id)=r.basket { self.relot_note(id,b.quote().ts,"RequiresReviewEntryBlocked"); }
+            if let Some(id) = r.basket {
+                self.relot_note(id, b.quote().ts, "RequiresReviewEntryBlocked");
+            }
             return Err(BrokerError::Rejected);
         }
         r.volume = self.final_open_volume(b, r.volume)?;
         b.place_pending(r)
     }
 
-    /// Czy hamulec SL-HIT jest CZYNNY w chwili `ts` — niezależnie od tego,
-    /// czy w tym presecie blokuje wejście, czy tylko zmniejsza lot.
-    ///
-    /// Jeden warunek w jednym egzemplarzu: pytają o niego bramka wejść
-    /// i obie ścieżki otwarcia. Gdyby to były dwie kopie, prędzej czy później
-    /// zaczęłyby odpowiadać różnie, a taki rozjazd jest niewidoczny w wyniku
-    /// dopóki nie zmieni pieniędzy.
     #[inline]
     fn slhit_hamuje(&self, ts: Ts) -> bool {
         self.cfg.slhit_pause_n > 0 && ts < self.slhit_pauza_do
@@ -2056,9 +1595,6 @@ impl Engine {
 
     pub fn lot_size(&self, balance: f64) -> f64 {
         let c = &self.cfg;
-        // BRAMKA KAPITAŁOWA wielkości pozycji: na małym koncie wolno grać
-        // innym procentem niż na urośniętym. Przy wyłączonym progu (0)
-        // `kap_f` oddaje `lot_percent` i wzór jest dokładnie taki jak dotąd.
         let pct = self.kap_f(c.lot_percent, c.lot_percent_small, c.lot_percent_small_mult);
         let mut lot = if c.lot_mode_percent {
             balance * pct / 100.0 / 100.0
@@ -2072,27 +1608,9 @@ impl Engine {
         if c.vol_size_mode != VolSizeMode::Off {
             lot *= self.zmiennosc.mult;
         }
-        // MIEKKI REZIM — mniejszy lot na sygnale niezgodnym z rezimem.
-        //
-        // Stoi w tym samym miejscu co mnoznik zmiennosci i z tego samego
-        // powodu: ma sie mnozyc przez lot bazowy i dopiero potem wpasc pod
-        // `lot_min` i `sufit_lota()`. Sufit jest polisa na sciane marginesu
-        // i nie ustepuje przed zadna regula rozmiaru.
-        //
-        // PARYTET: przy `regime_soft = false` flaga nigdy nie jest ustawiona,
-        // wiec ta galaz sie nie wykonuje — nie ma mnozenia przez 1,0 i nie ma
-        // odczytu pola. Ciag operacji jest dokladnie ten sam co przed zmiana.
         if self.rezim_miekki && c.regime_soft_lot_mult != 1.0 {
             lot *= c.regime_soft_lot_mult;
         }
-        // MIĘKKI HAMULEC SL-HIT (F2b) — mniejszy lot zamiast zamkniętej bramki.
-        //
-        // Stoi obok miękkiego reżimu i z tego samego powodu: mnoży lot bazowy
-        // i dopiero potem wpada pod `lot_min` / `sufit_lota()`.
-        //
-        // PARYTET: przy `slhit_pause_lot_mult = 0` (domyślnie) flaga nigdy
-        // nie jest ustawiona, więc gałąź się nie wykonuje — nie ma mnożenia
-        // przez 1,0 i nie ma odczytu pola.
         if self.slhit_miekki && c.slhit_pause_lot_mult > 0.0 {
             lot *= c.slhit_pause_lot_mult;
         }
@@ -2121,16 +1639,7 @@ impl Engine {
         ((lot.max(dol).min(gora)) * 100.0).round() / 100.0
     }
 
-    /// ILE SZCZEBLI stawia jeden sygnał — `entry_units` po bramce kapitałowej
-    /// i miękkim reżimie, w wariancie GRUBSZYM z limitowego i rynkowego.
-    ///
-    /// Wystawione na zewnątrz, bo panel musi umieć podpisać lot nogi liczbą
-    /// szczebli; bez tego pokazuje wolumen jednego zlecenia i nazywa go
-    /// ekspozycją koszyka.
     pub fn poziomy_wejscia_planowane(&self) -> u32 {
-        // Sygnał limitowy i rynkowy mogą mieć różną liczbę szczebli
-        // (`entry_units_limit`). Bierzemy GORSZY z dwóch — panel ostrzega,
-        // więc ma pokazywać ten wariant, który wchodzi grubiej.
         self.units_base(true).max(self.units_base(false)).max(1)
     }
 
@@ -2142,17 +1651,11 @@ impl Engine {
         } else {
             1.0
         };
-        // Wagi z R:R biorą się z geometrii KONKRETNEGO sygnału, której tu
-        // nie ma. Ich średnia to też 1, więc równe wagi są uczciwym
-        // przybliżeniem — a nie zmyśloną drabinką.
         let mult = if self.cfg.entry_weights_from_rr {
             vec![1.0; n]
         } else {
             self.cfg.depth_multipliers(n)
         };
-        // Rozkładamy plan na POJEDYNCZE ZLECENIA, a nie sumujemy od razu:
-        // limit pozycji niżej tnie SZTUKI, więc trzeba wiedzieć, ile ich jest
-        // i ile waży każda.
         let mut sztuki: Vec<f64> = Vec::with_capacity(n * na_poziomie as usize);
         for m in &mult {
             let v = self.wolumen_zlecenia(lot * m);
@@ -2160,16 +1663,6 @@ impl Engine {
                 sztuki.push(v);
             }
         }
-        // LIMIT POZYCJI też jest sufitem pierwszej fali — ale WYŁĄCZNIE wtedy,
-        // gdy jest pilnowany na wypełnieniu. Bez `enforce_position_limit_on_fill`
-        // wiszące zlecenia wypełniają się ponad limit (dokładnie ta dziura,
-        // którą ta flaga zatyka), więc plan zostaje nieprzycięty.
-        //
-        // Bez tego panel straszy nogę ZEN (`NEWKOAN-3`: `entry_units` 10 przy
-        // `max_open_positions` 1) liczbą dziesięć razy większą, niż ta noga
-        // umie otworzyć — a ostrzeżenie, które przesadza, przestaje być
-        // czytane. Bierzemy NAJGRUBSZE sztuki: nie wiemy, które szczeble
-        // wypełnią się pierwsze, a szacujemy SUFIT.
         let limit = self.max_open_positions_eff() as usize;
         if self.cfg.enforce_position_limit_on_fill && limit > 0 && sztuki.len() > limit {
             sztuki.sort_by(|a, b| b.partial_cmp(a).unwrap_or(core::cmp::Ordering::Equal));
@@ -2179,43 +1672,26 @@ impl Engine {
         (suma * 100.0).round() / 100.0
     }
 
-    // ============================================================
-    //  WIADOMOŚCI
-    // ============================================================
 
     pub fn on_message<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage) {
         self.continuation_observe(b);
         self.refresh_basket_slots();
         let deferred_replay = self.deferred_entries.is_replay(m);
-        if !deferred_replay { self.stats.messages += 1; }
+        if !deferred_replay {
+            self.stats.messages += 1;
+        }
         cien::puls(m.ts, conduit_mozg_cien::cien::PULS_WIADOMOSC);
-        // Przy `parser_geometryczny = false` (domyślnie) to jest CO DO ZNAKU
-        // to samo, co `parser::parse(&m.text)` — patrz `OpcjeParsera::default`.
         let mut signals = parser::parse_z_opcjami(
             &m.text,
             parser::OpcjeParsera {
                 geometryczny: self.cfg.parser_geometryczny,
                 min_pewnosc: self.cfg.parser_min_pewnosc,
-                // Pakiet B1: przy `false` (domyślnie) bramka intencji w
-                // parserze jest martwa — ciąg operacji jak dotąd.
                 rf_wymaga_wykonania: self.cfg.rf_wymaga_wykonania,
-                // W31b: przy `false` (domyślnie) parser NIE emituje
-                // `Signal::TakePartials`, więc lista sygnałów — a przez nią
-                // `stats.signals`, pamięć akcji i dedup edycji — jest co do
-                // bitu jak przed tą osią.
                 partials_jako_komenda: self.cfg.partials_wykonuj,
                 luz_interpunkcyjny: self.cfg.parser_luz_interpunkcyjny,
-                // Podsumowania dnia/tygodnia z licznikami `TP1 Hit: N` są
-                // statystyką, nie poleceniem dla najnowszego koszyka.
                 recap_guard: self.cfg.recap_guard,
             },
         );
-        // `AT TPn` to proximity, nie trafienie. Filtr jest PO parserze,
-        // dzieki czemu usuwa wylacznie `TpHit`, a niezalezne intencje z tej
-        // samej NEW/EDIT (RF, SPP, CANCEL, BE/SL, future targets) zostaja.
-        // Numerowane `TPn HIT` i `price HIT` nie sa tu tlumione — ich
-        // wykonanie w GOD-X5 rozstrzyga istniejace
-        // `tp_source = SignalConfirmedByPrice` na biezacym Bid/Ask MT5.
         let telemetry_tp_suppressed = if self.cfg.profit_update_telemetry_only {
             parser::suppress_at_tp_hits(&mut signals, &m.text)
         } else {
@@ -2235,11 +1711,6 @@ impl Engine {
             self.stats.signals += 1;
         }
 
-        // ---- DZIENNIK: wiadomość i to, na co się rozłożyła ----
-        //
-        // Zdarzenie niesie `msg_id`, źródło i listę rozpoznanych akcji, więc
-        // każde późniejsze zlecenie da się doprowadzić do konkretnej linijki
-        // z kanału bez zgadywania po czasie.
         if self.journal.wants(EventLevel::Info) && !deferred_replay {
             let akcje: Vec<String> = signals
                 .iter()
@@ -2269,11 +1740,10 @@ impl Engine {
             );
         }
 
-        // A queued intention is NOT an executed entry. Resolve edits/replies
-        // before legacy orphan/dedup routing could target an older basket.
-        if self.deferred_message(b, m, &signals) { return; }
+        if self.deferred_message(b, m, &signals) {
+            return;
+        }
 
-        // ---- EDYCJA: nie tworzymy nowego koszyka, poprawiamy istniejący ----
         if let Some(orig) = m.edit_of {
             if let Some(&bid) = self.msg_to_basket.get(&(m.source.clone(), orig)) {
                 if let Some(poz) = signals.iter().position(|s| matches!(s, Signal::Entry(_))) {
@@ -2281,17 +1751,10 @@ impl Engine {
                         Signal::Entry(e) => e.clone(),
                         _ => unreachable!("position() wskazało Entry"),
                     };
-                    let edit_outcome=self.apply_entry_edit(b, bid, &entry, m.ts);
+                    let edit_outcome = self.apply_entry_edit(b, bid, &entry, m.ts);
                     if !self.cfg.edycja_wykonuje_reszte_akcji {
-                        // zachowanie sprzed Pakietu A3 co do bitu: edycja
-                        // z wejściem kończy obsługę wiadomości
                         return;
                     }
-                    // Pakiet A3: wejście z tej edycji zostało WYKONANE
-                    // (przezbrojenie koszyka), więc znika z listy, a reszta
-                    // akcji — doklejone „TP1 HIT", „SPP" — idzie dalej
-                    // normalną ścieżką (dedup + dispatch). Edycja strefy to
-                    // wykonana akcja `entry`, więc trafia do pamięci akcji.
                     signals.remove(poz);
                     let done = self
                         .done_actions
@@ -2302,11 +1765,6 @@ impl Engine {
                     }
                 }
             } else if self.cfg.edycja_sieroty_nie_otwiera {
-                // Pakiet A5: edycja-SIEROTA — wiadomość, której mapa nie zna
-                // (najczęściej po restarcie, bo mapa zna tylko koszyki żywe).
-                // Wejście z takiej edycji otwierałoby ŚWIEŻY koszyk na
-                // starych cenach; komunikaty zarządzające idą dalej
-                // normalnie, `target_basket` sobie poradzi.
                 let ile_wejsc = signals
                     .iter()
                     .filter(|s| matches!(s, Signal::Entry(_)))
@@ -2324,15 +1782,7 @@ impl Engine {
                     signals.retain(|s| !matches!(s, Signal::Entry(_)));
                 }
             }
-            // Edycja komunikatu ZARZĄDZAJĄCEGO. Sygnalista dopisuje treść do
-            // istniejącej wiadomości („TP1 HIT" → „TP1 HIT · SECURING PARTIAL
-            // PROFITS"), więc powtórne wykonanie starych akcji jest realnym
-            // ryzykiem: koszyk drugi raz inkasuje transzę na TP1.
             if self.cfg.dedup_edited_signals {
-                // Pakiet A4: oś wybiera klucz — v1 gubi wartości, v2 je
-                // niesie, więc edycja zmieniająca POZIOM nie ginie jako
-                // duplikat. Ten sam wybór MUSI obowiązywać przy zapisie
-                // w pętli dispatch niżej, inaczej klucze się nie spotkają.
                 let z_wartoscia = self.cfg.dedup_klucz_z_wartoscia;
                 let klucz_akcji = |s: &Signal| -> String {
                     if z_wartoscia {
@@ -2375,12 +1825,6 @@ impl Engine {
             }
         }
 
-        // A7: Telegram po rekonekcie potrafi dostarczyc juz obsluzona
-        // wiadomosc ponownie jako NEW, nie tylko jako EDIT. Stary blok wyzej
-        // celowo dotyka wylacznie explicit edit; ta waska galaz jest aktywna
-        // tylko za nowym przelacznikiem i filtruje WYLACZNIE zarzadzanie.
-        // Wejscia zostaja dla osobnej `entry_idempotencja`, a MarketOpen nie
-        // ma koszyka-adresata, w ktorym da sie uczciwie utrwalic wlasciciela.
         if m.edit_of.is_none() && self.cfg.dedup_management_po_restarcie {
             if let Some(done) = self
                 .done_actions
@@ -2436,9 +1880,6 @@ impl Engine {
 
         let key = (m.source.clone(), m.edit_of.unwrap_or(m.msg_id));
         for s in signals {
-            // Cel zapisujemy PRZED dispatch, w tej samej chwili co routing
-            // wykonywanej akcji. Kolejne akcje jednej edycji moga zmienic
-            // stan koszyka, dlatego wyznaczamy go osobno dla kazdej z nich.
             let persistent_target = if self.cfg.dedup_management_po_restarcie
                 && !matches!(
                     &s,
@@ -2448,7 +1889,6 @@ impl Engine {
             } else {
                 None
             };
-            // Pakiet A4: ten sam wybór klucza co przy odczycie w bloku edycji.
             let klucz = (!matches!(s, Signal::Info)).then(|| {
                 if self.cfg.dedup_klucz_z_wartoscia {
                     s.action_key_v2()
@@ -2474,20 +1914,12 @@ impl Engine {
                             self.persist_done_action(basket_id, key.1, &k);
                         }
                     } else {
-                        // Kontrakt legacy: przy osi OFF dokladnie dawny zapis,
-                        // lacznie z ewentualnym powtorzeniem klucza w wektorze.
                         self.done_actions.entry(key.clone()).or_default().push(k);
                     }
                 }
             }
         }
         if self.done_actions.len() > 2000 {
-            // Najstarsze identyfikatory wiadomości są najniższe — Telegram
-            // numeruje rosnąco w obrębie czatu. Po Pakiecie A1 klucz jest
-            // parą (źródło, id): sortujemy po samym id i usuwamy 1000
-            // najstarszych GLOBALNIE, jak dotąd. Dogrywka po źródle przy
-            // RÓWNYCH id jest wyłącznie po determinizm — kolejność iteracji
-            // HashMap zmienia się między uruchomieniami.
             let mut keys: Vec<(SourceKey, i64)> = self.done_actions.keys().cloned().collect();
             keys.sort_unstable_by_key(|k| (k.1, k.0.chat_id, k.0.topic_id));
             for k in keys.into_iter().take(1000) {
@@ -2496,15 +1928,6 @@ impl Engine {
         }
     }
 
-    /// STREFA SYGNALU PRZECIWNEGO STAJE SIE CELEM otwartych pozycji.
-    ///
-    /// Kanał wysyłający „SELL LIMITS @ 4400/4405" przy naszych pozycjach długich
-    /// mówi, gdzie widzi sufit. Zamiast zamykać po rynku — co zmierzyliśmy jako
-    /// -55 % — ustawiamy tam take-profit i czekamy, aż cena sama dojdzie.
-    ///
-    /// Dotyczy WYŁĄCZNIE koszyków TEGO SAMEGO ŹRÓDŁA: dwa kanały mogą mieć
-    /// przeciwne zdanie jednocześnie i to nie jest zmiana zdania nadawcy,
-    /// tylko dwie różne opinie.
     fn cel_ze_strefy_przeciwnej<B: Broker>(
         &mut self,
         b: &mut B,
@@ -2527,9 +1950,6 @@ impl Engine {
         for id in ids {
             let Some(bk) = self.basket(id) else { continue };
             let strona = bk.side;
-            // Dla pozycji DŁUGIEJ strefa przeciwna leży wyżej, więc bliższa
-            // krawędź to `lo`; dla krótkiej odwrotnie. Zapas przesuwa cel
-            // o kawałek PRZED nadawcę — to on tworzy tam podaż swoim zleceniem.
             let cel = match (self.cfg.cel_z_przeciwnego, strona) {
                 (C::Off, _) => continue,
                 (C::BliższaKrawedz, Side::Buy) => lo - zapas,
@@ -2539,8 +1959,6 @@ impl Engine {
                 (C::Srodek, Side::Buy) => (lo + hi) / 2.0 - zapas,
                 (C::Srodek, Side::Sell) => (lo + hi) / 2.0 + zapas,
             };
-            // Cel po ZŁEJ stronie rynku byłby natychmiastowym zamknięciem —
-            // a to jest dokładnie ta panika, której ta reguła ma unikać.
             let q = b.quote();
             let sensowny = match strona {
                 Side::Buy => cel > q.ask,
@@ -2558,7 +1976,6 @@ impl Engine {
                 .basket(id)
                 .map(|x| x.tickets.clone())
                 .unwrap_or_default();
-            // Zachowujemy istniejacy SL pozycji — zmieniamy WYLACZNIE cel.
             let mut n = 0usize;
             for t in tickety {
                 let sl = b.find_position(t).and_then(|p| p.sl);
@@ -2583,38 +2000,16 @@ impl Engine {
     fn dispatch<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage, s: Signal) {
         match s {
             Signal::Entry(e) => {
-                // SYGNAŁ PRZECIWNY ZAMYKA KOSZYK.
-                //
-                // To jest najsilniejsza informacja, jaką kanał w ogóle wysyła:
-                // sygnalista zmienił zdanie o kierunku. Pole `exit_on_opposite_signal`
-                // istniało od dawna, miało kontrolkę w panelu i opis w dokumencie
-                // jako „zaimplementowane" — a w rdzeniu nie miało ANI JEDNEGO
-                // odwołania. Zmierzyły to niezależnie dwa zespoły (rozstęp
-                // 0,0000 $ na pełnym zakresie). Pole kłamało użytkownikowi.
-                //
-                // Zamykamy TYLKO koszyki tego samego źródła: dwa kanały mogą
-                // mieć przeciwne zdanie jednocześnie i to nie jest zmiana zdania,
-                // tylko dwie różne opinie.
                 if self.cfg.exit_on_opposite_signal && !self.deferred_entries.protection_done(m) {
                     self.close_opposite_baskets(b, m, e.side);
                 }
-                // STREFA PRZECIWNA JAKO CEL — patrz `CelZPrzeciwnego`.
-                // Robimy to PRZED `handle_entry`, żeby nowy koszyk przeciwny
-                // nie dostał celu sam od siebie.
                 if self.cfg.cel_z_przeciwnego != crate::settings::CelZPrzeciwnego::Off
-                    && !self.deferred_entries.protection_done(m) {
+                    && !self.deferred_entries.protection_done(m)
+                {
                     self.cel_ze_strefy_przeciwnej(b, m, &e);
                 }
                 self.handle_entry(b, m, e);
-                // MIEKKI REZIM GASNIE TUTAJ, a nie w `handle_entry`.
-                //
-                // Tamta funkcja ma szesnascie instrukcji `return`; gaszenie
-                // flagi przy kazdej z nich to szesnascie miejsc, w ktorych
-                // wystarczy raz zapomniec, zeby zaniżony lot przeciekl na
-                // KOLEJNE wejscie — i to bez sladu w dzienniku, bo wszystko
-                // wygladaloby poprawnie. Tu sciezka wyjscia jest jedna.
                 self.rezim_miekki = false;
-                // F2b: to samo dotyczy miękkiego hamulca SL-HIT.
                 self.slhit_miekki = false;
             }
             Signal::TpHit { index } => {
@@ -2625,21 +2020,6 @@ impl Engine {
                 if let Some(id) = self.target_or_note(b, m, &key) {
                     self.obs
                         .na_komunikacie(id, m.ts, crate::obserwacje::Komunikat::TpHit);
-                    // ---- Z-6: TRAFIENIE BEZ NUMERU DOPASOWANE DO DRABINKI ----
-                    //
-                    // `handle_tp_hit` robi `index.unwrap_or(stage_now + 1)`, więc
-                    // komunikat bez numeru ZAWSZE podbija etap o jeden i nie ma
-                    // jak być idempotentny (trafienia numerowane są — 3094).
-                    // W trybie `Either` nie ma też żadnego potwierdzenia ceną,
-                    // więc spóźnione „4460 HIT" po tym, jak cena sama wykryła
-                    // TP1, inkasuje transzę TP2 z poziomu, na którym cena nigdy
-                    // nie była. Rozróżnienie poziomu od nienumerowanego wyniku
-                    // w pipsach jest więc częścią kontraktu parsera.
-                    //
-                    // `parser::hit_level` istniał od dawna i NIE MIAŁ w silniku
-                    // ani jednego czytelnika. Bierzemy NAJWYŻSZY szczebel
-                    // pasujący do poziomu z treści — dzięki temu ta sama
-                    // wiadomość powtórzona nie rusza etapu drugi raz.
                     let mut index = index;
                     if self.cfg.tp_hit_match_level && index.is_none() {
                         if let Some(v) = parser::hit_level(&m.text) {
@@ -2658,13 +2038,9 @@ impl Engine {
                             }
                         }
                     }
-                    // Nienumerowany komunikat o zysku nie wskazuje niezawodnie
-                    // konkretnego TP, więc opcjonalnie wymaga potwierdzenia ceną.
                     let sprawdzenie = if self.cfg.tp_price_only_strict
                         && self.cfg.tp_source == TpSource::PriceOnly
                     {
-                        // Mode authority precedes the narrower PIPS guard.
-                        // OFF preserves historical behavior for comparison.
                         Err(RejectCode::DisabledBySetting)
                     } else if self.cfg.tp_unindexed_pips_require_price
                         && index.is_none()
@@ -2676,8 +2052,6 @@ impl Engine {
                     };
                     match sprawdzenie {
                         Ok(()) => self.handle_tp_hit(b, id, index, m.ts, "kanał"),
-                        // Dawne `TARGET_ignore_B` — 72 razy w logu i ani razu
-                        // z powodem. Teraz powód jest kodem, który da się zliczyć.
                         Err(code) => self.jignore(
                             b,
                             m,
@@ -2690,9 +2064,6 @@ impl Engine {
                 }
             }
             Signal::SlHit => {
-                // HAMULEC SL-HIT: liczymy KAŻDY komunikat „SL HIT" kanału,
-                // także taki, który nie trafia w żaden nasz koszyk — informacja
-                // o reżimie pochodzi z kanału, nie z naszych pozycji.
                 self.slhit_dnia += 1;
                 if self.cfg.slhit_pause_n > 0
                     && self.slhit_dnia >= self.cfg.slhit_pause_n
@@ -2825,9 +2196,6 @@ impl Engine {
                 }
             }
             Signal::TakePartials => {
-                // Wariant powstaje TYLKO przy `partials_wykonuj` (bramka
-                // w `OpcjeParsera`), więc tutaj nie ma już drugiej bramki
-                // na włączniku — byłaby martwym kodem udającym ostrożność.
                 if let Some(id) = self.target_or_note(b, m, "partials") {
                     self.inkasuj_partials(b, id, m.ts);
                 }
@@ -2840,10 +2208,6 @@ impl Engine {
                 if let Some(id) = self.target_or_note(b, m, "spp") {
                     self.obs
                         .na_komunikacie(id, m.ts, crate::obserwacje::Komunikat::Spp);
-                    // GUARD WIEKU. Przezbrojenie koszyka nową drabinką celów
-                    // ma sens dla świeżego setupu. Stary koszyk z żywymi
-                    // runnerami dostawał nowe cele i wyzerowany etap — i
-                    // ciągnął się przez wiele dni, mieszając plany.
                     let too_old = self.cfg.spp_max_age_h > 0.0
                         && self
                             .basket(id)
@@ -2878,12 +2242,6 @@ impl Engine {
                         if strona.map(|sd| self.cele_spojne(sd, &targets)) == Some(true) {
                             if let Some(bk) = self.basket_mut(id) {
                                 let stara = std::mem::replace(&mut bk.tps, targets);
-                                // NOWA DRABINKA = NOWY PLAN. Etap jest indeksem
-                                // w tablicę celów, a znaczniki dotknięcia opisują
-                                // KONKRETNE poziomy — po podmianie tablicy jedno
-                                // i drugie wskazuje w próżnię. Zerujemy postęp
-                                // dokładnie z tego samego powodu co przy edycji
-                                // wiadomości (`apply_entry_edit`).
                                 if stara != bk.tps {
                                     bk.zeruj_postep();
                                 }
@@ -2901,12 +2259,6 @@ impl Engine {
                     if let Some(v) = sl {
                         self.set_basket_sl(b, id, v, m.ts);
                     }
-                    // JAWNY POZIOM STOPU OD SYGNALISTY („SL IS SET TO BE AT
-                    // 4668"). Domyślnie WYŁĄCZONE — patrz `SppSlMode`.
-                    //
-                    // Poziom jest znany DOKŁADNIE W CHWILI nadejścia tej
-                    // wiadomości i pochodzi wyłącznie z jej treści: żadna
-                    // późniejsza informacja tu nie wchodzi.
                     if self.cfg.spp_sl_mode != SppSlMode::Off {
                         if let Some(lvl) = spp_be_level {
                             self.zastosuj_spp_be(b, id, lvl, m.ts);
@@ -2917,12 +2269,6 @@ impl Engine {
                         if let Some(bk) = self.basket_mut(id) {
                             bk.secured = true;
                         }
-                        // Z-10: „SECURING PARTIAL PROFITS" i „RISK FREE" znaczą to
-                        // samo, a zachowywały się inaczej: RF ustawiał `secured_ts`
-                        // (więc koszyk łapał się na limit trzymania runnera), SPP
-                        // nie ustawiał (więc nie łapał się nigdy). Za flagą, bo to
-                        // zmienia liczbę domknięć `Expired` — a te są u nas
-                        // największym pojedynczym źródłem zysku.
                         if self.cfg.spp_arms_runner_clock {
                             if let Some(bk) = self.basket_mut(id) {
                                 if bk.secured_ts == 0 {
@@ -2950,8 +2296,6 @@ impl Engine {
             Signal::MarketOpen { side } => {
                 if self.cfg.honor_market_open {
                     self.handle_market_open(b, m, side);
-                    // F2b: miękki hamulec gaśnie tu z tego samego powodu co
-                    // przy zwykłym wejściu — jedna ścieżka wyjścia.
                     self.slhit_miekki = false;
                 } else {
                     self.log(
@@ -2977,14 +2321,6 @@ impl Engine {
                             bk.tps.push(value);
                         }
                     }
-                    // ---- Z-8: KOREKTA MA DOJŚĆ DO BROKERA ----
-                    //
-                    // Dotąd dispatch przepisywał wyłącznie `bk.tps` i notował.
-                    // Przy `assign_tp_per_position = true` (X3, HYPER-1)
-                    // pozycja trzymała u brokera STARY cel, pendingi też —
-                    // nowa drabinka wchodziła dopiero PRZY NASTĘPNYM trafieniu
-                    // (`retarget` w `handle_tp_hit`), czyli o jeden cel za
-                    // późno. Porównaj `Signal::SetSl`, które dociera od razu.
                     if self.cfg.tp_correction_to_broker {
                         self.retarget(b, id, m.ts);
                         let cel = self.basket(id).and_then(|bk| {
@@ -3030,15 +2366,6 @@ impl Engine {
         }
     }
 
-    /// Czy przyjąć komunikat `TP HIT` z kanału?
-    ///
-    /// Sygnalista bywa spóźniony albo przedwczesny. Reguła zależy od
-    /// `tp_source`; w trybach wymagających potwierdzenia sprawdzamy, czy
-    /// cena FAKTYCZNIE dotknęła danego poziomu (z tolerancją na różnice
-    /// spreadów między brokerami).
-    ///
-    /// Zwraca `Err(kod)` zamiast `false`, bo POWÓD odmowy jest tu ważniejszy
-    /// niż sama odmowa: bez niego zdarzenie „zignorowano cel" nie mówi nic.
     fn signal_tp_check<B: Broker>(
         &self,
         b: &B,
@@ -3057,8 +2384,6 @@ impl Engine {
                 let dotkniecie = bk.tp_touch_ts.get(stage - 1).copied().unwrap_or(0);
 
                 if dotkniecie > 0 {
-                    // Cena BYŁA na poziomie. Komunikat spóźniony ponad próg
-                    // opisuje setup, który zdążył się zmienić.
                     let lag = self.cfg.tp_signal_max_lag_s;
                     if lag > 0.0 {
                         let spoznienie = (q.ts - dotkniecie) as f64 / 1000.0;
@@ -3069,7 +2394,6 @@ impl Engine {
                     return Ok(());
                 }
 
-                // Cena JESZCZE nie dotknęła poziomu.
                 if self.cfg.tp_signal_max_lead_s <= 0.0 {
                     return Err(RejectCode::TpNotConfirmedByPrice);
                 }
@@ -3087,9 +2411,6 @@ impl Engine {
         }
     }
 
-    /// Twarde, pozbawione przewidywania przyszłości potwierdzenie celu
-    /// bieżącym kwotowaniem brokera. Wydzielone z `SignalConfirmedByPrice`,
-    /// aby wąska ochrona F3 mogła działać także w trybie `Either`.
     fn signal_tp_price_check<B: Broker>(
         &self,
         b: &B,
@@ -3112,9 +2433,6 @@ impl Engine {
         }
     }
 
-    /// Walidacja liczby w poleceniu zarządzającym już PO jednoznacznym
-    /// routingu odpowiedzi. Direct reply dowodzi adresata, ale nie dowodzi,
-    /// że autor nie przestawił cyfry w poziomie.
     fn rf_level_plausible<B: Broker>(
         &self,
         b: &B,
@@ -3142,8 +2460,6 @@ impl Engine {
         best <= max_gap
     }
 
-    /// Koszyk, którego dotyczy komunikat — a gdy go nie ma, JAWNY powód
-    /// w dzienniku zamiast cichego `return`.
     fn target_or_note<B: Broker>(
         &mut self,
         b: &B,
@@ -3181,25 +2497,9 @@ impl Engine {
         }
     }
 
-    /// Do którego koszyka odnosi się komunikat?
-    ///
-    /// Kolejność jest istotna i wynika z tego, ile pewności daje każde źródło:
-    ///
-    /// 1. **odpowiedź** na wiadomość, która utworzyła koszyk — pewność pełna,
-    /// 2. **wskazówka cenowa** w treści („(4002.1 TO 4006)", „RISK FREE AT
-    ///    4000") — nadawca wskazuje, o który setup chodzi; bez tego przy
-    ///    dwóch żywych koszykach wybór jest losowaniem,
-    /// 3. najnowszy żywy koszyk **z tego samego źródła**, z preferencją dla
-    ///    koszyka, który ma otwarte pozycje (komunikat zarządzający dotyczy
-    ///    czegoś, czym da się zarządzać).
-    ///
-    /// Temat forum jest osobnym źródłem — sygnał z jednego tematu nigdy nie
-    /// rusza koszyka innego.
     fn target_basket(&self, m: &IncomingMessage) -> Option<u32> {
         if let Some(r) = m.reply_to {
             if let Some(&id) = self.msg_to_basket.get(&(m.source.clone(), r)) {
-                // także gdy koszyk już nie żyje: adresat jest jednoznaczny,
-                // a akcja i tak nie znajdzie czego ruszyć
                 return Some(id);
             }
             if self.cfg.reply_veto {
@@ -3241,21 +2541,8 @@ impl Engine {
             .map(|x| x.id)
     }
 
-    /// „BUY NOW" — otwarcie po rynku bez strefy, celów i SL.
-    ///
-    /// Świadomie tworzymy koszyk, a nie samotną pozycję: dzięki temu pozycja
-    /// podlega tym samym strażnikom (ekspozycja, obsunięcie, EOD-flat) i tym
-    /// samym komunikatom zarządzającym co reszta. Cele bierzemy z ostatniego
-    /// żywego koszyka tego samego kierunku z tego źródła — jeśli nie ma,
-    /// pozycja jedzie wyłącznie na trailingu.
     fn handle_market_open<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage, side: Side) {
-        // F2b: „BUY NOW" wchodzi tą samą bramką, więc miękki hamulec musi
-        // obowiązywać go tak samo — inaczej jedyną ścieżką, która przy
-        // zapalonym hamulcu wchodzi PEŁNYM rozmiarem, byłoby wejście
-        // rynkowe bez SL i celów, czyli najgorsze z możliwych.
         self.slhit_miekki = self.slhit_hamuje(m.ts) && self.cfg.slhit_pause_lot_mult > 0.0;
-        // „BUY NOW" też ZAKŁADA koszyk — wygaszanie musi go blokować tak samo
-        // jak zwykłe wejście, inaczej ogon okna ZZN otwierałby nowe pozycje.
         if self.wygaszanie {
             *self.odrzuty.entry("Wygaszanie".to_string()).or_insert(0) += 1;
             return;
@@ -3297,16 +2584,19 @@ impl Engine {
         let lot = self.lot_size(self.podstawa_lota());
         let tp = tps.last().copied();
         cien::z(cakt::A_PLAN_PROBY, id as u64, czr::Z_MARKET_OPEN, 0);
-        if let Ok(t) = self.open_market_order(b, OrderReq {
-            side,
-            volume: lot,
-            sl: self.broker_sl(sl, side),
-            tp,
-            basket: Some(id),
-            level: 0,
-            is_toucher: false,
-            comment: format!("B{id}"),
-        }) {
+        if let Ok(t) = self.open_market_order(
+            b,
+            OrderReq {
+                side,
+                volume: lot,
+                sl: self.broker_sl(sl, side),
+                tp,
+                basket: Some(id),
+                level: 0,
+                is_toucher: false,
+                comment: format!("B{id}"),
+            },
+        ) {
             if let Some(bk) = self.basket_mut(id) {
                 bk.tickets.push(t);
                 bk.state = BasketState::Working;
@@ -3314,9 +2604,6 @@ impl Engine {
                 bk.last_entry_px = Some(px);
             }
             self.apply_virtual_sl(b, t, sl);
-            // Koszyk „NOW" nie ma strefy — powstaje z jedną ceną w obu
-            // krawędziach, więc głębokość w zrzucie wyjdzie NaN. Wpis i tak
-            // jest potrzebny: bez niego ta ścieżka byłaby niepoliczalna.
             diag_wejscie(m.ts, id, "sygnal-NOW", side, px, px, px, px, 0);
         }
     }
@@ -3338,13 +2625,14 @@ impl Engine {
 
     #[inline]
     fn cached_basket_slot(&self, id: u32) -> Option<usize> {
-        self.basket_slots.get(&id).copied()
-            .filter(|&slot| self.baskets.get(slot).map(|bk| bk.id == id).unwrap_or(false))
+        self.basket_slots.get(&id).copied().filter(|&slot| {
+            self.baskets
+                .get(slot)
+                .map(|bk| bk.id == id)
+                .unwrap_or(false)
+        })
     }
 
-    /// O(1) na zwykłym ticku. Nowy/wycięty koszyk przebudowuje indeks;
-    /// przy zmianie kolejności bez zmiany długości poprawność zapewnia
-    /// walidacja ID i fallback w każdym odczycie, nie sama długość.
     #[inline]
     fn refresh_basket_slots(&mut self) {
         if self.basket_slots_len != self.baskets.len() {
@@ -3355,9 +2643,6 @@ impl Engine {
     fn rebuild_basket_slots(&mut self) {
         self.basket_slots.clear();
         for (slot, bk) in self.baskets.iter().enumerate() {
-            // Uszkodzony zrzut z nieunikalnym ID nie może wybierać innego
-            // duplikatu po reorderze. Dla takiej kolekcji wyłączamy cache
-            // w całości; historyczny find zachowuje pierwsze wystąpienie.
             if self.basket_slots.insert(bk.id, slot).is_some() {
                 self.basket_slots.clear();
                 self.basket_slots_len = self.baskets.len();
@@ -3367,11 +2652,11 @@ impl Engine {
         self.basket_slots_len = self.baskets.len();
     }
 
-    /// Zachowuje kohortę cenowych TP w kolejności koszyków. ID są unikalne
-    /// w silniku; numer slotu nie jest ID i po wznowieniu może być dowolny.
     #[inline]
     fn price_tp_slots(&self) -> Vec<(usize, u32)> {
-        self.baskets.iter().enumerate()
+        self.baskets
+            .iter()
+            .enumerate()
             .filter(|(_, bk)| bk.alive())
             .filter(|(_, bk)| !self.cfg.confirmed_exit_retry || bk.pending_exit.is_none())
             .map(|(slot, bk)| (slot, bk.id))
@@ -3381,13 +2666,12 @@ impl Engine {
     #[inline]
     fn basket_exit_pending(&self, id: u32) -> bool {
         self.cfg.confirmed_exit_retry
-            && self.basket(id).map(|b| b.pending_exit.is_some()).unwrap_or(false)
+            && self
+                .basket(id)
+                .map(|b| b.pending_exit.is_some())
+                .unwrap_or(false)
     }
 
-    /// Historyczne, natychmiastowe księgowanie odpowiedzi komendy.
-    /// Przy naprawionej osi wynik zapisze wyłącznie potwierdzony ledger
-    /// brokera w `on_tick`. Inaczej ten sam profit trafiał tu i znowu przez
-    /// `drain_closed`, zmieniając m.in. próg rearm mimo poprawnego salda.
     #[inline]
     fn book_command_profit_legacy(&mut self, id: u32, profit: f64) {
         if !self.cfg.basket_realized_broker_only && !self.cfg.closed_profit_net_costs {
@@ -3406,15 +2690,7 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  WEJŚCIE
-    // ============================================================
 
-    /// Zamyka koszyki tego samego źródła idące PRZECIW nowemu sygnałowi.
-    ///
-    /// Kasuje też ich niezrealizowane limity — zostawienie siatki kupna po
-    /// tym, jak sygnalista ogłosił sprzedaż, byłoby wchodzeniem w setup,
-    /// którego autor właśnie się wyparł.
     fn close_opposite_baskets<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage, nowa: Side) {
         let przeciwne: Vec<u32> = self
             .baskets
@@ -3487,10 +2763,6 @@ impl Engine {
     fn handle_entry<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage, e: EntrySignal) {
         let ts = m.ts;
 
-        // F2b: MIĘKKI HAMULEC SL-HIT. Bramka wejść przepuściła sygnał, bo
-        // preset wybrał mnożnik zamiast blokady — tu zapada decyzja, że to
-        // wejście ma iść MNIEJSZYM rozmiarem. Flaga gaśnie po powrocie
-        // z tej funkcji (`on_message`), jak `rezim_miekki`.
         self.slhit_miekki = self.slhit_hamuje(ts) && self.cfg.slhit_pause_lot_mult > 0.0;
 
         self.wejscie_w_obrobce = Some(OdrzuconeWejscie {
@@ -3559,7 +2831,9 @@ impl Engine {
             );
             return;
         }
-        if self.deferred_after_protection(b, m, &e) { return; }
+        if self.deferred_after_protection(b, m, &e) {
+            return;
+        }
         if let Gate::Blocked(r, code) = self.entry_gate(b, ts) {
             self.log(ts, 2, format!("wejścia zablokowane: {r}"));
             self.jreject(b, m, "entry", code, format!("wejścia zablokowane: {r}"));
@@ -3601,14 +2875,6 @@ impl Engine {
             return;
         }
         self.rezim_miekki = false;
-        // PO JAKIEJ CENIE PYTAĆ O REŻIM — patrz `RegimeCena` w `settings.rs`.
-        //
-        // Dla zlecenia oczekującego cena rynkowa z chwili przyjścia wiadomości
-        // jest złym odniesieniem: wypełnienie nastąpi po CENIE WEJŚCIA, często
-        // wiele godzin później. Sygnał „BUY LIMIT 4083-4085" przy cenie 4100
-        // był odrzucany, chociaż wypełniłby się po 4084 — czyli po cenie,
-        // która reżim przechodzi. Krawędź bierzemy tę, po której naprawdę
-        // wchodzimy (dla kupna dolną, dla sprzedaży górną).
         let cena_wejscia = match e.side {
             Side::Buy => e.lo,
             Side::Sell => e.hi,
@@ -3620,9 +2886,6 @@ impl Engine {
                 self.regime_ok(e.side, b.quote().mid()) && self.regime_ok(e.side, cena_wejscia)
             }
         };
-        // WYCISZENIE W TRYB MIĘKKI — patrz `RegimeGdyRozerwany::Miekko`.
-        // Filtr bez zdania nie powinien wpuszczać PEŁNEGO rozmiaru: to znaczy
-        // grać najagresywniej dokładnie wtedy, gdy przyznajemy się do niewiedzy.
         if self.cfg.regime_gdy_rozerwany == crate::settings::RegimeGdyRozerwany::Miekko
             && self.rezim_wyciszony()
         {
@@ -3652,10 +2915,6 @@ impl Engine {
                 "sygnał niezgodny z reżimem — wejście w trybie miękkim",
             );
         }
-        // FILTR TRENDU WYŻSZEGO RZĘDU. Wariant twardy odmawia wejścia;
-        // wariant miękki przepuszcza sygnał mniejszym rozmiarem. Jest
-        // równorzędny, bo twarda blokada przeciw dominującemu kierunkowi może
-        // wyciąć większość handlu.
         if self.trend_adverse(e.side, ts) == Some(true)
             && self.cfg.trend_filter_mode == TrendFilterMode::Block
         {
@@ -3815,23 +3074,6 @@ impl Engine {
             }
         }
 
-        // BRAMKA ZDROWEJ GEOMETRII — literówki w treści sygnału.
-        //
-        // W treści wejściowej zdarzają się literówki w strefie, stopie albo
-        // celu. Pierwsze dwie rodziny łapią `skip_if_sl_breached` i
-        // `entry_sl_dist_limit`. Literówka w celu jest najgroźniejsza: cel, do
-        // którego cena nie dojdzie, zostawia transzę otwartą do wygaśnięcia
-        // koszyka albo do stopu, a numeracja celów w komunikatach kanału
-        // („TP2 HIT") przestaje pasować do drabinki.
-        //
-        // ODRZUCAMY CAŁY SYGNAŁ, nie sam wadliwy cel. Wyrzucenie jednego celu
-        // przesuwa pozostałe o oczko, więc „TP3 HIT" z kanału trafiłby na inny
-        // poziom niż ten, o którym mówi nadawca — cicho i bez śladu w logu.
-        // Pominięcie niejednoznacznego wejścia jest bezpieczniejsze niż
-        // wykonanie go z przesuniętą semantyką celów.
-        //
-        // Wszystkie progi domyślnie ZEROWE (wyłączone), więc każdy istniejący
-        // preset zachowuje się co do centa tak jak dotąd.
         {
             let szer = zone_hi - zone_lo;
             let mut powod: Option<String> = None;
@@ -3846,7 +3088,6 @@ impl Engine {
                     || self.cfg.sanity_tp_rosnace
                     || self.cfg.sanity_tp_strona)
             {
-                // odległość celu liczona od krawędzi, od której liczy je kanał
                 let baza = e.side.better_edge(zone_lo, zone_hi);
                 let mut poprz = f64::NEG_INFINITY;
                 for (i, tp) in e.tps.iter().enumerate() {
@@ -3881,7 +3122,6 @@ impl Engine {
             }
         }
 
-        // straż odległości od SL
         if self.cfg.entry_sl_dist_limit > 0.0 {
             if let Some(slv) = sl {
                 let worst = e.side.worse_edge(zone_lo, zone_hi);
@@ -4007,12 +3247,14 @@ impl Engine {
         );
         bk.tp_open = e.tp_open;
         bk.warstwy_offset = e.warstwy_offset;
-        // Z-9: „SELL STOP 4730" to zlecenie na PRZEBICIE — flaga jedzie
-        // do koszyka, żeby `sync_grid` mogła złożyć zlecenie właściwego typu.
         bk.is_stop = e.is_stop;
         if self.cfg.entry_edit_geometry_v2 {
             bk.entry_edit_state = Some(Box::new(EntryEditState {
-                schema_version: 1, revision: 1, source: Some(e.clone()), applied_ts: ts, review: None,
+                schema_version: 1,
+                revision: 1,
+                source: Some(e.clone()),
+                applied_ts: ts,
+                review: None,
             }));
         }
         bk.events.push(BasketEvent {
@@ -4084,19 +3326,27 @@ impl Engine {
         }
     }
 
-    /// Edycja wiadomości z wejściem — poprawiamy istniejący koszyk zamiast
-    /// tworzyć nowy. To realny, częsty przypadek w kanale ATFX.
-    fn apply_entry_edit<B: Broker>(&mut self, b: &mut B, id: u32, e: &EntrySignal, ts: Ts)->EntryEditOutcome {
+    fn apply_entry_edit<B: Broker>(
+        &mut self,
+        b: &mut B,
+        id: u32,
+        e: &EntrySignal,
+        ts: Ts,
+    ) -> EntryEditOutcome {
         if self.cfg.entry_edit_geometry_v2 {
-            return self.apply_entry_edit_v2(b,id,e,ts);
+            return self.apply_entry_edit_v2(b, id, e, ts);
         }
-        self.apply_entry_edit_legacy(b,id,e,ts);
+        self.apply_entry_edit_legacy(b, id, e, ts);
         EntryEditOutcome::LegacyHandled
     }
 
     fn apply_entry_edit_legacy<B: Broker>(&mut self, b: &mut B, id: u32, e: &EntrySignal, ts: Ts) {
         if self.basket_exit_pending(id) {
-            self.basket_note(id, ts, "EDYCJA pominięta: trwa potwierdzanie zamknięcia koszyka".into());
+            self.basket_note(
+                id,
+                ts,
+                "EDYCJA pominięta: trwa potwierdzanie zamknięcia koszyka".into(),
+            );
             return;
         }
         let (zone_lo, zone_hi) = self.compute_zone(e);
@@ -4111,10 +3361,6 @@ impl Engine {
             None => return,
         };
 
-        // EDYCJA NIE MOZE ODWROCIC KIERUNKU KOSZYKA.
-        //
-        // Sygnał w przeciwnym kierunku jest nowym setupem, a nie poprawką
-        // starego koszyka; odrzucenie chroni kierunek i geometrię celów.
         if self.basket(id).map(|bk| bk.side) != Some(e.side) {
             self.basket_note(
                 id,
@@ -4161,7 +3407,6 @@ impl Engine {
             format!("EDYCJA sygnału: strefa {old_lo:.2}–{old_hi:.2} → {zone_lo:.2}–{zone_hi:.2}"),
         );
 
-        // zaktualizuj SL już otwartych pozycji
         if let Some(v) = sl {
             self.set_basket_sl(b, id, v, ts);
         }
@@ -4202,7 +3447,6 @@ impl Engine {
                 lo += self.cfg.entry_lo_offset;
             }
             ZoneOffsetMode::Directional => {
-                // deep rozciąga w stronę LEPSZYCH wejść, tol poza krawędź gorszą
                 match e.side {
                     Side::Buy => {
                         lo -= deep;
@@ -4246,28 +3490,7 @@ impl Engine {
         Some(sl)
     }
 
-    // ============================================================
-    //  SIATKA
-    // ============================================================
 
-    /// Plan siatki — czysta funkcja, bez dotykania brokera.
-    ///
-    /// Wydzielona, bo plan jest potrzebny DWA razy: przy rozstawianiu i przy
-    /// przeliczaniu rozmiaru zleceń po zmianie reżimu zmienności. Każdy
-    /// szczebel dostaje własny, unikalny `level` — także touchery. Bez tego nie
-    /// da się później powiedzieć, ile zleceń należy do którego poziomu.
-    ///
-    /// Druga składowa: `true`, gdy plan opustoszał przez `stops_level`
-    /// (`drop_unplaceable_levels` wyrzuciło komplet szczebli), a nie przez
-    /// budżet ryzyka. Bez tego rozróżnienia oba przypadki szły pod jednym
-    /// kodem `RiskBudgetExhausted` i odrzuty klasy O70 były niepoliczalne.
-    /// `sufit_ea` to gotowy wynik rodziny A (A1 margines + A3 zagęszczenie +
-    /// A4 stan dnia) — planer dostaje LICZBĘ, tak samo jak dostaje
-    /// `wolne_portfela`, i nie musi znać rachunku. `None` = rodzina milczy.
-    ///
-    /// Trzeci element zwracanej krotki mówi, ILE JEDNOSTEK ścięła rodzina A —
-    /// bo `plan_grid` jest `&self` i sam nie ma jak zaksięgować licznika,
-    /// a „przycinał, tylko nie widać" jest gorsze niż brak osi.
     fn plan_grid(
         &self,
         id: u32,
@@ -4281,10 +3504,11 @@ impl Engine {
         }
     }
 
-    /// Pure candidate planning: edits must not temporarily replace the live
-    /// basket just to obtain a prospective plan.
     fn plan_grid_for(
-        &self, basket: &Basket, ts: Ts, wolne_portfela: Option<f64>,
+        &self,
+        basket: &Basket,
+        ts: Ts,
+        wolne_portfela: Option<f64>,
         sufit_ea: Option<crate::ea::SufitEa>,
     ) -> (Vec<GridLevel>, bool, u32) {
         let (side, is_limit, lo, hi, sl, tps, tp_open, sig_lo, sig_hi, warstwy_txt) =
@@ -4305,10 +3529,6 @@ impl Engine {
             };
         let sig_w = (sig_hi - sig_lo).abs();
         let mut units = self.adaptive_units(self.units_base(is_limit).max(1), sig_w, ts);
-        // WARIANT MIĘKKI FILTRA TRENDU: sygnał pod trend wchodzi mniejszym
-        // rozmiarem zamiast być odrzucony. Gdy jeden kierunek dominuje,
-        // zmniejszenie ekspozycji jest realną alternatywą dla blokady, która
-        // usunęłaby większość handlu.
         if self.cfg.trend_filter_mode == TrendFilterMode::Shrink
             && self.cfg.trend_filter_shrink > 0.0
             && self.trend_adverse(side, ts) == Some(true)
@@ -4316,34 +3536,23 @@ impl Engine {
             units = ((units as f64 * self.cfg.trend_filter_shrink).round() as u32).max(1);
         }
         let units = units;
-        //  UKLAD DRABINKI WPROST (`entry_uklad`). Pusty = pole wylaczone
-        //  i cala galaz nizej sie nie wykonuje — kontrakt zera.
         let uklad = self.cfg.uklad_drabinki();
-        //  KOTWICA UKLADU — patrz `entry_uklad_kotwica` (settings.rs).
         let trzymaj_uklad = !self.cfg.entry_uklad_kotwica.eq_ignore_ascii_case("ocalaly");
         let mut uklad_sztuk: Vec<u32> = Vec::new();
 
-        // poziomy: od LEPSZEJ krawędzi do GORSZEJ, żeby indeks 0 był
-        // najkorzystniejszym wejściem niezależnie od kierunku
         let step = self.cfg.grid_step();
         let mut prices: Vec<Px> = Vec::new();
-        // KRATA BEZWZGLĘDNA (bot.py `place_limit_grid`): poziomy to
-        // wielokrotności kroku leżące W strefie, a nie podział strefy na
-        // `units` części. Przy kroku szerszym niż strefa wychodzi jeden
-        // poziom albo żaden — i wtedy cały koszyk wchodzi po jednej cenie.
         if self.cfg.grid_anchor_absolute && step > 0.0 {
             let mut v = (lo / step - 1e-9).ceil() * step;
             while v <= hi + 1e-9 {
                 prices.push((v * 100.0).round() / 100.0);
                 v += step;
             }
-            // kolejność: od LEPSZEJ krawędzi do GORSZEJ (tak trzyma je reszta silnika)
             prices.sort_by(|a, b| match side {
                 Side::Buy => a.partial_cmp(b).unwrap(),
                 Side::Sell => b.partial_cmp(a).unwrap(),
             });
             if prices.is_empty() {
-                // odpowiednik `grid_fallback_best_edge = True` z bot.py
                 prices.push(side.better_edge(lo, hi));
             }
         } else if step > 0.0 && hi - lo > step * 0.5 {
@@ -4358,25 +3567,12 @@ impl Engine {
                 }
             }
         } else if units == 1 {
-            // KTORA KRAWEDZ przy jednym szczeblu — patrz `entry_jeden_na_glebokiej`.
-            //
-            // `worse_edge` (domyslnie) to krawedz, do ktorej cena dochodzi
-            // NAJWCZESNIEJ: setup wypelnia sie najczesciej, ale z najgorsza
-            // cena i najdalszym stopem. `better_edge` odwraca ten wybor.
             prices.push(if self.cfg.entry_jeden_na_glebokiej {
                 side.better_edge(lo, hi)
             } else {
                 side.worse_edge(lo, hi)
             });
         } else if !uklad.is_empty() {
-            //  UKLAD WPROST — `entry_uklad`. Lista czytana od krawedzi
-            //  PLYTKIEJ do GLEBOKIEJ, bo tak sie o niej mysli („jedna przy
-            //  4105, dwie przy 4100"). Wewnetrzna kolejnosc `prices` jest
-            //  odwrotna (indeks 0 = najglebszy), wiec odwracamy tutaj RAZ
-            //  i nigdzie indziej.
-            //
-            //  Szczeble z zerem sa POMIJANE calkiem — o to chodzilo w tej osi
-            //  i tego wlasnie `entry_weights` nie umie, bo filtruje zera.
             let n = uklad.len();
             for (i, &szt) in uklad.iter().enumerate().rev() {
                 if szt == 0 {
@@ -4392,10 +3588,6 @@ impl Engine {
         } else {
             for i in 0..units {
                 let f = i as f64 / (units - 1).max(1) as f64;
-                // `entry_depth_curve` nagina rozkład warstw wewnątrz strefy.
-                // `i = 0` to warstwa NAJGŁĘBSZA, więc wykładnik > 1 przesuwa
-                // środkowe warstwy w stronę GŁĘBOKIEJ krawędzi, a < 1 w stronę
-                // płytkiej. 1,0 zostawia rozkład równy — i to jest domyślne.
                 let k = self.cfg.entry_depth_curve;
                 let f = if k > 0.0 && (k - 1.0).abs() > 1e-12 {
                     f.powf(k)
@@ -4412,13 +3604,6 @@ impl Engine {
             prices.push(side.better_edge(lo, hi));
         }
 
-        //  WARSTWY POZA PIERWSZA — patrz `entry_warstwy_offset` (settings.rs).
-        //  Indeks 0 to warstwa NAJGLEBSZA, wiec „pierwsze wejscie" kanalu to
-        //  szczebel OSTATNI. Jego zostawiamy nietkniety, kazdy inny przesuwamy
-        //  w strone pierwszego wejscia — doslownie tak, jak kanal opisuje
-        //  swoje wykonanie.
-        //  TRESC MA PIERWSZENSTWO nad ustawieniem — ale tylko gdy os to
-        //  dopuszcza i tylko gdy kanal cokolwiek powiedzial.
         let warstwy = if self.cfg.entry_warstwy_z_tekstu {
             warstwy_txt.unwrap_or(self.cfg.entry_warstwy_offset)
         } else {
@@ -4434,34 +3619,6 @@ impl Engine {
             }
         }
 
-        // ---- NIEZMIENNIK: ŻADEN SZCZEBEL ZA DALSZĄ KRAWĘDZIĄ STREFY ----
-        //
-        // Stoi TU — po zbudowaniu cen, a przed `drop_unplaceable_levels`,
-        // wagami i `cap_basket_risk` — z tego samego powodu, dla którego tam
-        // stoi tamten filtr: oba kolejne kroki czytają KOMPLET szczebli, więc
-        // wycięcie po fakcie zmieniłoby listę zleceń, ale nie wolumeny z niej
-        // policzone.
-        //
-        // Zamykane są tym jednym `retain` DWIE drogi naraz:
-        //   * `entry_deep_offset > 0` (i `entry_deep_zone_mult`, i
-        //     `entry_deep_frac_to_sl`) rozciąga strefę roboczą PONIŻEJ `lo`,
-        //     więc szczeble liczone od `zone_lo` startują pod krawędzią;
-        //   * krok siatki liczony od rozciągniętej strefy dokłada do tego
-        //     kolejne poziomy w tym samym kierunku.
-        //
-        // Szczebel DOKŁADNIE NA krawędzi zostaje: kanon mówi „siatka kończy
-        // się NA dalszej krawędzi strefy, nigdy pod nią" (`ALPHA_TEST_EA.md`
-        // §7 pkt 1), a nie „przed nią".
-        //
-        // Gdy reguła wycięłaby wszystko, koszyk nie jest odrzucany — dostaje
-        // JEDEN szczebel na samej krawędzi. Odrzucenie byłoby zmianą decyzji
-        // „czy handlować", a ten niezmiennik odpowiada wyłącznie na pytanie
-        // „GDZIE wolno postawić warstwę".
-        //  PLAN KONTRA TO, CO ZOSTALO. Wspolna maszyneria rodziny `*_kotwica`:
-        //  zapamietujemy, ile szczebli mial PLAN i ktorym z nich jest kazdy
-        //  ocalaly. Bez tego kazda regula warstw musi milczaco przyjac, ze
-        //  plan i rzeczywistosc to to samo — a nie sa, bo broker amputuje
-        //  strefe od strony glebokiej i robi to inaczej przy kazdym sygnale.
         let plan_n = prices.len();
         let mut idx_plan: Vec<usize> = (0..plan_n).collect();
 
@@ -4486,13 +3643,6 @@ impl Engine {
             }
         }
 
-        // ---- SZCZEBLE, KTÓRYCH BROKER NIE PRZYJMIE ----
-        //
-        // Musi stać PRZED liczeniem wag i PRZED `cap_basket_risk`, bo oba te
-        // kroki czytają komplet szczebli: pierwszy wyłącza się przy szczeblu
-        // o zerowym ryzyku, drugi dzieli między nie budżet. Filtrowanie po
-        // fakcie zmieniłoby tylko listę zleceń, a nie wielkości, które z niej
-        // policzono — czyli nie usunęłoby ANI JEDNEGO z dwóch skutków.
         if self.cfg.drop_unplaceable_levels {
             if let Some(slv) = sl {
                 let stops = self.cfg.stops_level;
@@ -4511,8 +3661,6 @@ impl Engine {
                     trzymaj_uklad,
                 );
                 if prices.is_empty() {
-                    // komplet szczebli pod/nad stopem — to jest odmowa klasy
-                    // `stops_level` (O70), nie budżetowa
                     return (Vec::new(), true, 0);
                 }
             }
@@ -4529,8 +3677,6 @@ impl Engine {
             .tp_drabinka_kotwica
             .eq_ignore_ascii_case("planowany");
         let (mult, mapuj_mult) = if self.cfg.entry_weights_from_rr {
-            // RR liczy sie z geometrii FAKTYCZNYCH szczebli, wiec plan tu nie
-            // ma sensu — wektor ma dlugosc `prices` i mapowania nie potrzeba.
             (
                 self.cfg.rr_multipliers(&prices, sl, tps.first().copied()),
                 false,
@@ -4566,9 +3712,6 @@ impl Engine {
                         is_limit,
                     )
                 } else {
-                    //  Liczba pozycji podana WPROST. `units_for_level` nie jest
-                    //  tu wolane celowo: tamto rozdziela pule jednostek po
-                    //  szczeblach, a tutaj rozdzial jest juz podany.
                     uklad_sztuk.get(i).copied().unwrap_or(1).max(1)
                 },
                 volume: self.wolumen_zlecenia(
@@ -4599,17 +3742,12 @@ impl Engine {
             });
         }
 
-        // TOUCHER: dodatkowe jednostki przy krawędzi z własnym, wczesnym celem
         for (k, (off, tunits, tp_idx)) in self.cfg.parse_toucher_bands().into_iter().enumerate() {
             let base = side.worse_edge(lo, hi);
             let cena_touchera = match side {
                 Side::Buy => base - off,
                 Side::Sell => base + off,
             };
-            // Touchér mierzy głębokość od GORSZEJ krawędzi w dół, więc przy
-            // dużym `off` ląduje pod DALSZĄ krawędzią — czyli w tym samym
-            // miejscu, którego zakazuje niezmiennik. Osobna gałąź, bo touchéry
-            // dokładane są PO filtrze cen siatki.
             if self.za_dalsza_krawedzia(side, cena_touchera, sig_lo, sig_hi) {
                 continue;
             }
@@ -4628,31 +3766,8 @@ impl Engine {
             });
         }
 
-        // ---- WARSTWA ALLOWANCE: 1 $ PRZED STREFĄ (W30, kanon Tylera) ----
-        //
-        // Jedyny szczebel siatki leżący POZA strefą po stronie GORSZYCH
-        // wejść: przy BUY nad górną krawędzią (`hi + x`), przy SELL pod dolną
-        // (`lo − x`). Reszta geometrii (`entry_deep_offset`, `toucher_bands`)
-        // rozciąga siatkę w drugą stronę, więc to nie jest wariant istniejącej
-        // osi, tylko jej lustro.
-        //
-        // Po co: niektóre setupy nie dotykają strefy ani razu — cena publikacji
-        // stoi przy krawędzi i idzie do celów bez retracementu. Oś pozwala
-        // modelować taki wariant bez opierania się na komunikacie po fakcie.
-        //
-        // Stoi ZA touchérami i PRZED `cap_basket_risk`, żeby limit ryzyka
-        // koszyka i sufit portfelowy widziały dołożoną ekspozycję — bo ta oś
-        // JĄ DOKŁADA i to jest jej główny koszt.
-        //
-        // Bramka na OBU polach: kwota mówi GDZIE, jednostki mówią ILE i żadne
-        // nie zgaduje drugiego. Zero w którymkolwiek = warstwy nie ma.
         if self.cfg.entry_allowance_usd > 0.0 && self.cfg.entry_allowance_units > 0 {
             let poza = side.worse_edge(lo, hi) + side.sign() * self.cfg.entry_allowance_usd;
-            // `drop_unplaceable_levels` sprawdza to samo co dla szczebli
-            // wewnątrz strefy. Warstwa allowance leży DALEJ od stopu niż
-            // każdy z nich, więc odmowa jest tu praktycznie niemożliwa —
-            // ale gałąź musi istnieć, żeby oś nie omijała reguły, której
-            // podlega reszta planu.
             let mieści = match sl {
                 Some(slv) => match side {
                     Side::Buy => slv <= poza - self.cfg.stops_level,
@@ -4666,9 +3781,6 @@ impl Engine {
                     base_units: self.cfg.entry_allowance_units,
                     volume: self.wolumen_zlecenia(lot),
                     sl,
-                    // Najgorsze wejście koszyka dostaje cel NAJBLIŻSZY —
-                    // ten sam wybór, co przy szczeblu o najwyższym indeksie
-                    // w `target_for_ex` (indeks rośnie ku gorszej krawędzi).
                     tp: self.target_for_ex(&tps, side, total.max(1) - 1, total.max(1), tp_open),
                     level: 2000,
                     is_toucher: false,
@@ -4680,20 +3792,6 @@ impl Engine {
             }
         }
 
-        // ---- JEDNA POZYCJA RYNKOWA (`market_entry_mode = Single`) ----
-        //
-        // Skoro wejście rynkowe i tak otwiera WSZYSTKO po jednej cenie,
-        // rozbicie tego na pięć zleceń jest wyłącznie księgowe — a przy okazji
-        // szkodliwe: `tp_schedule` rozdziela cele po poziomach, które w
-        // rzeczywistości nie istnieją, więc część rozmiaru dostaje cel liczony
-        // dla ceny, po której nikt nie wszedł. Zwijamy plan do jednego
-        // szczebla o ŁĄCZNYM rozmiarze; uczciwy limit ryzyka (liczony od ceny
-        // wypełnienia w `sync_grid`) przytnie go potem do budżetu.
-        //
-        // Cena szczebla to gorsza krawędź strefy — ta sama, którą wybiera
-        // gałąź `units == 1` wyżej. Dla wejścia rynkowego jest to wyłącznie
-        // ostrożny szacunek do `cap_basket_risk`; prawdziwą ceną jest
-        // kwotowanie w chwili otwarcia.
         if self.wejscie_rynkowe(is_limit)
             && self.cfg.market_entry_mode == MarketEntryMode::Single
             && !out.is_empty()
@@ -4768,43 +3866,18 @@ impl Engine {
         (out, false, sciete)
     }
 
-    /// Dociska plan siatki do limitu ryzyka koszyka.
-    ///
-    /// Ryzyko koszyka to Σ |cena wejścia − SL| × 100 × wolumen. Liczymy je po
-    /// WSZYSTKICH planowanych zleceniach, bo cały koszyk dzieli jeden stop —
-    /// albo wychodzi na celach, albo ginie razem. Uśrednianie „przecież nie
-    /// wszystkie się zrealizują" jest właśnie tym założeniem, które kończy się
-    /// wyzerowanym kontem w miesiącu, w którym realizują się wszystkie.
-    ///
-    /// Kolejność ustępstw jest celowa: najpierw skalujemy wolumeny (zachowuje
-    /// kształt drabinki), potem odrzucamy NAJPŁYTSZE poziomy (mają najgorszy
-    /// stosunek zysku do ryzyka), a dopiero na końcu cały koszyk.
-    ///
-    /// `wolne_portfela` to reszta budżetu CAŁEGO rachunku (`max_portfolio_risk_pct`)
-    /// — `None`, gdy sufit portfelowy jest wyłączony. Wchodzi tym samym wejściem
-    /// co limit koszykowy, więc korzysta z tej samej, przetestowanej kolejności
-    /// ustępstw: najpierw mniejsze wolumeny, potem mniej szczebli, na końcu
-    /// odmowa. Dławik obsunięcia (`dd_soft_*`, `dd_hard_*`) mnoży budżet
-    /// koszykowy — nie zamyka nic, co już żyje.
     fn cap_basket_risk(
         &self,
         levels: &mut Vec<GridLevel>,
         sl: Option<Px>,
         wolne_portfela: Option<f64>,
     ) {
-        // UWAGA na kolejność: „limit koszykowy WYŁĄCZONY" (`pct == 0`) i „limit
-        // ZDŁAWIONY DO ZERA" (`pct > 0`, ale mnożnik 0) to dwie przeciwne
-        // rzeczy. Pomnożenie ich przez siebie i sprawdzenie iloczynu zamieniało
-        // najostrzejsze możliwe ustawienie dławika w brak jakiegokolwiek limitu.
         let pct = self.risk_per_basket_pct_eff();
         let mult = self.dlawik_mult();
         if (pct <= 0.0 && wolne_portfela.is_none()) || levels.is_empty() {
             return;
         }
         let Some(slv) = sl else { return };
-        // Kapitał odniesienia: equity, a nie saldo startowe — limit ma się
-        // kurczyć razem z kontem, inaczej po serii strat ryzykujemy coraz
-        // większy UDZIAŁ tego, co zostało.
         let mut cap = if pct > 0.0 {
             self.stats.equity.max(0.0) * pct * mult / 100.0
         } else {
@@ -4828,18 +3901,17 @@ impl Engine {
             return;
         }
 
-        // 1) proporcjonalne ścięcie wolumenów, z podłogą na minimalnym locie
         let factor = cap / now;
         for g in levels.iter_mut() {
             g.volume = if self.cfg.order_volume_contract_v2 {
                 g.volume * factor
-            } else { round_lot((g.volume * factor).max(self.cfg.lot_min)) };
+            } else {
+                round_lot((g.volume * factor).max(self.cfg.lot_min))
+            };
         }
         now = total(levels);
 
-        // 2) odrzucanie najpłytszych poziomów — ostatnich w kolejności
         while now > cap && levels.len() > 1 {
-            // toucher jest najpłytszy z definicji, więc idzie pierwszy
             let idx = levels
                 .iter()
                 .position(|g| g.is_toucher)
@@ -4848,22 +3920,11 @@ impl Engine {
             now = total(levels);
         }
 
-        // 3) nawet jeden poziom przy minimalnym locie nie mieści się w limicie
         if now > cap {
             levels.clear();
         }
     }
 
-    /// DŁAWIK OBSUNIĘCIA — mnożnik budżetu ryzyka nowego koszyka z (0, 1].
-    ///
-    /// Odpowiedź na to samo pytanie co `max_dd_pct`, ale bez zamykania
-    /// czegokolwiek. Twardy hamulec zamyka WSZYSTKO w chwili największego
-    /// obsunięcia (czyli po najgorszej cenie, jaka była) i blokuje wejścia,
-    /// więc konto nie ma jak odrobić. Dławik nie dotyka pozycji, które żyją —
-    /// zmniejsza tylko NASTĘPNY koszyk. Konto dalej zarabia, tylko wolniej.
-    ///
-    /// Baza obsunięcia jest ta sama co u twardego strażnika (`dd_guard_scope`),
-    /// żeby dwa pokrętła opisane tym samym słowem znaczyły to samo.
     fn dlawik_mult(&self) -> f64 {
         if self.cfg.dd_soft_pct <= 0.0 && self.cfg.dd_hard_pct <= 0.0 {
             return 1.0;
@@ -4895,12 +3956,6 @@ impl Engine {
         if pct <= 0.0 {
             return None;
         }
-        // CAŁY RACHUNEK PO OBU STRONACH. `stats.equity` to equity KONTA
-        // (przepisywane z `b.account()`, a widok dolicza equity cudzych nóg),
-        // więc zajęte ryzyko też musi być liczone z całego konta — inaczej
-        // „sufit portfelowy" opisywałby portfel jednej nogi przy kapitale
-        // wszystkich i przy trzech nogach dopuszczałby trzykrotność progu.
-        // Kontrakt zera: przy jednym silniku `ukryte_*` są puste.
         let cap = self.stats.equity.max(0.0) * pct / 100.0;
         let poz: f64 = b
             .positions()
@@ -4920,13 +3975,6 @@ impl Engine {
         Some((cap - poz - pend).max(0.0))
     }
 
-    /// Czy koszyk wchodzi PO RYNKU, a nie zleceniami oczekującymi.
-    ///
-    /// Jedno miejsce prawdy dla trzech reguł, które muszą się zgadzać co do
-    /// znaku: straży gonienia (`max_chase_beyond_zone`), uczciwego limitu
-    /// ryzyka (`market_risk_scale`) i rozkładu wejścia (`market_entry_mode`).
-    /// Rozjazd między nimi znaczyłby, że jedna z nich pilnuje innej ścieżki
-    /// niż ta, którą kod naprawdę idzie.
     #[inline]
     fn wejscie_rynkowe(&self, is_limit: bool) -> bool {
         !is_limit && !self.cfg.auto_limit
@@ -4937,27 +3985,14 @@ impl Engine {
         !is_limit
     }
 
-    /// DALSZA KRAWĘDŹ STREFY — ta, za którą leży stop sygnalisty.
-    ///
-    /// Dla kupna to dolna krawędź (`lo`), dla sprzedaży górna (`hi`). Nazwa
-    /// „dalsza" jest z perspektywy ceny w chwili publikacji: kanał podaje
-    /// strefę POD rynkiem przy kupnie, więc to jest krawędź, do której cena
-    /// dochodzi jako do OSTATNIEJ. Bierzemy ją ze strefy Z SYGNAŁU
-    /// (`entry_lo`/`entry_hi`), a nie z `zone_lo`/`zone_hi` — offsety presetu
-    /// (`entry_deep_offset`) potrafią przesunąć strefę roboczą pod tę
-    /// krawędź, a to jest dokładnie ruch, któremu ten niezmiennik zaprzecza.
     #[inline]
     fn przesiej_rownolegle(
         prices: &mut Vec<Px>,
-        // (licznik diagnostyczny — patrz ODSIANE_SZCZEBLE niżej)
         sztuki: &mut Vec<u32>,
         idx_plan: &mut Vec<usize>,
         zostaw: &[bool],
         trzymaj_przy_cenie: bool,
     ) {
-        //  Indeks PLANU jedzie z cena ZAWSZE — to jest pamiec o tym, ktorym
-        //  z pierwotnie zaplanowanych szczebli byl ten, ktory ocalal. Cala
-        //  rodzina osi `*_kotwica` czyta wylacznie ten wektor.
         {
             let ile = zostaw.iter().filter(|z| !**z).count();
             if ile > 0 {
@@ -4990,9 +4025,6 @@ impl Engine {
         });
     }
 
-    /// Miejsce szczebla w tablicy wag: pierwotne (kotwica `Planowany`)
-    /// albo biezace (`Ocalaly`). Przyciete do dlugosci tablicy, bo plan
-    /// bywa dluzszy niz to, co z niego zostalo.
     fn miejsce(mapuj: bool, idx_plan: &[usize], i: usize, dl: usize) -> usize {
         let m = if mapuj {
             idx_plan.get(i).copied().unwrap_or(i)
@@ -5006,15 +4038,6 @@ impl Engine {
         side.better_edge(sig_lo.min(sig_hi), sig_lo.max(sig_hi))
     }
 
-    /// NIEZMIENNIK: czy `cena` leży ZA dalszą krawędzią strefy sygnału?
-    ///
-    /// Przy `zakaz_ponizej_krawedzi = false` (domyślnie) zwraca zawsze
-    /// `false` i żadna gałąź go pilnująca się nie wykonuje — kontrakt zera.
-    ///
-    /// Strefa zdegenerowana (`sig_lo == sig_hi`, np. koszyk „BUY NOW"
-    /// utworzony z jedną ceną zamiast strefy) NIE podlega regule: nie ma
-    /// wtedy czego naruszyć, a blokowanie takiego wejścia byłoby zmianą
-    /// zupełnie innego zachowania pod przykrywką tej naprawy.
     #[inline]
     fn za_dalsza_krawedzia(&self, side: Side, cena: Px, sig_lo: Px, sig_hi: Px) -> bool {
         if !self.cfg.zakaz_ponizej_krawedzi {
@@ -5030,17 +4053,6 @@ impl Engine {
         }
     }
 
-    /// Ile budżetu ryzyka koszyk ma JESZCZE do wydania na wejścia rynkowe.
-    ///
-    /// Cap minus ryzyko pozycji, które już żyją pod tym koszykiem. Odjęcie
-    /// jest konieczne dla `MarketEntryMode::Laddered`: bez niego każdy kolejny
-    /// szczebel drabiny dostawałby świeży, pełny limit i suma rosłaby bez
-    /// końca — czyli powtórzyłby się dokładnie ten błąd, który naprawiamy.
-    ///
-    /// `None` znaczy „limit wyłączony" (`risk_per_basket_pct = 0`), a `Some(0)`
-    /// — „limit włączony i już wyczerpany". To są dwie różne rzeczy i muszą
-    /// być rozróżnialne: sklejenie ich w jedno zero zamieniałoby wyczerpany
-    /// budżet w brak jakiegokolwiek limitu.
     fn market_risk_cap<B: Broker>(&self, id: u32, b: &B) -> Option<f64> {
         let pct = self.risk_per_basket_pct_eff();
         if pct <= 0.0 {
@@ -5053,12 +4065,6 @@ impl Engine {
             .filter(|p| p.basket == Some(id))
             .filter_map(|p| {
                 p.sl.or(p.vsl).map(|s| {
-                    // ZNAK, NIE WARTOŚĆ BEZWZGLĘDNA. Gdy zapadka przeciągnęła
-                    // stop ZA cenę wejścia, pozycja nie może już stracić —
-                    // ma zamknięty zysk. Liczenie `abs()` kazałoby jej zjadać
-                    // budżet koszyka dokładnie wtedy, gdy koszyk jest
-                    // najbezpieczniejszy, i blokowałoby dokładki w jedynym
-                    // momencie, w którym są naprawdę tanie.
                     let adwersja = (p.open_price - s) * p.side.sign();
                     if adwersja > 0.0 {
                         adwersja * XAU_CONTRACT * p.volume
@@ -5071,20 +4077,6 @@ impl Engine {
         Some((cap - zajete).max(0.0))
     }
 
-    /// UCZCIWY LIMIT RYZYKA WEJŚCIA PO RYNKU — mnożnik wolumenu z (0, 1].
-    ///
-    /// `cap_basket_risk` wycenia plan przy CENACH SZCZEBLI, bo tak wypełnia się
-    /// siatka limitów. Wejście rynkowe tych cen nie używa: wszystkie jednostki
-    /// idą w jednym ticku po JEDNEJ, bieżącej cenie — zwykle za gorszą
-    /// krawędzią strefy. Budżet był więc liczony dla geometrii, która nie
-    /// zaistniała, przez co cap mógł nie ograniczać faktycznej ekspozycji.
-    /// Zaostrzanie samego progu nie pomaga w takim przypadku, bo błędny jest
-    /// mianownik, a nie wartość progu.
-    ///
-    /// Mnożnik NIGDY nie przekracza 1,0 — korekta może wyłącznie zmniejszać
-    /// pozycję. Przy `auto_limit = true` (wszystkie wydane presety) żaden
-    /// szczebel nie idzie po rynku, `lots_rynkowe` wynosi 0 i funkcja zwraca
-    /// dokładnie 1,0.
     fn market_risk_scale(
         &self,
         lots_rynkowe: f64,
@@ -5105,22 +4097,12 @@ impl Engine {
     }
 
     fn place_grid<B: Broker>(&mut self, b: &mut B, id: u32, ts: Ts) {
-        if self.basket_exit_pending(id) { return; }
-        // Sufit portfelowy liczymy TU, bo tylko tu widać brokera. `plan_grid`
-        // dostaje gotową liczbę dolarów, żeby nie musiał znać rachunku.
+        if self.basket_exit_pending(id) {
+            return;
+        }
         let wolne = self.wolny_budzet_portfela(b);
-        // ...i z tego samego powodu TU liczy się sufit jednostek rodziny A.
         let sufit_ea = self.ea_sufit_jednostek(b);
 
-        // ---- A1: ODMOWA MARGINESOWA (nawet jedna jednostka się nie mieści) ----
-        //
-        // Osobna gałąź PRZED planowaniem, z własnym kodem odrzutu, i to jest
-        // rozstrzygnięcie, nie ozdoba: „budżet ryzyka wyczerpany" i „konto nie
-        // ma marginesu na ani jedną nogę" to dwie różne awarie i wymagają
-        // dwóch różnych reakcji właściciela (pierwsza — zmień preset, druga —
-        // dołóż kapitał albo zamknij coś). Pod wspólnym licznikiem
-        // `BudzetRyzyka` druga byłaby niewidzialna, dokładnie tak jak odrzuty
-        // `stops_level` byłyby niewidoczne bez rozdzielenia przyczyn odmowy.
         if sufit_ea.is_some_and(|s| s.jednostki_max == 0) {
             self.ea_a.odmowy_margines += 1;
             *self.odrzuty.entry("EaMargines".to_string()).or_insert(0) += 1;
@@ -5157,16 +4139,7 @@ impl Engine {
             self.ea_a.przyciete_koszyki += 1;
             self.ea_a.sciete_jednostki += sciete_ea as u64;
         }
-        // Pusty plan to nie awaria, tylko decyzja — ale są DWIE różne decyzje
-        // i każda dostaje własny kod: `drop_unplaceable_levels` wyrzuciło
-        // komplet szczebli przez `stops_level` (odmowa klasy O70, u brokera
-        // wyglądałaby jak seria 10015) ALBO nawet jeden poziom przy minimalnym
-        // locie nie mieści się w limicie ryzyka koszyka. Pod wspólnym kodem
-        // `RiskBudgetExhausted` odrzuty stops_level były niewidzialne.
         if plan.is_empty() {
-            // Licznik, bo `journal.push` niżej pisze tylko do dziennika, a bez
-            // liczby w raporcie nie da się odróżnić „sufit nic nie robi" od
-            // „sufit odrzuca co drugi koszyk".
             let (licznik, kod, opis) = if pusty_przez_stops {
                 (
                     "StopsLevel",
@@ -5212,9 +4185,6 @@ impl Engine {
         let planned_risk = self.plan_risk(&plan);
         if let Some(bk) = self.basket_mut(id) {
             bk.levels = plan;
-            // Stała jednostka do porównywania koszyków między sobą. Ryzyko
-            // bieżące maleje w miarę domykania warstw, więc bez tej liczby
-            // „wynik w R" znaczyłby co innego na początku i na końcu koszyka.
             if bk.risk_initial_usd <= 0.0 {
                 bk.risk_initial_usd = planned_risk;
             }
@@ -5245,26 +4215,6 @@ impl Engine {
         }
     }
 
-    /// Czy przeliczony plan jest TYM SAMYM planem, tylko w innej skali?
-    ///
-    /// Relot ma prawo zmienić wyłącznie WIELKOŚĆ szczebli — geometria (ceny,
-    /// SL, cele) jest własnością koszyka i nie może się zmieniać pod ręką.
-    /// Sprawdzamy dwie rzeczy:
-    ///
-    ///  1. **ten sam zestaw szczebli** — inny zestaw znaczy, że `plan_grid`
-    ///     poszedł inną gałęzią (inna liczba jednostek, inne odsianie
-    ///     `drop_unplaceable_levels`), więc porównywanie po numerze poziomu
-    ///     porównywałoby dwie różne rzeczy;
-    ///  2. **ta sama drabinka** — `rr_multipliers` wraca do RÓWNYCH wag dla
-    ///     CAŁEGO koszyka, gdy choć jeden szczebel ma zerowe ryzyko albo
-    ///     zerową drogę do celu. Gdyby relot przepuścił taki plan, po cichu
-    ///     spłaszczyłby drabinkę — czyli zrobiłby dokładnie to, za co zdjęto
-    ///     koronę staremu trybowi `wg_planu = false`.
-    ///
-    /// Porównanie drabinki jest odporne na kwantyzację lota: patrzymy na
-    /// stosunek największego szczebla do najmniejszego, a nie na wartości.
-    /// Płaski plan przy płaskim zapisanym planie jest w porządku — to nie
-    /// degeneracja, tylko koszyk, który nigdy nie miał drabinki.
     fn plan_ma_ten_sam_ksztalt(&self, id: u32, plan: &[GridLevel]) -> bool {
         let Some(bk) = self.basket(id) else {
             return false;
@@ -5272,11 +4222,6 @@ impl Engine {
         if bk.levels.is_empty() {
             return true;
         }
-        // Porównujemy WYŁĄCZNIE szczeble obecne w OBU planach. Inny zestaw
-        // poziomów to normalna praca limitu ryzyka (przy większym kapitale
-        // mieści się ich więcej, przy mniejszym mniej) i sam w sobie nie jest
-        // powodem, żeby nie ruszać koszyka — od szczebla nieobecnego w planie
-        // jest zwykła redukcja do zera.
         let wspolne: Vec<i32> = plan
             .iter()
             .filter(|g| !g.is_toucher)
@@ -5284,11 +4229,8 @@ impl Engine {
             .filter(|l| bk.levels.iter().any(|g| g.level == *l))
             .collect();
         if wspolne.len() < 2 {
-            // jeden szczebel nie ma drabinki, więc nie da się jej spłaszczyć
             return true;
         }
-        // rozpiętość drabinki: max/min po wolumenach, liczona na TYCH SAMYCH
-        // poziomach po obu stronach
         let rozpietosc = |ls: &[GridLevel]| -> f64 {
             let mut lo = f64::MAX;
             let mut hi: f64 = 0.0;
@@ -5306,13 +4248,9 @@ impl Engine {
         };
         let r_stary = rozpietosc(&bk.levels);
         let r_nowy = rozpietosc(plan);
-        // Drabinka BYŁA, a teraz jej NIE MA — to podpis degeneracji wag.
-        // Odwrotny kierunek (płaska → drabinka) puszczamy: to znaczy tylko
-        // tyle, że stara była spłaszczona przez podłogę `lot_min`.
         !(r_stary > 1.05 && r_nowy <= 1.001)
     }
 
-    /// Ryzyko planu w dolarach — do dziennika i do testów.
     fn plan_risk(&self, levels: &[GridLevel]) -> f64 {
         levels
             .iter()
@@ -5324,38 +4262,41 @@ impl Engine {
             .sum()
     }
 
-    /// Doprowadza liczbę zleceń na każdym szczeblu do planu × reżim zmienności.
-    ///
-    /// `only_existing = true` (przeliczanie po zmianie zmienności) dotyka
-    /// wyłącznie szczebli, na których wciąż wisi jakieś niezafillowane
-    /// zlecenie. Bez tego ograniczenia przeliczanie odtwarzałoby zlecenia na
-    /// poziomach, które już się zrealizowały i zamknęły — czyli robiłoby
-    /// ciche, nieproszone re-entry.
     #[track_caller]
     fn sync_grid<B: Broker>(&mut self, b: &mut B, id: u32, ts: Ts, only_existing: bool) -> usize {
-        if self.entry_edit_blocks(Some(id)) { return 0; }
+        if self.entry_edit_blocks(Some(id)) {
+            return 0;
+        }
         if self.basket_exit_pending(id) || b.close_receipts_pending() {
             return 0;
         }
-        let (side, is_limit, sl_koszyka, mut levels, koszyk_stop, sig_lo, sig_hi, had_positions, tps) =
-            match self.basket(id) {
-                Some(bk) => (
-                    bk.side,
-                    bk.is_limit,
-                    bk.sl,
-                    bk.levels.clone(),
-                    bk.is_stop,
-                    bk.entry_lo,
-                    bk.entry_hi,
-                    bk.had_positions,
-                    bk.tps.clone(),
-                ),
-                None => return 0,
-            };
-        // rearm_pass calls this with only_existing=false. The checked relot
-        // contract must cover both routes, not merely volatility resizing.
+        let (
+            side,
+            is_limit,
+            sl_koszyka,
+            mut levels,
+            koszyk_stop,
+            sig_lo,
+            sig_hi,
+            had_positions,
+            tps,
+        ) = match self.basket(id) {
+            Some(bk) => (
+                bk.side,
+                bk.is_limit,
+                bk.sl,
+                bk.levels.clone(),
+                bk.is_stop,
+                bk.entry_lo,
+                bk.entry_hi,
+                bk.had_positions,
+                bk.tps.clone(),
+            ),
+            None => return 0,
+        };
         if self.cfg.pending_relot_reconcile_target
-            && !self.revalidate_relot_sync_levels(b,id,ts,&mut levels) {
+            && !self.revalidate_relot_sync_levels(b, id, ts, &mut levels)
+        {
             return 0;
         }
         if cien::czynny() {
@@ -5366,8 +4307,6 @@ impl Engine {
                 std::panic::Location::caller().line(),
             );
         }
-        // Z-9: koszyk „SELL STOP" składa zlecenia PRZEBICIOWE, nie limity.
-        // Za flagą, bo domyślnie (jak dotąd) taki sygnał idzie ścieżką rynkową.
         let zlecenie_stop = koszyk_stop && self.cfg.honor_stop_orders;
         if levels.is_empty() {
             return 0;
@@ -5377,11 +4316,6 @@ impl Engine {
         let mut placed = 0usize;
         let mut removed = 0usize;
 
-        // BUDŻET SZCZEBLI. Gdy siatka bierze rozmiar z LICZBY poziomów (a nie
-        // z liczby zleceń na poziomie), mnożnik zmienności nie ma czego ściąć —
-        // jedna sztuka na poziomie to już minimum. Wtedy tniemy same poziomy,
-        // i to od KOŃCA: poziomy są uporządkowane od lepszej krawędzi strefy
-        // do gorszej, więc w sztormie zostają najlepsze wejścia.
         let f = self.vol_factor(ts);
         let core = levels.iter().filter(|g| !g.is_toucher).count();
         let allowed = if f < 1.0 {
@@ -5391,23 +4325,12 @@ impl Engine {
         };
         let mut core_seen = 0usize;
 
-        // ---- FAZA A: CO trzeba zrobić na każdym szczeblu ----
-        //
-        // Wydzielona z rozstawiania, bo uczciwy limit ryzyka wejścia rynkowego
-        // jest własnością CAŁEGO koszyka: wszystkie jednostki wchodzą po tej
-        // samej cenie i dzielą jeden stop, więc skalę wolumenu trzeba znać,
-        // ZANIM postawimy pierwsze zlecenie. Sama treść decyzji („ile sztuk na
-        // szczeblu") jest przepisana bez zmian.
         struct Zadanie {
             gl: GridLevel,
             want: usize,
             have: usize,
-            /// czy szczebel już się kiedykolwiek zrealizował (stan AKTUALNY,
-            /// nie ten z klona sprzed pętli)
             filled: bool,
             live_pend: Vec<Ticket>,
-            /// Ile NOWYCH jednostek tego szczebla ma wejść natychmiast po
-            /// rynku w trybie hybrydowym. Reszta zachowuje trasę pending.
             market_now: usize,
         }
         let mut zadania: Vec<Zadanie> = Vec::with_capacity(levels.len());
@@ -5416,9 +4339,6 @@ impl Engine {
             let live_pend: Vec<Ticket> = b
                 .pendings()
                 .iter()
-                // Dokładki (`is_topup`) podnoszą WOLUMEN szczebla, a nie jego
-                // LICZEBNOŚĆ — gdyby wpadły do tej listy, `have` przekroczyłoby
-                // `want` i najbliższy przebieg by je skasował.
                 .filter(|o| o.basket == Some(id) && o.level == gl.level && !o.is_topup)
                 .map(|o| o.ticket)
                 .collect();
@@ -5434,16 +4354,6 @@ impl Engine {
                     }
                 }
             }
-            // szczebel, który już się zrealizował, jest zamkniętym rozdziałem:
-            // odtwarzanie go byłoby powtórnym wejściem, o które nikt nie prosił
-            //
-            // Z-7: doc tej funkcji obiecuje „dotyka wyłącznie szczebli, na
-            // których wciąż WISI jakieś niezafillowane zlecenie" — a kod
-            // pomijał tylko WYPEŁNIONE. Szczebel PUSTY (skasowany przez TTL
-            // albo przez `cancel_pendings`) był nieodróżnialny od żywego,
-            // więc `have = 0 < want` i przeliczanie stawiało go od nowa.
-            // Flaga `sync_only_live_levels` przywraca obietnicę i honoruje
-            // znacznik `cancelled` (tak jak robi to `market_ladder_pass`).
             if only_existing && (gl.filled || live_pos > 0) {
                 if !gl.is_toucher {
                     core_seen += 1;
@@ -5468,11 +4378,12 @@ impl Engine {
                 }
             }
             let have = live_pend.len() + live_pos;
-            let mut planned_level=gl.clone();
+            let mut planned_level = gl.clone();
             if self.cfg.pending_relot_reconcile_target {
-                let (budgeted_want,volume)=self.relot_sync_addition_budget(b,id,gl,want,have);
-                want=budgeted_want;
-                planned_level.volume=volume;
+                let (budgeted_want, volume) =
+                    self.relot_sync_addition_budget(b, id, gl, want, have);
+                want = budgeted_want;
+                planned_level.volume = volume;
             }
             zadania.push(Zadanie {
                 gl: planned_level,
@@ -5484,42 +4395,18 @@ impl Engine {
             });
         }
 
-        // ---- ŚCIEŻKA RYNKOWA: ILE Z TEGO PÓJDZIE PO RYNKU ----
-        //
-        // Ten sam predykat co w fazie B, tylko policzony z góry. Przy
-        // `auto_limit = true` i polityce innej niż `Market` suma zostaje
-        // zerem, a wszystkie liczby poniżej są tożsamościowe.
-        // Z-9: koszyk przebiciowy nie wchodzi po rynku ŚCIEŻKĄ KOSZYKOWĄ —
-        // cały sens zlecenia stop to czekanie na potwierdzenie ruchem ceny.
-        // Z jednym wyjątkiem per SZCZEBEL: gdy poziom stopa nie mieści się
-        // przy cenie (`stops_level`), a `pending_cross_policy = Market`,
-        // wariant zastępczy w fazie B otwiera tę jednostkę natychmiast po
-        // rynku — bez potwierdzenia, na które zlecenie miało czekać.
         let chce_rynek_koszyk = self.wejscie_rynkowe(is_limit) && !zlecenie_stop;
         let drabina = chce_rynek_koszyk && self.cfg.market_entry_mode == MarketEntryMode::Laddered;
 
-        // LADDERED: w jednym przebiegu wolno uwolnić DOKŁADNIE JEDEN szczebel,
-        // i to NAJPŁYTSZY z jeszcze nietkniętych. Wejście rynkowe startuje
-        // przy gorszej krawędzi strefy (albo za nią), a poziomy lepsze niż
-        // bieżąca cena odsłania dopiero ruch rynku — od tego jest
-        // `market_ladder_pass` i krok `market_entry_step`.
         if drabina {
             let wybrany = zadania.iter().rposition(|z| z.want > z.have && !z.filled);
             for (i, z) in zadania.iter_mut().enumerate() {
                 if Some(i) != wybrany {
-                    // `want = have` to jawny no-op: ani nie stawiamy,
-                    // ani nie kasujemy tego, co już wisi
                     z.want = z.have;
                 }
             }
         }
 
-        // ---- HYBRYDA SYGNAŁU MARKET: PIERWSZE WEJŚCIE TERAZ, RESZTA LIMITEM ----
-        //
-        // `zadania` są ułożone od wejścia najgłębszego/najlepszego do
-        // najpłytszego/pierwszego. Budżet rozdajemy więc OD KOŃCA. Oś działa
-        // wyłącznie przy pierwszym rozstawieniu sygnału bez słowa LIMITS;
-        // rearm, resize i jawne LIMITS nie mogą po cichu otwierać rynku.
         let px_rynek = q.entry(side);
         let chase = match side {
             Side::Buy => (px_rynek - sig_hi.max(sig_lo)).max(0.0),
@@ -5556,13 +4443,6 @@ impl Engine {
             }
         }
 
-        // NIEZMIENNIK KRAWĘDZI dla ŚCIEŻKI RYNKOWEJ, policzony RAZ.
-        //
-        // Wejście po rynku nie ma własnej ceny do sprawdzenia — wchodzi po
-        // kwotowaniu, a to jest jedno dla całego koszyka w tym ticku. Jeżeli
-        // rynek stoi za dalszą krawędzią strefy, to ŻADNA jednostka rynkowa
-        // tego przebiegu nie ma prawa powstać; limity leżące w strefie idą
-        // dalej normalnie.
         let rynek_za_krawedzia = self.za_dalsza_krawedzia(side, px_rynek, sig_lo, sig_hi);
         let mut lots_rynkowe = 0.0f64;
         if chce_rynek_koszyk
@@ -5590,9 +4470,6 @@ impl Engine {
                 if rynkowych == 0 {
                     continue;
                 }
-                // Jednostka, której faza B nie otworzy, nie ma prawa wchodzić
-                // do mianownika skali wolumenu — inaczej `market_risk_scale`
-                // ścinałby pozostałe za ekspozycję, która nie powstanie.
                 if rynek_za_krawedzia {
                     continue;
                 }
@@ -5602,21 +4479,15 @@ impl Engine {
                 } else {
                     1.0
                 };
-                lots_rynkowe += vol
-                    * (hybrydowych as f64 * hybrid_mult + awaryjnych as f64);
+                lots_rynkowe += vol * (hybrydowych as f64 * hybrid_mult + awaryjnych as f64);
             }
         }
-        // Budżet, który koszyk ma jeszcze do wydania: cap minus ryzyko już
-        // otwartych pozycji. Bez odjęcia tego, co żyje, każdy kolejny szczebel
-        // drabiny dostawałby świeży pełny limit i suma rosłaby bez końca.
         let cap_rynek = self.market_risk_cap(id, b);
         let skala_rynek = self.market_risk_scale(lots_rynkowe, px_rynek, sl_koszyka, cap_rynek);
         let mut ryzyko_rynkowe = 0.0f64;
         let mut budzet_wyczerpany = false;
-        // Niezmiennik krawędzi zgłasza się RAZ na przebieg — patrz faza B.
         let mut zgloszona_krawedz = false;
 
-        // ---- FAZA B: rozstawianie ----
         for z in &zadania {
             let gl = &z.gl;
             let want = z.want;
@@ -5625,30 +4496,16 @@ impl Engine {
 
             if have < want {
                 for unit_idx in 0..(want - have) {
-                    // CZY LIMIT W OGÓLE SIĘ TU POŁOŻY?
-                    //
-                    // Nie wystarczy sprawdzić, czy rynek przekroczył poziom.
-                    // MT5 odrzuca `10015` także wtedy, gdy poziom jest po
-                    // dobrej stronie, ale bliżej ceny niż `stops_level` — a
-                    // dokładnie tak wygląda siatka sygnału, którego strefa
-                    // obejmuje bieżącą cenę. Symulator tego warunku nie miał,
-                    // więc backtest pokazywał wejście, a konto „rozstawiono 0
-                    // zleceń". Ten jeden predykat zamyka tamten rozjazd.
                     let stops = b.stops_level();
                     let zmiesci_sie = if zlecenie_stop {
                         stop_price_is_valid(side, gl.price, &q, stops)
                     } else {
                         limit_price_is_valid(side, gl.price, &q, stops)
                     };
-                    // wolumen jest WŁASNOŚCIĄ SZCZEBLA: wagi głębokości i limit
-                    // ryzyka koszyka policzyły go już przy planowaniu
                     let vol = if gl.volume > 0.0 { gl.volume } else { lot };
                     let chce_rynek_hybryda = unit_idx < z.market_now;
                     let chce_rynek = chce_rynek_koszyk || chce_rynek_hybryda;
 
-                    // Wariant zastępczy wybiera ustawienie; domyślny `Market`
-                    // odtwarza zachowanie symulatora, czyli intencję sygnału:
-                    // wejść, a nie zrezygnować po cichu.
                     let zastepczy = if zmiesci_sie {
                         None
                     } else {
@@ -5669,25 +4526,7 @@ impl Engine {
 
                     let jako_rynek = chce_rynek || zastepczy == Some(PendingCrossPolicy::Market);
 
-                    // ---- NIEZMIENNIK: ŻADNEGO WEJŚCIA ZA DALSZĄ KRAWĘDZIĄ ----
-                    //
-                    // TO JEST GŁÓWNE ŹRÓDŁO wejść pod dolną krawędzią strefy.
-                    // Sekwencja: cena przelatuje CAŁĄ strefę w dół, więc żaden
-                    // limit kupna nie mieści się już przy rynku
-                    // (`limit_price_is_valid`), `pending_cross_policy = Market`
-                    // zamienia KAŻDY taki szczebel na zlecenie RYNKOWE, a rynek
-                    // stoi wtedy pod `lo` — kilkadziesiąt centów nad stopem
-                    // sygnału. Siatka rozstawiona „w strefie co 1 $" wchodzi
-                    // w całości grubo pod strefą i koszyk kończy samymi stopami.
-                    //
-                    // Odmawiamy JEDNOSTKI, nie koszyka: szczeble leżące
-                    // w strefie mają wejść normalnie, gdy tylko cena wróci.
                     if jako_rynek && rynek_za_krawedzia {
-                        // Licznik liczy JEDNOSTKI (bo tyle ekspozycji nie
-                        // powstało), ale zdanie do dziennika idzie RAZ na
-                        // przebieg: przy ośmiu szczeblach po jednej jednostce
-                        // osiem identycznych wpisów zaśmieca historię koszyka
-                        // i nie niesie ani jednej nowej informacji.
                         *self
                             .odrzuty
                             .entry("PonizejKrawedzi".to_string())
@@ -5732,30 +4571,18 @@ impl Engine {
                         continue;
                     }
 
-                    // ---- UCZCIWY LIMIT RYZYKA WEJŚCIA PO RYNKU ----
-                    //
-                    // Ta jednostka NIE wejdzie po `gl.price` — wejdzie po
-                    // `px_rynek`. Wolumen policzony dla ceny szczebla trzeba
-                    // więc przeliczyć na cenę, po której naprawdę się otworzy.
-                    // Dwa niezależne dławiki, bo każdy z osobna ma dziurę:
-                    //  1. skala wolumenu — zachowuje kształt drabinki, ale nie
-                    //     działa, gdy lot już leży na podłodze brokera (przy
-                    //     200 $ i 0,5 % kapitału jest to 0,01, czyli zawsze);
-                    //  2. bieżący budżet — przestaje dokładać JEDNOSTKI, gdy
-                    //     suma ryzyka po cenie wypełnienia dobija do capu.
-                    // Kolejność szczebli w planie jest od najgłębszego do
-                    // najpłytszego, więc budżet wyczerpuje się na najgorszych
-                    // wejściach — dokładnie tak, jak każe `cap_basket_risk`.
-                    let hybrid_mult = if chce_rynek_hybryda
-                        && self.cfg.market_hybrid_lot_mult > 0.0
+                    let hybrid_mult = if chce_rynek_hybryda && self.cfg.market_hybrid_lot_mult > 0.0
                     {
                         self.cfg.market_hybrid_lot_mult
                     } else {
                         1.0
                     };
                     let vol_rynek = if jako_rynek {
-                        if self.cfg.order_volume_contract_v2 { vol * hybrid_mult * skala_rynek }
-                        else { round_lot((vol * hybrid_mult * skala_rynek).max(self.cfg.lot_min)) }
+                        if self.cfg.order_volume_contract_v2 {
+                            vol * hybrid_mult * skala_rynek
+                        } else {
+                            round_lot((vol * hybrid_mult * skala_rynek).max(self.cfg.lot_min))
+                        }
                     } else {
                         vol
                     };
@@ -5781,20 +4608,6 @@ impl Engine {
                         }
                     }
 
-                    // BRAMKA MARGINESU NA KAŻDĄ WARSTWĘ Z OSOBNA.
-                    //
-                    // Plan siatki powstaje RAZ, w chwili sygnału, i dotąd był
-                    // rozstawiany do końca bez ani jednego spojrzenia na
-                    // rachunek. Przy `GridAtOnce` dziesięć jednostek wchodzi
-                    // w jednym ticku — jeżeli szósta zabiera poziom marginesu
-                    // poniżej progu, siódma nie ma prawa polecieć.
-                    //
-                    // `break` ucina JEDNOSTKI bieżącego szczebla (pętla
-                    // wewnętrzna) — pętla po szczeblach idzie dalej i każdy
-                    // następny poziom pyta bramkę od nowa. To nie jest
-                    // przypadek: między szczeblami mogło się wypełnić lub
-                    // zamknąć coś, co poziom marginesu zmienia, więc „nie
-                    // stać nas TERAZ" nie przesądza o kolejnych poziomach.
                     if !self.margines_pozwala(b, self.cfg.ml_min_warstwa) {
                         self.basket_note(
                             id,
@@ -5807,10 +4620,6 @@ impl Engine {
                         break;
                     }
 
-                    // Cena, po której ta jednostka REALNIE powstanie — dla
-                    // zrzutu diagnostycznego i dla bramki krawędzi zlecenia
-                    // przesuniętego. Gałąź rynkowa zna ją od razu, gałąź
-                    // oczekująca nadpisze ją poziomem zlecenia niżej.
                     let mut cena_wejscia = px_rynek;
                     let res = if jako_rynek {
                         let tp_rynek = if chce_rynek_hybryda {
@@ -5825,26 +4634,22 @@ impl Engine {
                         } else {
                             gl.tp
                         };
-                        self.open_market_order(b, OrderReq {
-                            side,
-                            volume: vol_rynek,
-                            sl: self.broker_sl(gl.sl, side),
-                            tp: tp_rynek,
-                            basket: Some(id),
-                            level: gl.level,
-                            is_toucher: gl.is_toucher,
-                            comment: format!("B{id}"),
-                        })
+                        self.open_market_order(
+                            b,
+                            OrderReq {
+                                side,
+                                volume: vol_rynek,
+                                sl: self.broker_sl(gl.sl, side),
+                                tp: tp_rynek,
+                                basket: Some(id),
+                                level: gl.level,
+                                is_toucher: gl.is_toucher,
+                                comment: format!("B{id}"),
+                            },
+                        )
                         .map(|t| (t, true))
                     } else {
-                        // STOP działa tylko dla poziomu leżącego ZA rynkiem;
-                        // przy poziomie w pasie `stops_level` nie ma dokąd go
-                        // postawić, więc schodzimy na przesunięcie.
                         let (kind, price) = match zastepczy {
-                            // Z-9: koszyk przebiciowy składa STOP zawsze, gdy
-                            // cena jest wykonalna — niezależnie od polityki
-                            // zastępczej, bo to jest jego typ własny, a nie
-                            // awaryjne zastępstwo za limit.
                             _ if zlecenie_stop && zmiesci_sie => {
                                 (PendingKind::stop(side), gl.price)
                             }
@@ -5860,12 +4665,6 @@ impl Engine {
                             _ => (PendingKind::limit(side), gl.price),
                         };
                         cena_wejscia = price;
-                        // NIEZMIENNIK dla ZLECENIA PRZESUNIĘTEGO. `Shift`
-                        // i `Stop` dosuwają limit do najbliższego wykonalnego
-                        // poziomu (`clamp_limit_price`), a przy cenie pod
-                        // strefą ten poziom leży POD dalszą krawędzią — czyli
-                        // wariant zastępczy zrobiłby dokładnie to, czego
-                        // zabrania gałąź rynkowa wyżej, tylko limitem.
                         if self.za_dalsza_krawedzia(side, price, sig_lo, sig_hi) {
                             self.basket_note(
                                 id,
@@ -5883,18 +4682,21 @@ impl Engine {
                                 .or_insert(0) += 1;
                             continue;
                         }
-                        self.place_pending_order(b, PendingReq {
-                            kind,
-                            volume: vol,
-                            price,
-                            sl: self.broker_sl(gl.sl, side),
-                            tp: gl.tp,
-                            basket: Some(id),
-                            level: gl.level,
-                            is_toucher: gl.is_toucher,
-                            is_topup: false,
-                            comment: format!("B{id}"),
-                        })
+                        self.place_pending_order(
+                            b,
+                            PendingReq {
+                                kind,
+                                volume: vol,
+                                price,
+                                sl: self.broker_sl(gl.sl, side),
+                                tp: gl.tp,
+                                basket: Some(id),
+                                level: gl.level,
+                                is_toucher: gl.is_toucher,
+                                is_topup: false,
+                                comment: format!("B{id}"),
+                            },
+                        )
                         .map(|t| (t, false))
                     };
                     match res {
@@ -5904,12 +4706,6 @@ impl Engine {
                                 bk.state = BasketState::Working;
                                 bk.had_positions = true;
                                 if drabina || chce_rynek_hybryda {
-                                    // Szczebel drabiny jest ZUŻYTY z chwilą
-                                    // otwarcia. Bez tego znacznika kolejny
-                                    // przebieg zobaczyłby go jako pusty (gdy
-                                    // pozycja zdąży się zamknąć) i uwolniłby
-                                    // go po raz drugi — czyli zrobiłby ciche
-                                    // re-entry pod nazwą „krok drabiny".
                                     if let Some(x) =
                                         bk.levels.iter_mut().find(|x| x.level == gl.level)
                                     {
@@ -5959,7 +4755,6 @@ impl Engine {
                     }
                 }
             } else if have > want {
-                // kasujemy WYŁĄCZNIE niezafillowane — pozycji nie likwidujemy
                 for t in live_pend.into_iter().take(have - want) {
                     if cien::czynny() {
                         cien::z(
@@ -6001,7 +4796,6 @@ impl Engine {
         }
     }
 
-    /// Zapisuje właściwy poziom stopu w pozycji, gdy prowadzi go silnik.
     fn apply_virtual_sl<B: Broker>(&self, b: &mut B, t: Ticket, sl: Option<Px>) {
         if !self.cfg.virtual_sl_all || sl.is_none() {
             return;
@@ -6049,26 +4843,12 @@ impl Engine {
         u.max(1)
     }
 
-    /// Cel dla pozycji o indeksie `idx` wg wybranego harmonogramu.
-    /// CELE SYGNALU + DRABINKA RUNNERA — patrz `runner_cele_n` (settings.rs).
-    ///
-    /// Format może po TP3 ogłosić kolejne poziomy (`I WILL TARGET`).
-    /// Dopisujemy je TUTAJ, przy zakładaniu koszyka, żeby
-    /// caly dalszy mechanizm widzial je jako zwykle cele — bez rownoleglej
-    /// sciezki, ktora trzeba by sprawdzac osobno.
-    ///
-    /// Przy `runner_cele_n = 0` zwraca dokladnie to, co dostal.
     fn cele_z_runnerem(&self, side: Side, tps: &[Px]) -> Vec<Px> {
         self.cele_z_runnerem_od(side, tps, None)
     }
 
-    /// Jak wyżej, ale z ceną rynku — wtedy działa też `cele_pomin_za_cena`.
     fn cele_z_runnerem_od(&self, side: Side, tps: &[Px], rynek: Option<Px>) -> Vec<Px> {
         let mut out: Vec<Px> = match (self.cfg.cele_pomin_za_cena, rynek) {
-            //  CELE, KTORE RYNEK JUZ ZABRAL — patrz `cele_pomin_za_cena`.
-            //  Zostawiamy wylacznie te, ktore realnie sa PRZED cena; jesli
-            //  wypadna wszystkie, zostaje ostatni, zeby koszyk nie stracil
-            //  celu calkiem.
             (true, Some(r)) => {
                 let przed: Vec<Px> = tps
                     .iter()
@@ -6103,10 +4883,6 @@ impl Engine {
         self.target_for_ex(tps, side, idx, total, false)
     }
 
-    /// Wariant świadomy slotu „TP OPEN" z sygnału.
-    ///
-    /// Wydzielony, żeby stary `target_for` (używany w miejscach, gdzie koszyka
-    /// nie ma pod ręką) zachował się dokładnie tak jak dotąd.
     fn target_for_ex(
         &self,
         tps: &[Px],
@@ -6118,20 +4894,12 @@ impl Engine {
         if tps.is_empty() {
             return None;
         }
-        // „TP OPEN" to kolejny szczebel drabinki o wartości `ostatni ± offset`
-        // — dokładnie jak `resolve_tp` w bot.py. Runner celuje w niego, a nie
-        // w ostatni cel liczbowy.
         let open_extra = tp_open && self.cfg.tp_open_extra && self.cfg.tp_open_offset != 0.0;
         let last = if open_extra {
             *tps.last().unwrap() + side.sign() * self.cfg.tp_open_offset
         } else {
             *tps.last().unwrap()
         };
-        // CELE ODDZIELONE OD INKASA. Harmonogram procentowy zakłada, że na
-        // każdym kolejnym celu jest jeszcze z czego ukroić transzę — a
-        // rozłożenie pozycji po szczeblach drabinki (gałąź niżej) zamyka je
-        // u brokera po drodze. To pole rozstrzyga tylko cel; procenty zostają
-        // takie, jakie mówi `tp_schedule`.
         if self.cfg.cele_na_ostatnim {
             return Some(last);
         }
@@ -6151,7 +4919,6 @@ impl Engine {
                         return Some(tps[i.min(tps.len() - 1)]);
                     }
                 }
-                // reszta to runnery — co dostają, decyduje `last_runner`
                 match self.cfg.last_runner {
                     LastRunner::NoTp => None,
                     LastRunner::NextTp => Some(tps[counts.len().min(tps.len() - 1)]),
@@ -6167,9 +4934,6 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  REAKCJE NA KOMUNIKATY
-    // ============================================================
 
     fn handle_tp_hit<B: Broker>(
         &mut self,
@@ -6186,18 +4950,6 @@ impl Engine {
         self.handle_tp_hit_z_pozycja(b, id, index, ts, src);
     }
 
-    /// CEL OSIĄGNIĘTY, ALE NIE PRZEZ NAS — meldunek z ceny, kanału albo SPP
-    /// na koszyku, który w tej chwili nie trzyma ani jednego lota.
-    ///
-    /// Nie awansuje etapu, nie bankuje, nie rusza stopów ani celów. Zapisuje
-    /// OBSERWACJĘ (`plan_wykonany_do`) i oddaje sprawę jedynej regule, która
-    /// ma tu coś do powiedzenia: `pending_lifetime` przez `drop_grid_on_target`.
-    ///
-    /// Jedna ścieżka dla wszystkich źródeł jest tu celem samym w sobie. Przed
-    /// naprawą kanał kasował siatkę własnym kodem w ogonie `handle_tp_hit` —
-    /// bez okna łaski, bez `pending_drop_keep_n` i bez wpisu w dzienniku,
-    /// więc ta sama reguła zachowywała się inaczej zależnie od tego, kto ją
-    /// odpalił.
     fn cel_bez_pozycji<B: Broker>(
         &mut self,
         b: &mut B,
@@ -6206,7 +4958,9 @@ impl Engine {
         ts: Ts,
         src: &str,
     ) {
-        if self.basket_exit_pending(id) { return; }
+        if self.basket_exit_pending(id) {
+            return;
+        }
         let (tps, obserwowany) = match self.basket(id) {
             Some(bk) => (bk.tps.clone(), bk.etap_obserwowany()),
             None => return,
@@ -6221,9 +4975,6 @@ impl Engine {
             format!("TP{stage} bez naszej pozycji ({src}) — etap koszyka NIE rusza"),
         );
         if !self.cfg.pending_drop_on_target {
-            // Reguła jawnie wyłączona: siatka czeka na wypełnienie niezależnie
-            // od tego, co w tym czasie zrobiła cena. Obserwację i tak zapisujemy,
-            // bo `plan_wykonany_do` jest liczbą o rynku, a nie o konfiguracji.
             if let Some(bk) = self.basket_mut(id) {
                 bk.plan_wykonany_do = bk.plan_wykonany_do.max(stage);
             }
@@ -6237,10 +4988,6 @@ impl Engine {
         self.drop_grid_on_target(b, id, stage, level, ts);
     }
 
-    /// Ciało obsługi trafionego celu. Wołać WYŁĄCZNIE dla koszyka z pozycją
-    /// albo z ODCINKA, na którym pozycja właśnie została zamknięta na swoim
-    /// take-proficie (`tp_stage_from_broker_fill`) — tam dowód wypełnienia
-    /// jest najtwardszy z możliwych, choć `tickets` jest już puste.
     fn handle_tp_hit_z_pozycja<B: Broker>(
         &mut self,
         b: &mut B,
@@ -6249,7 +4996,6 @@ impl Engine {
         ts: Ts,
         src: &str,
     ) {
-        // Znacznik dla reguły „trader trzyma dłużej, gdy kanał potwierdza siłę".
         if self.basket_exit_pending(id) {
             return;
         }
@@ -6262,8 +5008,6 @@ impl Engine {
         if target_stage <= stage_now {
             return;
         }
-        // Znacznik dla `reenter_min_return_s` — musi stanąć tu, PRZED bankowaniem,
-        // bo po nim koszyk może już nie żyć, a odstęp liczymy od trafienia celu.
         if let Some(bk) = self.basket_mut(id) {
             bk.last_tp_ts = ts;
         }
@@ -6277,10 +5021,6 @@ impl Engine {
         for st in steps {
             if let Some(bk) = self.basket_mut(id) {
                 bk.tp_stage = st;
-                // Obserwacja nie może zostać W TYLE za księgowością: cel,
-                // który zainkasowaliśmy, rynek tym bardziej osiągnął. Bez tego
-                // koszyk po zamknięciu pozycji zaczynałby mierzyć drogę
-                // `pending_lifetime` od początku drabinki.
                 bk.plan_wykonany_do = bk.plan_wykonany_do.max(st);
             }
             self.basket_note(id, ts, format!("TP{st} osiągnięty ({src})"));
@@ -6324,8 +5064,6 @@ impl Engine {
             return;
         }
 
-        // ZDJĘCIE SUFITU PO ETAPIE — uogólnienie mechanizmu z „RISK FREE" na
-        // koszyki, których kanał nigdy nie oznaczy. Patrz `no_tp_after_stage`.
         if self.cfg.no_tp_after_stage > 0 && target_stage >= self.cfg.no_tp_after_stage as usize {
             let zywe: Vec<Ticket> = self
                 .basket(id)
@@ -6343,10 +5081,6 @@ impl Engine {
                     Some(p) => (p.sl, p.tp),
                     None => continue,
                 };
-                // `is_runner` dopiero po POTWIERDZONYM zdjęciu celu. Znacznik
-                // przy odrzuconym `modify` rozjeżdżał stan: silnik prowadził
-                // pozycję jak runnera (luźna zapadka, brak sufitu), a u brokera
-                // wciąż wisiał TP — pierwsze dotknięcie celu zamykało „runnera".
                 let bez_celu = match tp {
                     Some(_) => {
                         cien::z(cakt::A_CEL, t, czr::Z_TP_ZDEJMIJ_CEL_RUNNERA, 0);
@@ -6373,15 +5107,6 @@ impl Engine {
             }
         }
 
-        // PIRAMIDA — dokładka po POTWIERDZONYM ruchu.
-        //
-        // Odwrotność wszystkiego, co próbowaliśmy dotąd: nie przewidujemy,
-        // tylko czekamy, aż ruch się WYDARZY (etap ≥ progu), i dokładamy
-        // LIMITEM na poziomie TP1 — czyli kupujemy cofnięcie w potwierdzonym
-        // ruchu, zamiast gonić cenę.
-        //
-        // Musi stać PRZED kasowaniem siatki, bo `pending_lifetime=UntilTp1`
-        // zaraz sprzątnie wszystkie zlecenia tego koszyka.
         if self.cfg.pyramid_after_stage > 0
             && self.margines_pozwala(b, self.cfg.ml_min_piramida)
             && target_stage >= self.cfg.pyramid_after_stage as usize
@@ -6396,16 +5121,6 @@ impl Engine {
                 )
             });
             if let Some((zrobiona, przelot, bsl, tp1, ostatni)) = dane {
-                // BRAMKA REŻIMU — w rynku chaotycznym piramida sama się wyłącza.
-                //
-                // Koszyk potrafi osiągnąć TP2 i zawrócić; potwierdzenie dwoma
-                // celami NIE odróżnia „trendu, który się utrzyma" od „spike'a,
-                // który zawróci". Ale reżim chaotyczny ma DUŻO przelotów, a to
-                // już mierzymy — więc udział przelotów w ostatnich N ocenach
-                // jest tanim wskaźnikiem, kiedy przestać dokładać.
-                //
-                // Przy zbyt krótkiej historii wpuszczamy: brak wiedzy nie może
-                // udawać wiedzy o złym reżimie.
                 let regime_ok = if self.cfg.pyramid_regime_lookback == 0 {
                     true
                 } else {
@@ -6420,12 +5135,6 @@ impl Engine {
                     }
                 };
 
-                // Koszyk-przelot dokładki NIE dostaje: cena przeszła przez
-                // strefę na wylot, więc „potwierdzenie" jest pozorne.
-                // BRAMKA KAPITAŁOWA — piramida dopiero, gdy konto urosło.
-                // Mierzymy wobec salda POCZĄTKOWEGO przebiegu, nie bieżącego:
-                // wobec bieżącego warunek byłby zawsze spełniony i pole nic
-                // by nie robiło.
                 let kapital_ok = self.cfg.pyramid_min_equity_mult <= 0.0
                     || self.stats.balance
                         >= self.stats.start_balance * self.cfg.pyramid_min_equity_mult;
@@ -6436,18 +5145,21 @@ impl Engine {
                             * self.cfg.pyramid_lot_mult.max(0.0))
                         .max(self.cfg.lot_min);
                         cien::z(cakt::A_DOLOZENIE, id as u64, czr::Z_PIRAMIDA_PO_TP, 0);
-                        let res = self.place_pending_order(b, PendingReq {
-                            kind: PendingKind::limit(side),
-                            volume: vol,
-                            price: px,
-                            sl: self.broker_sl(bsl, side),
-                            tp: ostatni,
-                            basket: Some(id),
-                            level: -3,
-                            is_toucher: false,
-                            is_topup: false,
-                            comment: format!("B{id}"),
-                        });
+                        let res = self.place_pending_order(
+                            b,
+                            PendingReq {
+                                kind: PendingKind::limit(side),
+                                volume: vol,
+                                price: px,
+                                sl: self.broker_sl(bsl, side),
+                                tp: ostatni,
+                                basket: Some(id),
+                                level: -3,
+                                is_toucher: false,
+                                is_topup: false,
+                                comment: format!("B{id}"),
+                            },
+                        );
                         match res {
                             Ok(t) => {
                                 if let Some(bk) = self.basket_mut(id) {
@@ -6464,8 +5176,6 @@ impl Engine {
                                 );
                             }
                             Err(e) => {
-                                // Odmowa brokera nie może zablokować reszty
-                                // obsługi celu — tylko odnotowujemy.
                                 if let Some(bk) = self.basket_mut(id) {
                                     bk.pyramided = true;
                                 }
@@ -6481,7 +5191,6 @@ impl Engine {
             }
         }
 
-        // kasowanie limitów wg konfiguracji
         let cancel_stage = match self.cfg.pending_lifetime {
             PendingLifetime::UntilTp1 => Some(1),
             PendingLifetime::UntilTp2 => Some(2),
@@ -6497,9 +5206,6 @@ impl Engine {
             }
         }
 
-        //  STOP NA WEJSCIE PO ETAPIE. `be_at_tp1` to szczegolny przypadek
-        //  (etap 1); `be_od_etapu` uogolnia go na dowolny prog — 3 odwzorowuje
-        //  kanon Synergy („SL IS SET TO BE" w komunikacie o TP3).
         let prog_be = if self.cfg.be_od_etapu > 0 {
             Some(self.cfg.be_od_etapu)
         } else if self.cfg.be_at_tp1 {
@@ -6508,10 +5214,6 @@ impl Engine {
             None
         };
         if let Some(pr) = prog_be {
-            //  PROG LICZBY POZYCJI — patrz `be_min_pozycji` (settings.rs).
-            //  Stop na wejscie ma ratowac koszyki z pelna siatka (6,5 %
-            //  trafnosci), a NIE dotykac tych o jednej-dwoch pozycjach
-            //  (95,3 % trafnosci), bo tam zamienilby zysk w zero.
             let dosc_pozycji = self.cfg.be_min_pozycji == 0
                 || self
                     .basket(id)
@@ -6528,34 +5230,16 @@ impl Engine {
             }
         }
 
-        //  STOP NA PLYTKA KRAWEDZ STREFY PO TP1 — `sl_po_tp1_na_krawedz`.
-        //
-        //  Roznica wobec `be_at_tp1`: tamto stawia stop na CENIE WEJSCIA,
-        //  to na przeciwnej krawedzi strefy SYGNALU. Przy wejsciu na krawedzi
-        //  glebokiej cena musialaby wrocic PONAD cala strefe, zeby nas
-        //  wyrzucic — a wtedy wychodzimy z zyskiem rownym jej szerokosci.
-        //
-        //  Krawedz bierzemy ze strefy Z SYGNALU (`entry_lo`/`entry_hi`), nie
-        //  z roboczej: offsety presetu potrafia przesunac strefe robocza pod
-        //  stop, a ta regula ma sie odnosic do tego, co podal kanal.
-        //
-        //  `set_basket_sl` nie luzuje stopa, wiec przy cofnieciu ceny nic
-        //  sie nie stanie. Domyslnie wylaczone — kontrakt zera.
         if self.cfg.sl_po_tp1_na_krawedz && target_stage >= 1 {
             if let Some((sl_lo, sl_hi)) = self.basket(id).map(|bk| (bk.entry_lo, bk.entry_hi)) {
                 let (a, b2) = (sl_lo.min(sl_hi), sl_lo.max(sl_hi));
                 if b2 - a > 1e-9 {
-                    // plytka krawedz = ta, do ktorej cena dochodzi najwczesniej
                     let krawedz = side.worse_edge(a, b2);
                     self.set_basket_sl(b, id, krawedz, ts);
                 }
             }
         }
 
-        // STOP W POŁOWIE DROGI po przedostatnim celu. Stoi PO `be_at_tp1`,
-        // bo ma go zastępować na końcówce drabinki, a nie z nim walczyć:
-        // breakeven jest podłogą przez cały sygnał, ta reguła podnosi ją
-        // dopiero wtedy, gdy zostaje już tylko ostatni cel.
         if self.cfg.sl_polowa_od_konca > 0 {
             let prog = tps.len().saturating_sub(self.cfg.sl_polowa_od_konca);
             if prog > 0 && target_stage >= prog {
@@ -6563,7 +5247,6 @@ impl Engine {
             }
         }
 
-        // drabinka SL: SL = osiągnięty TP[etap − lag] ± oddech
         if self.cfg.ladder_from_tp > 0 && target_stage >= self.cfg.ladder_from_tp {
             let li = target_stage.saturating_sub(1 + self.cfg.ladder_lag);
             if let Some(&anchor) = tps.get(li) {
@@ -6572,10 +5255,8 @@ impl Engine {
             }
         }
 
-        // schodkowy SL zależny od rangi pozycji
         self.apply_smart_sl(b, id, ts);
 
-        // przesuń cele pozostałych pozycji
         self.retarget(b, id, ts);
     }
 
@@ -6587,7 +5268,9 @@ impl Engine {
         level: Px,
         ts: Ts,
     ) {
-        if self.basket_exit_pending(id) { return; }
+        if self.basket_exit_pending(id) {
+            return;
+        }
         if let Some(bk) = self.basket_mut(id) {
             bk.plan_wykonany_do = bk.plan_wykonany_do.max(stage);
         }
@@ -6611,15 +5294,6 @@ impl Engine {
         if stage < cancel_stage {
             return;
         }
-        // OKNO ŁASKI — patrz `pending_drop_grace_min`.
-        //
-        // Zamiast kasować siatkę w chwili meldunku o celu, zapisujemy TERMIN
-        // i wracamy. Skasuje ją `dokoncz_odroczone_kasowanie` po upływie okna,
-        // chyba że w międzyczasie coś się wypełni i koszyk ożyje.
-        //
-        // Powód, dla którego to jest okno, a nie wyłącznik: wartość
-        // porzuconych nóg wynosi +5 552 $ przy 60 minutach i −7 987 $ przy
-        // 600 — cała mieszka w pierwszej godzinie.
         let laska = (self.cfg.pending_drop_grace_min.max(0.0) * 60_000.0) as i64;
         if laska > 0 && self.blisko_strefy(b, id) {
             if let Some(bk) = self.basket_mut(id) {
@@ -6636,8 +5310,6 @@ impl Engine {
         let tekst =
             format!("TP{stage} ({level:.2}) osiągnięty bez wejścia — skasowano {n} limitów");
         self.basket_note(id, ts, tekst.clone());
-        // Dziennik ma to WIDZIEĆ. Poprzednia postać tej reguły nie zostawiała
-        // po sobie ani jednej linii, więc jej zniknięcie przeszło niezauważone.
         if self.journal.wants(EventLevel::Warn) {
             let snap = self.jsnap(b);
             self.journal.push(
@@ -6659,16 +5331,6 @@ impl Engine {
         }
     }
 
-    /// SMART SL — stop zależny od RANGI pozycji w koszyku.
-    ///
-    /// Ranga 0 = najlepsze wejście. Po n-tym celu n najlepszych pozycji ma
-    /// przesunięty stop o n szczebli łańcucha, więc ochrona rośnie tam, gdzie
-    /// jest największy zapas. To jedyny mechanizm, który różnicuje SL WEWNĄTRZ
-    /// jednego koszyka — reszta ustawień operuje na całym koszyku naraz.
-    ///
-    /// Stop wyłącznie się zaciska. Poluzowanie oznaczałoby oddanie zysku, który
-    /// był już zablokowany, więc jest zakazane niezależnie od tego, co wyliczy
-    /// łańcuch.
     fn apply_smart_sl<B: Broker>(&mut self, b: &mut B, id: u32, ts: Ts) {
         if self.cfg.smart_sl_mode == SmartSlMode::Off {
             return;
@@ -6677,8 +5339,6 @@ impl Engine {
             Some(bk) => (bk.side, bk.tps.clone(), bk.tp_stage, bk.sl, bk.secured),
             None => return,
         };
-        // drabinka stopów jako nagroda za komunikat sygnalisty, a nie
-        // zachowanie domyślne — przed zabezpieczeniem zostaje SL z sygnału
         if self.cfg.smart_sl_only_after_rf && !secured {
             return;
         }
@@ -6696,7 +5356,6 @@ impl Engine {
         if live.is_empty() {
             return;
         }
-        // najlepsze wejście na początek — dla BUY najniższa cena, dla SELL najwyższa
         live.sort_by(|a, c| match side {
             Side::Buy => a.1.partial_cmp(&c.1).unwrap(),
             Side::Sell => c.1.partial_cmp(&a.1).unwrap(),
@@ -6735,9 +5394,6 @@ impl Engine {
                 Some(be_px)
             };
 
-            // Podłoga. Po RISK FREE / SPP koszyk jest „zabezpieczony" — runner
-            // nie ma prawa wrócić pod cenę wejścia tylko dlatego, że łańcuch
-            // liczy się od pierwotnego stop-lossa sygnału.
             let floor = if secured && self.cfg.smart_sl_floor_be_after_rf {
                 Some(match base_sl {
                     None => be_px,
@@ -6763,7 +5419,6 @@ impl Engine {
             };
             let Some(v) = v else { continue };
 
-            // tylko zaciskanie
             let tighter = cur_sl.map(|s| side.better(s, v)).unwrap_or(true);
             if !tighter {
                 continue;
@@ -6781,7 +5436,6 @@ impl Engine {
         }
     }
 
-    /// Zamknięcie transz na trafionym celu wg harmonogramu.
     fn bank_on_tp<B: Broker>(&mut self, b: &mut B, id: u32, stage: usize, ts: Ts) {
         let live: Vec<Ticket> = match self.basket(id) {
             Some(bk) => bk
@@ -6797,13 +5451,6 @@ impl Engine {
         }
         let n = live.len();
 
-        // ---- ZAPIS WOLUMENU PIERWOTNEGO ----
-        //
-        // Tu i tylko tu, bo to jedyne miejsce w silniku, które zmniejsza
-        // wolumen otwartej pozycji. Zapis idzie PRZED cięciem, więc pierwsza
-        // zapisana wartość jest wolumenem sprzed pierwszego inkasa. Przy
-        // wyłączonej regule nie zapisujemy nic — pole ma zostać puste
-        // w presetach, które go nie używają.
         if self.cfg.partial_pct_od_pierwotnego {
             let teraz: Vec<(Ticket, f64)> = live
                 .iter()
@@ -6818,10 +5465,7 @@ impl Engine {
             }
         }
 
-        // Udział transzy w procentach — jedna liczba dla obu trybów inkasa,
-        // bo partiale z wolumenu potrzebują ułamka, a nie liczby sztuk.
         let pct = match self.cfg.tp_schedule {
-            // pozycje mają własne TP — broker zamyka je sam
             TpSchedule::AllRunners | TpSchedule::Ladder | TpSchedule::AllAtTp1
                 if self.cfg.assign_tp_per_position =>
             {
@@ -6854,9 +5498,6 @@ impl Engine {
             return;
         }
 
-        // Kolejność inkasa. „Najgorsze pierwsze" to styl grupy: najlepsze
-        // wejścia zostają runnerami. Wariant odwrotny inkasuje pewny zysk
-        // i zostawia nadzieję — bywa lepszy w rynku, który zawraca.
         let q = b.quote();
         let mut sorted = live.clone();
         sorted.sort_by(|a, c| {
@@ -6868,7 +5509,6 @@ impl Engine {
             }
         });
 
-        // ---- tryb PARTIALI Z WOLUMENU ----
         let vols: Vec<f64> = live
             .iter()
             .filter_map(|t| b.find_position(*t).map(|p| p.volume))
@@ -6880,10 +5520,6 @@ impl Engine {
                     Some(p) => p.volume,
                     None => continue,
                 };
-                // BAZA PROCENTU. Domyślnie wolumen bieżący; przy włączonej
-                // regule — ten sprzed pierwszego inkasa, żeby „15 % / 40 % /
-                // 15 %" sumowało się do 70 %, a nie do 56,7 % ciągu
-                // geometrycznego. Brak wpisu = baza bieżąca, czyli parytet.
                 let baza = if self.cfg.partial_pct_od_pierwotnego {
                     self.basket(id)
                         .and_then(|bk| {
@@ -6896,10 +5532,6 @@ impl Engine {
                 } else {
                     vol
                 };
-                // Siatka wolumenu jest własnością INSTRUMENTU u brokera.
-                // Dla XAUUSD 0.01/0.01 helper idzie dokładnie starą gałęzią;
-                // dla innych symboli nie wysyłamy nielegalnego wolumenu ani
-                // nie zostawiamy resztki poniżej SYMBOL_VOLUME_MIN.
                 let Some(cut) =
                     partial_close_volume(vol, baza * pct / 100.0, b.volume_min(), b.volume_step())
                 else {
@@ -6920,13 +5552,10 @@ impl Engine {
             return;
         }
 
-        // ---- tryb CAŁYCH POZYCJI ----
         let close_n = self.cfg.bank_count(n, pct);
         if close_n == 0 {
             return;
         }
-        // Runner zostaje, chyba że konfiguracja jawnie pozwala domknąć koszyk.
-        // „if you have any runners just HOLD" — tak prowadzi to sygnalista.
         let limit = if self.cfg.bank_close_last {
             close_n.min(n)
         } else {
@@ -6943,17 +5572,6 @@ impl Engine {
         self.basket_note(id, ts, format!("zainkasowano {limit} poz. na TP{stage}"));
     }
 
-    /// ZAMYKA JEDEN KOSZYK — pozycje po rynku + kasacja jego zleceń (W33).
-    ///
-    /// Wydzielone z gałęzi `Signal::CloseAll`, bo ta sama czynność jest
-    /// potrzebna w dwóch miejscach o różnych powodach, a dublowanie jej
-    /// znaczyłoby dwie definicje „zamknięty koszyk". Wzorzec skopiowany
-    /// z `close_opposite_baskets`: pomijamy pozycje ZAMROŻONE (broker ich
-    /// nie odda), `Done` stawiamy dopiero po potwierdzonych zamknięciach —
-    /// bezwarunkowe `Done` przy odmowie brokera zostawia pozycję-SIEROTĘ bez
-    /// właściciela (ta sama klasa błędu co U11 w audycie).
-    ///
-    /// Zwraca `(zamknięte pozycje, skasowane zlecenia, wynik $)`.
     #[track_caller]
     fn close_basket<B: Broker>(
         &mut self,
@@ -7006,27 +5624,36 @@ impl Engine {
         (zamkniete, skasowane, wynik)
     }
 
-    /// Commit the exit before issuing broker commands. The persisted intent is
-    /// independent of TP stages, the current price and normal entry eligibility.
     fn request_confirmed_exit<B: Broker>(
-        &mut self, b: &mut B, id: u32, ts: Ts, reason: CloseReason,
+        &mut self,
+        b: &mut B,
+        id: u32,
+        ts: Ts,
+        reason: CloseReason,
     ) -> (usize, usize, f64) {
-        let Some(bk) = self.basket_mut(id) else { return (0, 0, 0.0) };
+        let Some(bk) = self.basket_mut(id) else {
+            return (0, 0, 0.0);
+        };
         let first = bk.pending_exit.is_none();
         if first {
-            bk.pending_exit = Some(PendingBasketExit { reason, last_attempt_ts: ts });
+            bk.pending_exit = Some(PendingBasketExit {
+                reason,
+                last_attempt_ts: ts,
+            });
         }
         self.attempt_confirmed_exit(b, id, ts, first)
     }
 
     fn attempt_confirmed_exit<B: Broker>(
-        &mut self, b: &mut B, id: u32, ts: Ts, first: bool,
+        &mut self,
+        b: &mut B,
+        id: u32,
+        ts: Ts,
+        first: bool,
     ) -> (usize, usize, f64) {
         let Some(intent) = self.basket(id).and_then(|x| x.pending_exit.clone()) else {
             return (0, 0, 0.0);
         };
-        // Broker truth, not the cached ticket lists: a rejected cancellation
-        // can fill before the retry, including while the process is restarting.
         let exposed = b.positions().iter().any(|p| p.basket == Some(id))
             || b.pendings().iter().any(|p| p.basket == Some(id));
         if !exposed {
@@ -7045,27 +5672,39 @@ impl Engine {
             bk.state = BasketState::Working;
             bk.pending_exit.as_mut().unwrap().last_attempt_ts = ts;
         }
-        // Remove entry exposure first; an unsuccessful cancellation remains
-        // visible and prevents Done even if every current position was closed.
         let cancelled = self.cancel_pendings_now(b, id);
-        let tickets: Vec<Ticket> = b.positions().iter()
-            .filter(|p| p.basket == Some(id)).map(|p| p.ticket).collect();
+        let tickets: Vec<Ticket> = b
+            .positions()
+            .iter()
+            .filter(|p| p.basket == Some(id))
+            .map(|p| p.ticket)
+            .collect();
         let mut closed = 0;
         let mut profit = 0.0;
         for t in tickets {
             self.queued_exits.remove(&t);
             self.desired.remove(&t);
-            if b.find_position(t).map(|p| p.frozen).unwrap_or(true) { continue; }
+            if b.find_position(t).map(|p| p.frozen).unwrap_or(true) {
+                continue;
+            }
             if let Ok(z) = b.close_position(t, intent.reason) {
                 closed += 1;
                 profit += z;
             }
         }
         self.book_command_profit_legacy(id, profit);
-        let positions: Vec<Ticket> = b.positions().iter()
-            .filter(|p| p.basket == Some(id)).map(|p| p.ticket).collect();
-        let pendings: Vec<Ticket> = b.pendings().iter()
-            .filter(|p| p.basket == Some(id)).map(|p| p.ticket).collect();
+        let positions: Vec<Ticket> = b
+            .positions()
+            .iter()
+            .filter(|p| p.basket == Some(id))
+            .map(|p| p.ticket)
+            .collect();
+        let pendings: Vec<Ticket> = b
+            .pendings()
+            .iter()
+            .filter(|p| p.basket == Some(id))
+            .map(|p| p.ticket)
+            .collect();
         let left_pos = positions.len();
         let left_pending = pendings.len();
         if let Some(bk) = self.basket_mut(id) {
@@ -7084,26 +5723,20 @@ impl Engine {
     }
 
     fn retry_confirmed_exits<B: Broker>(&mut self, b: &mut B, ts: Ts) {
-        if !self.cfg.confirmed_exit_retry { return; }
-        let ids: Vec<u32> = self.baskets.iter().filter(|x| x.pending_exit.is_some())
-            .map(|x| x.id).collect();
-        for id in ids { self.attempt_confirmed_exit(b, id, ts, false); }
+        if !self.cfg.confirmed_exit_retry {
+            return;
+        }
+        let ids: Vec<u32> = self
+            .baskets
+            .iter()
+            .filter(|x| x.pending_exit.is_some())
+            .map(|x| x.id)
+            .collect();
+        for id in ids {
+            self.attempt_confirmed_exit(b, id, ts, false);
+        }
     }
 
-    /// INKASO NA KOMENDĘ „TAKE PARTIALS" (W31b).
-    ///
-    /// Osobna od [`Self::bank_on_tp`] z jednego powodu, ale zasadniczego:
-    /// tamta jest INDEKSOWANA ETAPEM (`official_pct[stage-1]`), a ta komenda
-    /// etapu nie niesie. Transza idzie z własnego pola `partials_pct` i NIE
-    /// rusza `tp_stage` ani `plan_wykonany_do` — patrz uzasadnienie przy polu
-    /// w `settings.rs`.
-    ///
-    /// Wszystko poza samą liczbą jest współdzielone z `bank_on_tp`, żeby
-    /// „część zysku" znaczyła w obu miejscach to samo: kolejność `bank_from`,
-    /// próg `partial_close`/`partial_min_lot` (poniżej niego 0,01 lota jest
-    /// niepodzielny, więc zamykamy CAŁE pozycje), ochrona ostatniej pozycji
-    /// przez `bank_close_last` — bo „take partials" znaczy „odbierz część
-    /// i TRZYMAJ resztę".
     fn inkasuj_partials<B: Broker>(&mut self, b: &mut B, id: u32, ts: Ts) {
         let pct = self.cfg.partials_pct;
         if pct <= 0.0 {
@@ -7197,7 +5830,9 @@ impl Engine {
     }
 
     fn retarget<B: Broker>(&mut self, b: &mut B, id: u32, _ts: Ts) {
-        if self.basket_exit_pending(id) { return; }
+        if self.basket_exit_pending(id) {
+            return;
+        }
         let (side, tps, stage, tp_open) = match self.basket(id) {
             Some(bk) => (bk.side, bk.tps.clone(), bk.tp_stage, bk.tp_open),
             None => return,
@@ -7242,9 +5877,10 @@ impl Engine {
         }
     }
 
-    /// RISK FREE — zachowanie zależy od `risk_free_mode`.
     fn handle_risk_free<B: Broker>(&mut self, b: &mut B, id: u32, level: Option<Px>, ts: Ts) {
-        if self.basket_exit_pending(id) { return; }
+        if self.basket_exit_pending(id) {
+            return;
+        }
         use RiskFreeMode::*;
         if self.cfg.risk_free_mode == Ignore {
             self.basket_note(id, ts, "RISK FREE zignorowany (konfiguracja)".into());
@@ -7283,11 +5919,9 @@ impl Engine {
         }
 
         let q = b.quote();
-        // poziom odniesienia: z komunikatu albo krawędź lepszych wejść
         let reference = level.unwrap_or_else(|| side.better_edge(lo, hi));
         let keep_n = self.cfg.risk_free_runners.max(1) as usize;
 
-        // kogo zostawiamy
         let mut order = live.clone();
         match self.cfg.risk_free_mode {
             CloseAllKeepNearest => order.sort_by(|a, c| {
@@ -7339,7 +5973,6 @@ impl Engine {
             }
         }
 
-        // runnery: SL na breakeven + cel wg konfiguracji
         let mut armed = 0usize;
         let be_targets: Vec<Ticket> = if self.cfg.risk_free_mode == MoveSlToBeOnly {
             live.clone()
@@ -7361,14 +5994,12 @@ impl Engine {
                     tps.get(st).copied().or_else(|| tps.last().copied())
                 }
             };
-            // Próg bieżącego zysku jest niezależny od miejsca ustawienia BE,
-            // dzięki czemu obie wielkości można konfigurować osobno.
             let prog_ok = self.cfg.risk_free_be_min_profit <= 0.0
                 || b.find_position(t)
                     .map(|p| p.profit_pts(&q) >= self.cfg.risk_free_be_min_profit)
                     .unwrap_or(false);
-            let loosens_stop = self.cfg.be_never_loosen
-                && cur_sl.map(|s| side.better(be, s)).unwrap_or(false);
+            let loosens_stop =
+                self.cfg.be_never_loosen && cur_sl.map(|s| side.better(be, s)).unwrap_or(false);
             if !loosens_stop && prog_ok && sl_is_valid(side, be, &q, b.stops_level()) {
                 if self.try_modify(b, t, Some(be), newtp, ts) {
                     armed += 1;
@@ -7382,17 +6013,10 @@ impl Engine {
             }
         }
 
-        // `CloseProfitableOnly` NIE zabezpiecza koszyka: przegrane pozycje
-        // nie dostały ani BE, ani celu (keepers puste), więc pełne ryzyko
-        // sygnału dalej żyje. `secured = true` kłamałoby dwa razy — OAE
-        // pomijałoby koszyk „bo zabezpieczony" (`oae_skip_after_riskfree`),
-        // a schodkowy SL brałby breakeven za podłogę, której nikt nie postawił.
         let zabezpieczony = self.cfg.risk_free_mode != CloseProfitableOnly;
         self.book_command_profit_legacy(id, realized);
         if let Some(bk) = self.basket_mut(id) {
             bk.state = BasketState::RiskFree;
-            // od tej chwili podłogą schodkowego SL jest breakeven, a nie SL
-            // sygnału — koszyk został zabezpieczony i nie wolno tego cofnąć
             if zabezpieczony {
                 bk.secured = true;
                 bk.secured_ts = ts;
@@ -7421,16 +6045,14 @@ impl Engine {
     }
 
     fn handle_out_at_entry<B: Broker>(&mut self, b: &mut B, id: u32, ts: Ts) {
-        if self.basket_exit_pending(id) { return; }
+        if self.basket_exit_pending(id) {
+            return;
+        }
         use OutAtEntryMode::*;
         if self.cfg.out_at_entry_mode == Ignore {
             self.basket_note(id, ts, "OUT AT ENTRY zignorowany (konfiguracja)".into());
             return;
         }
-        // „OUT AT ENTRY" po „RISK FREE" to sprawozdanie, nie polecenie —
-        // patrz `oae_skip_after_riskfree` w `settings.rs`. Koszyk zabezpieczony
-        // ma już stop na progu opłacalności; wykonanie tego komunikatu drugi
-        // raz wyrzuca po rynku to, co kanał zamknął z zyskiem.
         if self.cfg.oae_skip_after_riskfree && self.basket(id).map(|bk| bk.secured).unwrap_or(false)
         {
             self.basket_note(
@@ -7478,9 +6100,6 @@ impl Engine {
                 if sl_is_valid(side, be, &q, b.stops_level()) {
                     self.try_modify(b, t, Some(be), p.tp, ts);
                 } else {
-                    //  POZYCJA POD WODĄ: breakeven leży po drugiej stronie
-                    //  rynku, więc gałąź wyżej kończyła się NICZYM — i to
-                    //  właśnie w koszykach, które toną. Patrz `OaePodWoda`.
                     match self.cfg.oae_pod_woda {
                         OaePodWoda::NicNieRob => {}
                         OaePodWoda::Zamknij => {
@@ -7490,11 +6109,6 @@ impl Engine {
                             }
                         }
                         OaePodWoda::DociagnijStop => {
-                            //  Najciaśniejszy stop, jaki broker przyjmie —
-                            //  po WŁAŚCIWEJ stronie rynku. Kładziemy go tylko
-                            //  wtedy, gdy jest CIAŚNIEJSZY od dotychczasowego:
-                            //  rozluźnienie stopa na wiadomość „wychodzę"
-                            //  byłoby zwiększaniem ryzyka na sygnale odwrotu.
                             let stops = b.stops_level();
                             let kres = match side {
                                 Side::Buy => q.bid - stops,
@@ -7534,7 +6148,9 @@ impl Engine {
     }
 
     fn handle_sl_hit<B: Broker>(&mut self, b: &mut B, id: u32, ts: Ts) {
-        if self.basket_exit_pending(id) { return; }
+        if self.basket_exit_pending(id) {
+            return;
+        }
         use SlHitMode::*;
         match self.cfg.sl_hit_mode {
             Ignore => {}
@@ -7589,17 +6205,14 @@ impl Engine {
     }
 
     fn move_basket_to_be<B: Broker>(&mut self, b: &mut B, id: u32, ts: Ts) {
-        if self.basket_exit_pending(id) { return; }
+        if self.basket_exit_pending(id) {
+            return;
+        }
         let q = b.quote();
         let side = match self.basket(id) {
             Some(bk) => bk.side,
             None => return,
         };
-        // W31a: ZNACZNIK KOMENDY. Zapisujemy go BEZWARUNKOWO — także przy
-        // wyłączonej osi i także wtedy, gdy koszyk nie ma teraz ani jednej
-        // pozycji do ruszenia (to jest właśnie ten przypadek, w którym cała
-        // szkoda powstaje: BE pada, gdy siatka jeszcze wisi). Zapis samego
-        // pola niczego nie zmienia, czytelnik jest jeden i stoi za osią.
         if let Some(bk) = self.basket_mut(id) {
             bk.be_ts = ts;
         }
@@ -7631,17 +6244,6 @@ impl Engine {
         }
     }
 
-    /// STOP W POŁOWIE DROGI WEJŚCIE → CENA (`sl_polowa_od_konca`).
-    ///
-    /// Liczone OSOBNO DLA KAŻDEJ POZYCJI, bo koszyk wchodził po kilkunastu
-    /// różnych cenach: „połowa drogi" mierzona od średniej dawałaby stop pod
-    /// wejściem tym pozycjom, które weszły najpłycej, czyli zamieniałaby
-    /// zabezpieczenie w gwarantowaną stratę na części siatki.
-    ///
-    /// Zapadka w dwóch krokach. Po pierwsze, pozycja musi być NA PLUSIE —
-    /// przy ujemnym ruchu „połowa drogi" leży po stronie straty i reguła
-    /// milczy. Po drugie, nowy stop musi być LEPSZY od obecnego; inaczej
-    /// późniejszy cel z niższą ceną cofałby ochronę wywalczoną wcześniej.
     fn sl_polowa_drogi<B: Broker>(&mut self, b: &mut B, id: u32, ts: Ts) {
         let ulamek = if self.cfg.sl_polowa_ulamek > 0.0 {
             self.cfg.sl_polowa_ulamek
@@ -7716,13 +6318,6 @@ impl Engine {
                 self.try_modify(b, t, Some(sl), tp, ts);
             }
         }
-        // ---- Z-5: NOWY STOP MA DOJŚĆ TAKŻE DO ZLECEŃ OCZEKUJĄCYCH ----
-        //
-        // Bez tego koszyk częściowo wypełniony (1 pozycja + 4 limity) trzyma
-        // limity ze STOPEM SPRZED komunikatu, a zamrożony plan `bk.levels`
-        // każe rearmowi i przeliczaniu zmienności odtwarzać je z tym samym
-        // starym stopem. Przepisujemy najpierw PLAN (żeby każde późniejsze
-        // rozstawienie brało świeży poziom), potem ŻYWE zlecenia.
         if self.cfg.sl_edit_reaches_pendings {
             if let Some(bk) = self.basket_mut(id) {
                 for gl in bk.levels.iter_mut() {
@@ -7761,7 +6356,6 @@ impl Engine {
             None => return,
         };
         let tryb = self.cfg.spp_sl_mode;
-        // Bufor odsuwa stop OD ceny, czyli w stronę wejścia: dla kupna w dół.
         let cel = poziom - side.sign() * self.cfg.spp_sl_pad;
         let tylko_runnery = matches!(
             tryb,
@@ -7786,10 +6380,6 @@ impl Engine {
             if frozen || (tylko_runnery && !runner) || (tylko_bankujace && runner) {
                 continue;
             }
-            // „korzystniejszy" = CIAŚNIEJSZY: dla kupna wyżej, dla sprzedaży
-            // niżej. `Side::better(a, b)` mówi „a jest lepszą CENĄ niż b",
-            // więc lepszy stop to ten, względem którego stary jest „lepszą
-            // ceną" — ta sama konwencja co w drabince SMART SL.
             if tylko_lepszy && !cur_sl.map(|s| side.better(s, cel)).unwrap_or(true) {
                 continue;
             }
@@ -7799,11 +6389,6 @@ impl Engine {
                 n += 1;
             }
         }
-        // Stop CAŁEGO koszyka przesuwamy tylko wtedy, gdy reguła objęła cały
-        // koszyk — inaczej `bk.sl` kłamałby o tym, gdzie stoją runnery.
-        // To nie jest kosmetyka: `bk.sl` czyta m.in. `reentry_pass`
-        // (`engine.rs:6177`), więc podmiana go przy trybie działającym na
-        // PODZBIORZE pozycji zmieniałaby zachowanie dokładek.
         if !tylko_runnery && !tylko_bankujace && n > 0 {
             if let Some(bk) = self.basket_mut(id) {
                 bk.sl = Some(cel);
@@ -7816,7 +6401,9 @@ impl Engine {
 
     #[track_caller]
     fn cancel_pendings_keep<B: Broker>(&mut self, b: &mut B, id: u32, n: usize) -> usize {
-        if self.basket_exit_pending(id) { return 0; }
+        if self.basket_exit_pending(id) {
+            return 0;
+        }
         if n == 0 {
             return self.cancel_pendings(b, id);
         }
@@ -7828,8 +6415,6 @@ impl Engine {
             return 0;
         };
         let strona = bk.side;
-        // „Płytkie" = najbliżej ceny w chwili decyzji: przy kupnie limit leży
-        // pod rynkiem, więc najwyższa cena zlecenia jest najpłytsza.
         let mut moje: Vec<(Ticket, Px)> = b
             .pendings()
             .iter()
@@ -7866,10 +6451,20 @@ impl Engine {
                 confirmed.push(*t);
             }
         }
-        let do_kasacji = if self.cfg.confirmed_exit_retry { confirmed } else { do_kasacji };
+        let do_kasacji = if self.cfg.confirmed_exit_retry {
+            confirmed
+        } else {
+            do_kasacji
+        };
         let remaining_levels: Vec<i32> = if self.cfg.confirmed_exit_retry {
-            b.pendings().iter().filter(|o| o.basket == Some(id)).map(|o| o.level).collect()
-        } else { Vec::new() };
+            b.pendings()
+                .iter()
+                .filter(|o| o.basket == Some(id))
+                .map(|o| o.level)
+                .collect()
+        } else {
+            Vec::new()
+        };
         if let Some(bk) = self.basket_mut(id) {
             bk.pendings.retain(|t| !do_kasacji.contains(t));
             for lv in poziomy {
@@ -7885,17 +6480,21 @@ impl Engine {
 
     #[track_caller]
     fn cancel_pendings<B: Broker>(&mut self, b: &mut B, id: u32) -> usize {
-        // A committed exit owns the retry cadence. Ordinary TP/TTL/session
-        // cleanup must not issue a second cancellation in the same tick.
-        if self.basket_exit_pending(id) { return 0; }
+        if self.basket_exit_pending(id) {
+            return 0;
+        }
         self.cancel_pendings_now(b, id)
     }
 
     #[track_caller]
     fn cancel_pendings_now<B: Broker>(&mut self, b: &mut B, id: u32) -> usize {
         if self.cfg.confirmed_exit_retry {
-            let orders: Vec<(Ticket, i32)> = b.pendings().iter()
-                .filter(|o| o.basket == Some(id) && !o.frozen).map(|o| (o.ticket, o.level)).collect();
+            let orders: Vec<(Ticket, i32)> = b
+                .pendings()
+                .iter()
+                .filter(|o| o.basket == Some(id) && !o.frozen)
+                .map(|o| (o.ticket, o.level))
+                .collect();
             let mut cancelled = 0;
             let mut levels = Vec::new();
             for (ticket, level) in orders {
@@ -7904,12 +6503,18 @@ impl Engine {
                     levels.push(level);
                 }
             }
-            let remaining: Vec<Ticket> = b.pendings().iter()
-                .filter(|o| o.basket == Some(id)).map(|o| o.ticket).collect();
+            let remaining: Vec<Ticket> = b
+                .pendings()
+                .iter()
+                .filter(|o| o.basket == Some(id))
+                .map(|o| o.ticket)
+                .collect();
             if let Some(bk) = self.basket_mut(id) {
                 bk.pendings = remaining;
                 for g in &mut bk.levels {
-                    if g.fill_ts == 0 && levels.contains(&g.level) { g.cancelled = true; }
+                    if g.fill_ts == 0 && levels.contains(&g.level) {
+                        g.cancelled = true;
+                    }
                 }
             }
             return cancelled;
@@ -7918,9 +6523,6 @@ impl Engine {
             .basket(id)
             .map(|x| x.pendings.clone())
             .unwrap_or_default();
-        // Które szczeble tracą zlecenie — do oznaczenia jako ANULOWANE.
-        // Bez tego „niewypełniony" znaczy dwie różne rzeczy naraz: zlecenie
-        // nadal czeka albo już nigdy nie wejdzie.
         let poziomy: Vec<i32> = b
             .pendings()
             .iter()
@@ -7954,23 +6556,24 @@ impl Engine {
         n
     }
 
-    /// Zamyka wszystko i **spisuje, co dokładnie zamknęło**.
-    ///
-    /// To jest odpowiedź na brak nr 5: `EMERGENCY_STOP` w `bot.py` był jedną
-    /// linią bez treści, więc po fakcie nie dawało się ustalić ani ile
-    /// pozycji poszło, ani po jakich cenach, ani ile to kosztowało.
     #[track_caller]
     pub fn close_everything<B: Broker>(&mut self, b: &mut B, ts: Ts, reason: CloseReason) {
         self.queued_exits.clear();
         if self.cfg.confirmed_exit_retry {
-            // Persistent ownership belongs to known baskets only. Never turn
-            // an emergency command into authority over foreign/manual tickets.
             let ids: Vec<u32> = self.baskets.iter().map(|x| x.id).collect();
-            for id in ids { self.request_confirmed_exit(b, id, ts, reason); }
-            let unowned = b.positions().iter().filter(|p|
-                !self.baskets.iter().any(|x| p.basket == Some(x.id))).count();
-            let unowned_pending = b.pendings().iter().filter(|p|
-                !self.baskets.iter().any(|x| p.basket == Some(x.id))).count();
+            for id in ids {
+                self.request_confirmed_exit(b, id, ts, reason);
+            }
+            let unowned = b
+                .positions()
+                .iter()
+                .filter(|p| !self.baskets.iter().any(|x| p.basket == Some(x.id)))
+                .count();
+            let unowned_pending = b
+                .pendings()
+                .iter()
+                .filter(|p| !self.baskets.iter().any(|x| p.basket == Some(x.id)))
+                .count();
             if unowned + unowned_pending > 0 {
                 self.log(ts, 2, format!("zamknięcie zbiorcze: pominięto {unowned} pozycji i {unowned_pending} zleceń bez własnego koszyka; wymagają ręcznej rekoncyliacji"));
             }
@@ -8060,38 +6663,13 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  TICK
-    // ============================================================
 
-    /// EA-CORE — PULS Z WŁASNEGO ZEGARA, niezależny od strumienia tików.
-    ///
-    /// Drugie (obok [`Engine::on_tick`]) i ostatnie wejście do warstwy EA.
-    /// Warstwa żywa woła to ze swojego `OnTimer`-a; backtest go nie woła
-    /// wcale, bo tam czas płynie wyłącznie tikami.
-    ///
-    /// # Po co osobne wejście, skoro `on_tick` już pulsuje
-    ///
-    /// Bo **cisza kwotowań jest stanem rynku, nie awarią**, a straż, która
-    /// budzi się wyłącznie z ticka, w tej ciszy śpi. Jedyny znany przypadek
-    /// tej klasy kosztował 12 h martwego `rev_exit` i rozjazd −80 % wobec
-    /// backtestu — a **backtest tej klasy błędów NIE WIDZI**, bo
-    /// `sim_clock_strict` zawsze karmi silnik tikiem. Test zamrożenia
-    /// strumienia (`tests/ea_core.rs`) prowadzi warstwę przez tę ścieżkę
-    /// BEZ ani jednego ticka.
-    ///
-    /// # Kontrakt zera
-    ///
-    /// Przy `ea_enabled = false` funkcja wychodzi PRZED odczytem czegokolwiek
-    /// i zwraca `false`. Wołanie jej w pętli nie kosztuje wtedy nic poza
-    /// sprawdzeniem jednego boola.
-    ///
-    /// Zwraca `true`, gdy puls faktycznie się odbył (zegar wybił).
     pub fn ea_zegar<B: Broker>(&mut self, b: &mut B, ts: Ts) -> bool {
         if !self.cfg.ea_enabled {
             return false;
         }
-        self.ea.set_continuation_entry_hold(self.continuation_entry_blocked());
+        self.ea
+            .set_continuation_entry_hold(self.continuation_entry_blocked());
         self.ea.puls(
             &self.cfg,
             &mut self.baskets,
@@ -8112,13 +6690,6 @@ impl Engine {
             self.sr_na_ticku(q);
         }
 
-        // --- DIAGNOSTYKA HAMULCA: ile czasu konto stoi bezczynnie ---
-        //
-        // Sam licznik zadziałań nic nie mówi: jedno zadziałanie o 9:00 przy
-        // blokadzie do północy kosztuje cały dzień handlu, a jedno o 15:55 —
-        // pięć minut. Przyrost tniemy do minuty, żeby weekend i luki w danych
-        // nie doliczały godzin, w których i tak nie było rynku. Zapis do mapy
-        // odrzutów raz na minutę zegara wstrzymania, nie na tick.
         if self.halt_prev_ts > 0 && self.halted.is_some() {
             self.halt_ms += (ts - self.halt_prev_ts).clamp(0, 60_000);
             let m = self.halt_ms / 60_000;
@@ -8174,33 +6745,34 @@ impl Engine {
             self.journal.track(&poz, q);
         }
 
-        // --- księgowanie zamkniętych transakcji ---
-        if let Some(reason)=self.cost_entry_blocked(b).map(str::to_owned) {
-            self.latch_cost_fault(b,ts,reason);
+        if let Some(reason) = self.cost_entry_blocked(b).map(str::to_owned) {
+            self.latch_cost_fault(b, ts, reason);
         }
         let closed = b.drain_closed();
         let closed = if self.cfg.closed_profit_net_costs {
-            let mut accepted=Vec::with_capacity(closed.len());
+            let mut accepted = Vec::with_capacity(closed.len());
             for trade in closed {
                 if !self.cfg.basket_realized_broker_only {
-                    // Invalid runtime mode must not mix command gross and net.
-                    // The dependency latch above keeps entries halted; retain
-                    // the receipt for explicit reconciliation, never discard it.
                     self.cost_quarantine.push(trade);
                     continue;
                 }
                 match trade.canonical_net() {
-                    Ok(_)=>accepted.push(trade),
-                    Err(error)=>{
-                        self.latch_cost_fault(b,ts,format!("invalid closed receipt #{}: {error}",trade.ticket));
+                    Ok(_) => accepted.push(trade),
+                    Err(error) => {
+                        self.latch_cost_fault(
+                            b,
+                            ts,
+                            format!("invalid closed receipt #{}: {error}", trade.ticket),
+                        );
                         self.cost_quarantine.push(trade);
                     }
                 }
             }
             accepted
-        } else {closed};
+        } else {
+            closed
+        };
 
-        // --- DZIENNIK: komplet danych o każdym zamknięciu ---
         if self.journal.wants(EventLevel::Info) && !closed.is_empty() {
             let snap = self.jsnap(b);
             let msg_of: HashMap<u32, i64> = self.baskets.iter().map(|x| (x.id, x.msg_id)).collect();
@@ -8213,7 +6785,11 @@ impl Engine {
                     self.journal.take_excursion(c.ticket, c.volume)
                 };
                 let Ok(detail) = CloseDetail::new(c, exc) else {
-                    self.log(ts,2,format!("COST JOURNAL HOLD: invalid receipt #{}",c.ticket));
+                    self.log(
+                        ts,
+                        2,
+                        format!("COST JOURNAL HOLD: invalid receipt #{}", c.ticket),
+                    );
                     continue;
                 };
                 let poziom = if detail.net >= 0.0 {
@@ -8256,7 +6832,6 @@ impl Engine {
             }
             self.stats.realized_today += c.profit;
             self.closed_today.push(c.profit);
-            // ślad dla obserwatora: seria wyników i przerwa między zamknięciami
             self.obs.na_zamknieciu(c.close_ts, c.profit);
             if let Some(bid) = c.basket {
                 if let Some(bk) = self.basket_mut(bid) {
@@ -8265,23 +6840,12 @@ impl Engine {
                 }
             }
         }
-        // --- rekoncyliacja koszyków ze stanem brokera ---
-        //
-        // Zrealizowane zlecenie oczekujące znika z listy zleceń i pojawia się
-        // jako pozycja. Bez przepisania go do `tickets` koszyk NIE WIDZI
-        // własnych pozycji — a na tej liście pracuje inkaso na celu, SL
-        // koszyka, RISK FREE, breakeven i schodkowy stop. Cała rodzina
-        // konfiguracji „tylko limity" (czyli wszystkie zwycięskie presety)
-        // zostawałaby wtedy zupełnie bez zarządzania.
         for p in b.positions() {
             let Some(bid) = p.basket else { continue };
             if let Some(bk) = self.baskets.iter_mut().find(|x| x.id == bid) {
                 if !bk.tickets.contains(&p.ticket) {
                     bk.tickets.push(p.ticket);
                 }
-                // ODCZYT wypełnienia warstwy z realizacji zlecenia — jedyne
-                // źródło prawdy. Rekonstrukcja z biegu ekstremów myli się
-                // dokładnie tam, gdzie rynek przeskakuje poziom.
                 if let Some(g) = bk.levels.iter_mut().find(|g| g.level == p.level) {
                     if g.fill_ts == 0 {
                         g.fill_ts = p.open_ts;
@@ -8296,21 +6860,6 @@ impl Engine {
                 }
             }
         }
-        // ---- W31a: PÓŹNY FILL DZIEDZICZY STOP Z KOMENDY „SET BE" ----
-        //
-        // Stoi TU, zaraz po przepisaniu zrealizowanych zleceń do koszyków,
-        // bo to jest jedyna chwila, w której wiadomo, że pozycja JEST NOWA:
-        // pętla wyżej dopisała ją do `bk.tickets`, więc następny tick jej już
-        // nie odróżni od tej, która żyła w chwili komendy.
-        //
-        // Stop liczymy od CENY WEJŚCIA TEJ pozycji (nie od średniej koszyka
-        // i nie od poziomu zlecenia): przy luce broker realizuje po cenie
-        // rynkowej, a „breakeven" znaczy „na zero na TEJ transakcji".
-        // Wzór jest dokładnie ten sam co w `move_basket_to_be`.
-        //
-        // Zapadka: ruszamy stop wyłącznie w stronę zysku. Pozycja, która z
-        // jakiegoś powodu ma już stop ciaśniejszy od BE (np. re-entry po
-        // RISK FREE), nie zostaje poluzowana.
         if self.cfg.be_covers_late_fills {
             let mut do_krycia: Vec<(Ticket, Px, Option<Px>)> = Vec::new();
             for p in b.positions() {
@@ -8322,12 +6871,12 @@ impl Engine {
                     continue;
                 };
                 if (self.cfg.confirmed_exit_retry && bk.pending_exit.is_some())
-                    || bk.be_ts == 0 || p.open_ts < bk.be_ts {
+                    || bk.be_ts == 0
+                    || p.open_ts < bk.be_ts
+                {
                     continue;
                 }
                 let be = p.open_price + bk.side.sign() * self.cfg.be_offset;
-                // „ciaśniejszy" w konwencji `Side::better`: stary stop jest
-                // LEPSZĄ CENĄ niż nowy ⇒ nowy jest bliżej wejścia.
                 let warto = p.sl.map(|cur| bk.side.better(cur, be)).unwrap_or(true);
                 if warto && sl_is_valid(bk.side, be, q, b.stops_level()) {
                     do_krycia.push((p.ticket, be, p.tp));
@@ -8349,7 +6898,6 @@ impl Engine {
         }
 
         {
-            // zlecenia i pozycje, których broker już nie ma, znikają z koszyka
             let live_pend: std::collections::HashSet<Ticket> =
                 b.pendings().iter().map(|o| o.ticket).collect();
             let live_pos: std::collections::HashSet<Ticket> =
@@ -8360,14 +6908,8 @@ impl Engine {
             }
         }
 
-        // Run before guards/TP/entry passes, also while trading is halted.
         self.retry_confirmed_exits(b, ts);
 
-        // ---- TRZECIE ŹRÓDŁO: realizacja zlecenia u brokera ----
-        // Broker zamknął pozycję na JEJ take-proficie. To najtwardszy dowód
-        // trafienia celu — nie zależy ani od naszego odczytu ceny, ani od tego,
-        // czy sygnalista zdążył napisać. Przesuwamy etap koszyka do poziomu,
-        // który faktycznie został zrealizowany.
         if self.cfg.tp_stage_from_broker_fill {
             let hits: Vec<(u32, Px)> = closed
                 .iter()
@@ -8379,7 +6921,6 @@ impl Engine {
                     Some(bk) => (bk.side, bk.tps.clone(), bk.tp_stage),
                     None => continue,
                 };
-                // który szczebel drabinki odpowiada zrealizowanej cenie?
                 let reached = tps
                     .iter()
                     .enumerate()
@@ -8391,14 +6932,6 @@ impl Engine {
                     .max()
                     .unwrap_or(0);
                 if reached > stage {
-                    // JEDYNY WYJĄTEK OD BRAMKI „bez pozycji nic się nie rusza".
-                    //
-                    // Broker właśnie zamknął NASZĄ pozycję na JEJ take-proficie.
-                    // To jest najtwardszy możliwy dowód wypełnienia — mocniejszy
-                    // od ceny i od komunikatu z kanału. Gdyby to była ostatnia
-                    // pozycja koszyka, `tickets` jest już puste (rekoncyliacja
-                    // wyżej), więc zwykła bramka odrzuciłaby zaliczenie celu,
-                    // za który realnie dostaliśmy pieniądze.
                     self.handle_tp_hit_z_pozycja(b, bid, Some(reached), ts, "realizacja brokera");
                 }
             }
@@ -8417,21 +6950,11 @@ impl Engine {
             }
         }
 
-        // --- statystyki ---
         let acc = b.account();
         self.stats.balance = acc.balance;
-        // KREDYT jedzie razem z saldem, nie osobnym odczytem. Gdyby bonus
-        // został zdjęty w trakcie pracy, podstawa lota podniesie się przy tym
-        // samym ticku, przy którym zmieni się saldo — bez okna, w którym bot
-        // odejmuje bonus, którego już nie ma.
         self.stats.credit = acc.credit;
         self.stats.equity = acc.equity;
 
-        // ROZJAZD KREDYTU: kwota wpisana ręcznie różni się od tego, co mówi
-        // terminal. Nie wybieramy po cichu — piszemy do dziennika (raz na
-        // dobę handlową, przy rolce), a panel pokazuje to jako ostrzeżenie.
-        // Najczęstsza przyczyna: bonus zdjęty przez brokera przy wypłacie,
-        // a w ustawieniach została zapomniana stara kwota.
         if self.cfg.odlicz_kredyt
             && self.cfg.kredyt_reczny > 0.0
             && (self.cfg.kredyt_reczny - acc.credit).abs() > 0.01
@@ -8453,7 +6976,8 @@ impl Engine {
                              Jeśli broker zdjął bonus, wyzeruj pole ręczne — zero znaczy AUTOMAT.",
                         self.cfg.kredyt_reczny,
                         acc.credit,
-                        self.cfg.podstawa_lota_z_konta(acc.balance, acc.equity, acc.credit)
+                        self.cfg
+                            .podstawa_lota_z_konta(acc.balance, acc.equity, acc.credit)
                     ))
                     .put_f("kredyt_reczny", self.cfg.kredyt_reczny)
                     .put_f("kredyt_terminal", acc.credit)
@@ -8465,9 +6989,6 @@ impl Engine {
 
         let day = day_of(ts, self.cfg.session_offset());
         if day != self.stats.day {
-            // Rotacja pliku dziennika idzie DOKŁADNIE po tej granicy, więc
-            // musi być w strumieniu widoczna — inaczej nie da się sprawdzić,
-            // że dzień w nazwie pliku zgadza się z dobą silnika.
             if self.journal.wants(EventLevel::Info) && self.stats.day != i64::MIN {
                 self.journal.push(
                     Ev::new(ts, EventLevel::Info, EventCategory::Account, EventKind::DayRollover)
@@ -8489,12 +7010,8 @@ impl Engine {
             self.stats.day_max_dd = 0.0;
             self.stats.realized_today = 0.0;
             self.closed_today.clear();
-            // nowa doba zdejmuje hamulec SL-HIT i zeruje licznik stopów kanału
             self.slhit_dnia = 0;
             self.slhit_pauza_do = i64::MIN;
-            // Nowa doba zdejmuje blokadę obsunięcia — poza trybem `Lifetime`,
-            // gdzie z założenia czeka na ręczne wznowienie. Zdejmujemy tylko
-            // blokadę TEGO rodzaju: `halted` ustawia też np. podłoga equity.
             if !matches!(self.cfg.dd_guard_scope, DdGuardScope::Lifetime) {
                 if self
                     .halted
@@ -8523,7 +7040,6 @@ impl Engine {
             self.stats.day_max_dd = ddd;
         }
 
-        // historia ceny do filtra reżimu — jeden punkt na godzinę
         if self
             .price_hist
             .last()
@@ -8536,12 +7052,6 @@ impl Engine {
             }
         }
 
-        // Bufor krótkiego zasięgu: reżim zmienności i reversal-exit mierzą
-        // MINUTY. Krok 5 s daje 720 próbek na godzinę — dość, żeby zakres H−L
-        // był wiarygodny, i na tyle mało, żeby bufor był stały pod względem
-        // pamięci. Okno tniemy po CZASIE, nigdy po długości wektora: to
-        // właśnie liczenie po długości zamroziło tę regułę w poprzednim bocie
-        // na dwanaście godzin.
         if self
             .vol_hist
             .last()
@@ -8562,37 +7072,15 @@ impl Engine {
             }
         }
 
-        // ROZMIAR STEROWANY ZMIENNOŚCIĄ — po `vol_hist`, bo z niego czyta,
-        // i PRZED decyzjami, żeby nowy koszyk liczył lot z mnożnika opartego
-        // na tym samym ticku, na którym powstaje. Przy `Off` funkcja wychodzi
-        // pierwszą linijką.
         self.aktualizuj_mnoznik_zmiennosci(q);
 
-        // --- obserwacje (cechy) ---
-        // PRZED decyzjami, żeby model widział ten sam stan, na którym silnik
-        // za chwilę decyduje. Koszt: aktualizacja świecy minutowej O(1) plus
-        // pętla po żywych koszykach; drogie agregaty liczą się raz na minutę.
         self.obs.na_ticku(q, &self.baskets, b.positions());
 
-        // --- szczyt łącznego wyniku każdego koszyka ---
-        // PRZED strażnikami i regułami: decyzje koszykowe mają widzieć
-        // aktualny szczyt, a nie ten sprzed ticka.
         self.update_basket_peaks(b, q);
 
-        // --- EA-CORE: puls warstwy EA ze źródła TICK (patrz `crate::ea`) ---
-        //
-        // Stoi TU, czyli PO rekoncyliacji koszyków ze stanem brokera (żeby
-        // maszyna stanu koszyka widziała prawdziwe `tickets`/`pendings`)
-        // i PRZED strażnikami (bo dozór SL z N15 ma iść przed czymkolwiek,
-        // co zaczyna rozbierać pozycje).
-        //
-        // ⚠ KONTRAKT ZERA, PUNKT (a): przy `ea_enabled = false` nie wchodzimy
-        // tu w ogóle. To nie jest mikrooptymalizacja — `EaRdzen::puls` czyta
-        // rachunek (`b.account()`), a warunkiem parytetu jest, żeby wyłączona
-        // warstwa NIE ODCZYTAŁA konta ani razu więcej niż dziś. Ten sam
-        // wzorzec co `margines_pozwala`.
         if self.cfg.ea_enabled {
-            self.ea.set_continuation_entry_hold(self.continuation_entry_blocked());
+            self.ea
+                .set_continuation_entry_hold(self.continuation_entry_blocked());
             self.ea.puls(
                 &self.cfg,
                 &mut self.baskets,
@@ -8602,33 +7090,19 @@ impl Engine {
             );
         }
 
-        // --- strażnicy kapitału ---
         self.check_guards(b, q);
 
-        // --- ponawianie odrzuconych SL/TP ---
         self.retry_stops(b, ts);
 
-        // --- uwolnienie koszyka od ryzyka (RISK FREE jako reguła) ---
-        //
-        // PRZED zarządzaniem pozycjami: decyzja dotyczy CAŁEGO koszyka, więc
-        // musi ją podjąć, zanim reguły per-pozycja zaczną go rozbierać.
-        //
-        // `ai_enabled` SAMO w sobie nie wyłącza już zarządzania — od tego jest
-        // `ai_replaces_management`. Wyłączanie wszystkich reguł jest zamierzone
-        // (model ma zastąpić całe zarządzanie), ale nazwa musiała to mówić:
-        // w panelu „ai_enabled" wyglądało na „dodaj AI", a znaczyło „zdejmij
-        // trailing, stagnację, żniwo, BE-lock i RISK FREE".
         let reguly_wlaczone = !(self.cfg.ai_enabled && self.cfg.ai_replaces_management);
         if reguly_wlaczone {
             self.riskfree_pass(b, q);
         }
 
-        // --- zarządzanie pozycjami ---
         if reguly_wlaczone {
             self.manage_positions(b, q);
         }
 
-        // --- wykrywanie celów z ceny ---
         let price_source_enabled = matches!(
             self.cfg.tp_source,
             TpSource::PriceOnly
@@ -8636,30 +7110,22 @@ impl Engine {
                 | TpSource::SignalConfirmedByPrice
                 | TpSource::PriceFirstSignalWindow
         );
-        // Oś autonomicznego soft-TP nie potrzebuje wiadomości Telegram ani
-        // cenowego `tp_source`: jej jedynym wejściem jest bieżący Bid/Ask.
-        // `max(0)` sprawia, że błędna wartość ujemna zachowuje się jak
-        // wyłączona, a dokładne zero zachowuje dawną ścieżkę co do bitu.
         let tp_front_run = self.cfg.tp_price_front_run_usd.max(0.0);
         if price_source_enabled || tp_front_run > 0.0 {
             let slots = self.price_tp_slots();
             for (slot, id) in slots {
-                let bk = self.baskets.get(slot).filter(|bk| bk.id == id)
+                let bk = self
+                    .baskets
+                    .get(slot)
+                    .filter(|bk| bk.id == id)
                     .or_else(|| self.basket(id));
                 let (side, next_tp, stage, ma_poz, armed, lo, hi, dotknieta) = match bk {
                     Some(bk) => {
-                        // KTÓRY cel sprawdzamy. Koszyk z pozycją mierzy się do
-                        // celu następnego po WŁASNYM etapie; koszyk bez pozycji
-                        // — do następnego po tym, co rynek już przeszedł bez
-                        // nas. Bez rozdzielenia tych dwóch liczników reguła
-                        // `pending_lifetime = UntilTp2/3` nigdy by nie dojrzała,
-                        // bo `tp_stage` stoi teraz w miejscu (i słusznie).
                         let stage = if bk.ma_pozycje() {
                             bk.tp_stage
                         } else {
                             bk.etap_obserwowany()
                         };
-                        // Tylko następny poziom; bez klonowania całego Vec TP.
                         (
                             bk.side,
                             bk.tps.get(stage).copied(),
@@ -8673,10 +7139,6 @@ impl Engine {
                     }
                     None => continue,
                 };
-                // POCZĄTEK DROGI. Rynek dotknął strefy, czyli był tam, gdzie
-                // stoją nasze limity. Bez tego „przeszedł drogę strefa→cel"
-                // sprawdzało wyłącznie koniec drogi i kasowało siatki sygnałów
-                // z podciągnięcia w sekundzie ich wystawienia.
                 if !dotknieta {
                     let w_strefie = match side {
                         Side::Buy => q.ask <= hi + 1e-9,
@@ -8689,10 +7151,6 @@ impl Engine {
                     }
                 }
                 if let Some(next) = next_tp {
-                    // Front-run dotyczy tylko REALNEJ pozycji. Sama siatka
-                    // oczekująca nadal wygasa wyłącznie na pełnym dotknięciu
-                    // i tylko wtedy, gdy `tp_source` włącza cenę. Inaczej
-                    // ustawienie tej osi po cichu zmieniałoby regułę wejścia.
                     if !ma_poz && !price_source_enabled {
                         continue;
                     }
@@ -8702,9 +7160,6 @@ impl Engine {
                         Side::Sell => q.ask <= next + offset,
                     };
                     if !reached {
-                        // Cena stoi po WEJŚCIOWEJ stronie celu — od tej chwili
-                        // przejście przez cel naprawdę znaczy „rynek przeszedł
-                        // drogę strefa→cel", bo jest skąd ją zacząć.
                         if !armed {
                             if let Some(bk) = self.basket_mut(id) {
                                 bk.drop_armed = true;
@@ -8712,10 +7167,6 @@ impl Engine {
                         }
                         continue;
                     }
-                    // KONIEC DROGI bez POCZĄTKU to nie jest „cel osiągnięty
-                    // bez nas". Sygnał LIMIT z podciągnięcia ma rynek powyżej
-                    // strefy z definicji, więc sam warunek `bid ≥ cel` bywa
-                    // spełniony w sekundzie wystawienia siatki.
                     if self.cfg.pending_drop_require_zone_touch
                         && !ma_poz
                         && !self.basket(id).map(|x| x.zone_touched).unwrap_or(false)
@@ -8738,19 +7189,19 @@ impl Engine {
             }
         }
 
-        // --- TTL pendingów ---
         if self.cfg.pending_ttl_h > 0.0 {
             let max_age = (self.cfg.pending_ttl_h * 3_600_000.0) as i64;
-            // Wiek liczymy od powstania KOSZYKA, nie od wystawienia zlecenia:
-            // reguła brzmi „stary setup wypełnia się dopiero w krachu", a
-            // re-arm siatki nie odmładza setupu.
             let ages: HashMap<u32, Ts> =
                 self.baskets.iter().map(|x| (x.id, x.created_ts)).collect();
             let from_basket = self.cfg.pending_ttl_from_basket;
             let expired: Vec<Ticket> = b
                 .pendings()
                 .iter()
-                .filter(|o| !o.basket.map(|id| self.basket_exit_pending(id)).unwrap_or(false))
+                .filter(|o| {
+                    !o.basket
+                        .map(|id| self.basket_exit_pending(id))
+                        .unwrap_or(false)
+                })
                 .filter(|o| {
                     let born = if from_basket {
                         o.basket
@@ -8763,12 +7214,6 @@ impl Engine {
                 })
                 .map(|o| o.ticket)
                 .collect();
-            // Z-7: TTL musi ZNAKOWAĆ poziom, nie tylko kasować zlecenie.
-            // Bez znacznika `resize_pendings` odtwarzał szczebel ze świeżym
-            // `placed_ts` — czyli TTL kasował, a przeliczanie zmienności
-            // wskrzeszało, i „skasowany" poziom wisiał w nieskończoność,
-            // wypełniając się dokładnie w krachu, przed którym TTL chronił.
-            // Znacznik jest czytany tylko przy `sync_only_live_levels`.
             let poziomy: Vec<(Option<u32>, i32)> = expired
                 .iter()
                 .filter_map(|t| b.pendings().iter().find(|o| o.ticket == *t))
@@ -8792,9 +7237,6 @@ impl Engine {
             }
         }
 
-        // Pamięć „ten koszyk już handlował". Bez niej wygaszanie starych
-        // sygnałów potraktowałoby koszyk, którego pozycje właśnie się zamknęły,
-        // jak setup, który nigdy nie ruszył — i skasowałoby jego resztę.
         let with_pos: Vec<u32> = b.positions().iter().filter_map(|p| p.basket).collect();
         for bk in self.baskets.iter_mut() {
             if !bk.tickets.is_empty() || with_pos.contains(&bk.id) {
@@ -8802,8 +7244,6 @@ impl Engine {
             }
         }
 
-        // Pozycje powstałe z realizacji limitu nie mają jeszcze wpisanego
-        // poziomu, który ma egzekwować silnik.
         if self.cfg.virtual_sl_all {
             let sl_of: HashMap<u32, Option<Px>> =
                 self.baskets.iter().map(|x| (x.id, x.sl)).collect();
@@ -8816,10 +7256,8 @@ impl Engine {
             }
         }
 
-        // --- wygaszanie sygnałów, które nigdy nie ruszyły ---
         self.expire_stale_baskets(b, ts);
 
-        // --- twardy czas życia koszyka ---
         self.dokoncz_odroczone_kasowanie(b, ts);
         self.expire_old_baskets(b, ts);
         self.reject_fast_filled_baskets(b, ts);
@@ -8827,35 +7265,21 @@ impl Engine {
         self.zone_exit_adverse_sweep(b, q);
         self.fast_addon_sweep(b, q);
 
-        // --- przeliczenie rozmiaru limitów po zmianie reżimu zmienności ---
         self.resize_pendings(b, ts);
         self.relot_pendings(b, ts);
 
-        // --- polisa na ścianę marginesu: zdejmij ekspozycję, która już leży ---
-        //
-        // PO relocie, nie przed: relot dopiero co mógł podnieść wolumen
-        // leżących szczebli (compounding), więc mierzenie ekspozycji przed nim
-        // czytałoby stan, którego już nie ma. PRZED `rearm/ladder/reentry`,
-        // bo tamte trzy DOKŁADAJĄ ekspozycję — redukcja wykonana po nich
-        // kasowałaby w tym samym ticku to, co przed chwilą powstało.
         self.redukuj_ekspozycje(b, ts);
 
         self.sesja_limity_pass(b, q);
         self.rezim_limity_pass(b, q);
         self.rearm_pass(b, q);
 
-        // --- kolejne szczeble wejścia rynkowego (`market_entry_mode = Laddered`) ---
-        // Przed re-entry, bo drabina domyka WEJŚCIE, którego re-entry jest
-        // dopiero powtórzeniem po trafionym celu.
         self.market_ladder_pass(b, q);
 
-        // --- powtórne wejścia po trafionym celu ---
         self.reentry_pass(b, q);
 
-        // --- reversal-exit ---
         self.rev_exit_sweep(b, q);
 
-        // --- sprzątanie koszyków ---
         let mut domkniete: Vec<u32> = Vec::new();
         for bk in self.baskets.iter_mut() {
             let czeka_na_rearm = self.cfg.rearm_grid_on_return
@@ -8872,15 +7296,16 @@ impl Engine {
                 domkniete.push(bk.id);
             }
         }
-        // Ślad koszyka żyje tylko tak długo, jak koszyk — inaczej mapa śladów
-        // rosłaby przez cały przebieg i zużywałaby pamięć bez pożytku.
         for id in domkniete {
             self.obs.zapomnij(id);
         }
         if self.baskets.len() > 500 {
             let cutoff = ts - 7 * 86_400_000;
-            self.baskets.retain(|x| x.alive() || x.created_ts > cutoff
-                || (self.cfg.confirmed_exit_retry && x.pending_exit.is_some()));
+            self.baskets.retain(|x| {
+                x.alive()
+                    || x.created_ts > cutoff
+                    || (self.cfg.confirmed_exit_retry && x.pending_exit.is_some())
+            });
         }
     }
 
@@ -8891,9 +7316,6 @@ impl Engine {
         let lot = self.lot_size(self.podstawa_lota());
         let scale = self.cfg.usd_scale(lot);
         let eq = self.stats.equity;
-        // Baza obsunięcia zależy od zasięgu blokady: przy trybie dziennym
-        // mierzymy od szczytu dnia, inaczej limit 40 % wyłączałby bota
-        // dożywotnio po jednym złym tygodniu.
         let base = match self.cfg.dd_guard_scope {
             DdGuardScope::Daily => self.stats.day_peak_equity,
             DdGuardScope::Lifetime | DdGuardScope::LifetimePeakDailyReset => self.stats.peak_equity,
@@ -8901,15 +7323,6 @@ impl Engine {
         let dd = base - eq;
         let dd_pct = dd / base.max(1.0) * 100.0;
 
-        // ---------- PUŁAPY ŁAŃCUCHA: OBSUNIĘCIE CAŁEGO RACHUNKU ----------
-        //
-        // `max_dd_pct` presetu mierzy obsunięcie TEGO silnika. Przy dwóch
-        // formatach żaden z nich nie widzi, że rachunek jako całość jest już
-        // pod wodą — a rachunek jest jeden i to jego broker zamyka. Dlatego
-        // pułap czyta equity WPROST OD BROKERA, nie ze statystyk silnika.
-        //
-        // Przy pojedynczym silniku wszystkie trzy pola są zerowe i ta sekcja
-        // nie robi nic — stąd parytet.
         if self.pulapy.podloga_equity_usd > 0.0
             || self.pulapy.max_dd_pct > 0.0
             || self.pulapy.max_dd_usd > 0.0
@@ -8939,9 +7352,6 @@ impl Engine {
                 None
             };
             if let Some(r) = powod {
-                // Zamykamy WŁASNE pozycje — widok brokera pilnuje, żeby to
-                // nie były cudze. Pozostałe silniki dostaną ten sam werdykt
-                // przy swoim obrocie pętli, bo czytają to samo equity konta.
                 self.close_everything(b, q.ts, CloseReason::MaxDd);
                 *self.odrzuty.entry("HamulecStop".to_string()).or_insert(0) += 1;
                 self.halted = Some(r.clone());
@@ -9047,10 +7457,6 @@ impl Engine {
             }
         }
         if self.cfg.day_trail_stop_pct > 0.0 && self.bramka_dnia_czynna() {
-            // Stop dnia liczony OD SZCZYTU equity dnia, nie od salda otwarcia:
-            // chroni zysk, który naprawdę był na rachunku. Uzbrojenie po
-            // `day_trail_arm_pct` istnieje po to, żeby reguła nie ścinała dnia
-            // przy pierwszym normalnym obsunięciu, zanim cokolwiek zarobi.
             let szczyt = self.stats.day_peak_equity.max(1.0);
             let zysk_szczytu = self.stats.day_peak_equity - self.stats.day_start_equity;
             let uzbrojony = self.cfg.day_trail_arm_pct <= 0.0
@@ -9059,11 +7465,6 @@ impl Engine {
             let oddane = self.stats.day_peak_equity - eq;
             let prog = szczyt * self.cfg.day_trail_stop_pct / 100.0;
             if uzbrojony && oddane >= prog {
-                // Z-2: dobę zamykamy NIEZALEŻNIE od tego, czy jest co zamykać.
-                // Warunek „oddane ≥ próg" bywa prawdziwy przy pustym rachunku
-                // (szczyt z otwartych pozycji, potem strata i zamknięcie) —
-                // i to jest właśnie moment, w którym stara wersja wpuszczała
-                // kolejny sygnał zamiast skończyć dzień.
                 self.zatrzymaj_dobe(q.ts);
             }
             if uzbrojony && oddane >= prog && !b.positions().is_empty() {
@@ -9088,9 +7489,6 @@ impl Engine {
         }
         let hour = hour_of(q.ts, self.cfg.session_offset());
         if self.cfg.eod_flat_hour > 0.0 && hour == self.cfg.eod_flat_hour as u32 {
-            // Z-2: godzina EOD kończy dzień, a nie tylko opróżnia rachunek.
-            // Bez tego wejścia wracały w tej samej godzinie — o ile sesja ją
-            // obejmowała — i strażnik ścinał je natychmiast po otwarciu.
             self.zatrzymaj_dobe(q.ts);
             if !b.positions().is_empty() {
                 self.close_everything(b, q.ts, CloseReason::EodFlat);
@@ -9100,9 +7498,6 @@ impl Engine {
         if self.cfg.flat_weekend {
             let wd = weekday_of(q.ts, self.cfg.session_offset());
             if wd == 4 && hour >= self.cfg.flat_weekend_hour as u32 {
-                // Z-2: piątkowa blokada obowiązuje do końca doby. Sobota
-                // i niedziela nie mają ticków, więc indeks doby wystarcza —
-                // w poniedziałek blokada jest już zdjęta z definicji.
                 self.zatrzymaj_dobe(q.ts);
                 if !b.positions().is_empty() {
                     self.close_everything(b, q.ts, CloseReason::EodFlat);
@@ -9112,12 +7507,6 @@ impl Engine {
         }
     }
 
-    /// Z-2: zamknij dobę dla WEJŚĆ (idempotentnie, z jednym wpisem w dzienniku).
-    ///
-    /// Wołane przez strażnika w każdym miejscu, które kończy dzień handlowy:
-    /// stop dnia od szczytu, godzina EOD i piątkowe wypłaszczenie. Blokada
-    /// zdejmuje się sama na granicy doby (`day_of`), więc nie ma tu żadnego
-    /// odpowiednika „wznów" — dzień po prostu się kończy.
     fn zatrzymaj_dobe(&mut self, ts: Ts) {
         let d = day_of(ts, self.cfg.session_offset());
         if self.day_stop == d {
@@ -9132,23 +7521,15 @@ impl Engine {
     }
 
 
-    /// Zamknięcie „uznaniowe": od razu po rynku albo dopiero po dojściu ceny
-    /// na drugą stronę spreadu.
-    ///
-    /// Wyjście rynkowe z pozycji BUY realizuje się po BID. Zlecenie SELL LIMIT
-    /// leżące na ASK wypełniłoby się dokładnie wtedy, gdy BID dojdzie do tego
-    /// poziomu — więc czekamy na ten warunek i wtedy zamykamy po rynku. Cena
-    /// wyjścia jest wówczas NIE GORSZA niż cena hipotetycznego limitu, a most
-    /// i symulator nadal widzą tylko `close_position`. Żaden z nich nie musi
-    /// umieć niczego nowego, więc nie da się tu wyprodukować rozjazdu.
-    ///
-    /// Reguła obowiązuje WYŁĄCZNIE wyjścia bez pośpiechu (żniwo, stagnacja,
-    /// cel koszyka). Stop-loss, strażnicy kapitału i wyjścia na komunikat idą
-    /// po rynku zawsze — tam liczy się wyjście, a nie cena wyjścia.
     #[track_caller]
     fn close_or_queue<B: Broker>(&mut self, b: &mut B, t: Ticket, reason: CloseReason, q: &Quote) {
-        if b.find_position(t).and_then(|p| p.basket)
-            .map(|id| self.basket_exit_pending(id)).unwrap_or(false) { return; }
+        if b.find_position(t)
+            .and_then(|p| p.basket)
+            .map(|id| self.basket_exit_pending(id))
+            .unwrap_or(false)
+        {
+            return;
+        }
         if cien::czynny() {
             cien::z(
                 cakt::A_ZYCIE_POZ,
@@ -9169,7 +7550,6 @@ impl Engine {
             None => return,
         };
         let zysk = p.profit_pts(q);
-        // pozycja bez zapasu zysku nie ma z czego finansować czekania
         if zysk < self.cfg.exit_limit_min_profit {
             let _ = b.close_position(t, reason);
             return;
@@ -9187,8 +7567,8 @@ impl Engine {
         };
         let czekaj = (self.cfg.exit_limit_wait_s.max(0.0) * 1000.0) as i64;
         if self.cfg.restore_strategy_continuation {
-            let guard=self.capture_continuation_guard(b,t);
-            self.remember_continuation_guard(t,guard,true);
+            let guard = self.capture_continuation_guard(b, t);
+            self.remember_continuation_guard(t, guard, true);
         }
         self.queued_exits.insert(
             t,
@@ -9223,8 +7603,6 @@ impl Engine {
         }
     }
 
-    /// Obsługa kolejki wyjść: wypełnienie po lepszej cenie albo wyjście
-    /// awaryjne po upływie czasu.
     fn sweep_queued_exits<B: Broker>(&mut self, b: &mut B, q: &Quote) {
         if self.queued_exits.is_empty() {
             return;
@@ -9234,18 +7612,22 @@ impl Engine {
         for (t, qe) in lista {
             let p = match b.find_position(t) {
                 Some(p) => p.clone(),
-                // pozycja zniknęła (stop, cel, ręczna akcja) — kolejka nieaktualna
                 None => {
                     self.queued_exits.remove(&t);
                     continue;
                 }
             };
-            if p.basket.map(|id| self.basket_exit_pending(id)).unwrap_or(false) {
+            if p.basket
+                .map(|id| self.basket_exit_pending(id))
+                .unwrap_or(false)
+            {
                 self.queued_exits.remove(&t);
-                self.forget_continuation_guard(t,true);
+                self.forget_continuation_guard(t, true);
                 continue;
             }
-            if !self.continuation_exit_proved(b,t) {continue;}
+            if !self.continuation_exit_proved(b, t) {
+                continue;
+            }
             let osiagniete = match p.side {
                 Side::Buy => q.bid >= qe.target - 1e-9,
                 Side::Sell => q.ask <= qe.target + 1e-9,
@@ -9289,21 +7671,15 @@ impl Engine {
                 );
             }
             self.queued_exits.remove(&t);
-            self.forget_continuation_guard(t,true);
+            self.forget_continuation_guard(t, true);
         }
     }
 
     fn manage_positions<B: Broker>(&mut self, b: &mut B, q: &Quote) {
         let ts = q.ts;
 
-        // Kolejka wyjść PRZED regułami: pozycja, która czeka na lepszą cenę,
-        // nie może w tym samym ticku zostać zamknięta po rynku inną regułą —
-        // wtedy oczekiwanie nie miałoby żadnego skutku poza opóźnieniem.
         self.sweep_queued_exits(b, q);
 
-        // Mediana spreadu z ostatnich 512 próbek. Liczymy ją tylko wtedy, gdy
-        // ktoś z niej korzysta — sortowanie na każdym ticku 54 mln razy
-        // kosztowałoby więcej niż cała reszta pętli.
         if self.cfg.exit_spread_mult > 0.0 {
             self.spread_buf.push(q.ask - q.bid);
             if self.spread_buf.len() >= 512 {
@@ -9321,7 +7697,6 @@ impl Engine {
             self.last_vsl_eval = ts;
         }
 
-        // aktualizacja szczytów
         for p in b.positions_mut().iter_mut() {
             let pts = (q.exit(p.side) - p.open_price) * p.side.sign();
             if pts > p.peak_pts {
@@ -9330,12 +7705,6 @@ impl Engine {
             }
         }
 
-        // ---------- CEL NA POZIOMIE KOSZYKA ----------
-        //
-        // Trader patrzy na sumę koszyka, nie na pojedyncze zlecenia: „całość
-        // jest na plus sto dolarów, zamykam wszystko". Przy siatce kilku wejść
-        // pojedyncza pozycja nic nie znaczy — decyzja dotyczy koszyka, a silnik
-        // dotąd zamykał wyłącznie per pozycja.
         if self.cfg.basket_target_usd > 0.0 {
             let mut zysk: HashMap<u32, f64> = HashMap::new();
             for p in b.positions() {
@@ -9349,7 +7718,9 @@ impl Engine {
                 .map(|(k, _)| k)
                 .collect();
             for bid in do_zamkniecia {
-                if self.basket_exit_pending(bid) { continue; }
+                if self.basket_exit_pending(bid) {
+                    continue;
+                }
                 let tickety: Vec<Ticket> = b
                     .positions()
                     .iter()
@@ -9367,10 +7738,9 @@ impl Engine {
             }
         }
 
-        // Runnerzy wg GŁĘBOKOŚCI WEJŚCIA — liczeni raz na tick, nie raz na
-        // pozycję. Pusty zbiór, dopóki `trail_runners_by_depth` wyłączone.
         let runnerzy = self.runnerzy_wg_glebokosci(b);
         let snapshot: Vec<Position> = b.positions().to_vec();
+        let trail_adaptive = self.trail_adaptive_snapshot(q);
 
         let sr_swieca = self.cfg.trail_sr_enabled && self.sr.nowa_swieca;
         if sr_swieca {
@@ -9378,12 +7748,15 @@ impl Engine {
         }
 
         for p in snapshot {
-            if p.frozen || p.basket.map(|id| self.basket_exit_pending(id)).unwrap_or(false) {
+            if p.frozen
+                || p.basket
+                    .map(|id| self.basket_exit_pending(id))
+                    .unwrap_or(false)
+            {
                 continue;
             }
             let pts = (q.exit(p.side) - p.open_price) * p.side.sign();
 
-            // wirtualny SL
             if self.cfg.virtual_sl && vsl_due {
                 if let Some(v) = p.vsl {
                     let hit = match p.side {
@@ -9402,12 +7775,6 @@ impl Engine {
                 continue;
             }
 
-            // ---------- REGUŁY DOŚWIADCZONEGO TRADERA ----------
-            //
-            // Wspólne bramki: nie ruszamy pozycji zbyt świeżej ani zbyt
-            // płytko na plusie, bo tam każda reguła mierzy szum. Osobno —
-            // wstrzymanie po komunikacie o trafionym celu, bo wtedy ruch ma
-            // potwierdzony rozpęd i pierwsza korekta nie jest końcem.
             let wiek_min = (ts - p.open_ts) as f64 / 60_000.0;
             let za_swieza =
                 self.cfg.exit_min_hold_min > 0.0 && wiek_min < self.cfg.exit_min_hold_min;
@@ -9418,7 +7785,6 @@ impl Engine {
             let reguly_wolne = !za_swieza && !za_maly_zysk && !po_tp_hit;
 
             if reguly_wolne && pts > 0.0 {
-                // 1. wielokrotność ryzyka — „mam 3R, biorę"
                 if self.cfg.exit_r_multiple > 0.0 {
                     if let Some(sl) = p.sl {
                         let ryzyko = (p.open_price - sl).abs();
@@ -9428,12 +7794,10 @@ impl Engine {
                         }
                     }
                 }
-                // 2. okrągły poziom — opór, na którym trader wychodzi
                 if self.cfg.exit_round_dist > 0.0 && self.cfg.exit_round_step > 0.0 {
                     let cena = q.exit(p.side);
                     let krok = self.cfg.exit_round_step;
                     let najblizszy = (cena / krok).round() * krok;
-                    // liczy się tylko poziom PRZED nami, nie za nami
                     let przed = match p.side {
                         Side::Buy => najblizszy >= cena,
                         Side::Sell => najblizszy <= cena,
@@ -9443,7 +7807,6 @@ impl Engine {
                         continue;
                     }
                 }
-                // 3. spread się rozjechał — płynność znika, wyjście drożeje
                 if self.cfg.exit_spread_mult > 0.0 && self.spread_med > 0.0 {
                     if (q.ask - q.bid) >= self.spread_med * self.cfg.exit_spread_mult {
                         self.close_or_queue(b, p.ticket, CloseReason::Harvest, q);
@@ -9452,15 +7815,7 @@ impl Engine {
                 }
             }
 
-            // ---------- MĄDRE WYJŚCIE ----------
-            //
-            // Odwzorowuje decyzję człowieka patrzącego na wykres. Warunek
-            // o czekających limitach jest tu istotą: pozycja spadająca w stronę
-            // WŁASNEJ siatki to inna sytuacja niż spadająca w próżnię —
-            // w pierwszym przypadku spadek obniża średnią koszyka i powrót
-            // wyprowadza całość na plus.
             if self.cfg.smart_exit && pts > 0.0 && reguly_wolne {
-                // czy pod ceną (nad ceną dla sprzedaży) czeka nasz limit?
                 let trzymaj_bo_siatka = if self.cfg.smart_exit_hold_if_pending > 0.0 {
                     let prog = self.cfg.smart_exit_hold_if_pending;
                     let blisko = self.cfg.smart_exit_pending_min_dist;
@@ -9471,12 +7826,10 @@ impl Engine {
                         .filter(|o| o.kind.side() == p.side)
                         .filter(|o| !ten_sam || o.basket == p.basket)
                         .filter(|o| {
-                            // odległość limitu od bieżącej ceny, po stronie straty
                             let d = match p.side {
                                 Side::Buy => q.bid - o.price,
                                 Side::Sell => o.price - q.ask,
                             };
-                            // za blisko = i tak zaraz się wypełni, nie niesie informacji
                             d > blisko && d <= prog
                         })
                         .count() as u32;
@@ -9486,12 +7839,10 @@ impl Engine {
                 };
 
                 if !trzymaj_bo_siatka {
-                    // 1. duży zysk — bierz
                     if self.cfg.smart_exit_take > 0.0 && pts >= self.cfg.smart_exit_take {
                         self.close_or_queue(b, p.ticket, CloseReason::Harvest, q);
                         continue;
                     }
-                    // 2. oddane za dużo ze szczytu
                     if self.cfg.smart_exit_giveback > 0.0
                         && p.peak_pts >= self.cfg.smart_exit_min_peak
                         && p.peak_pts - pts >= p.peak_pts * self.cfg.smart_exit_giveback
@@ -9499,7 +7850,6 @@ impl Engine {
                         self.close_or_queue(b, p.ticket, CloseReason::Harvest, q);
                         continue;
                     }
-                    // 3. gwałtowny spadek — zamknij, póki jest zysk
                     if self.cfg.smart_exit_drop_speed > 0.0 {
                         let okno = (self.cfg.smart_exit_speed_window_s * 1000.0) as i64;
                         let wiek = ts - p.last_peak_ts;
@@ -9515,7 +7865,6 @@ impl Engine {
                 }
             }
 
-            // harvest — zamknij po cofnięciu o % szczytu
             if self.cfg.harvest_retrace_pct > 0.0 && p.peak_pts >= self.cfg.harvest_start {
                 if p.peak_pts - pts >= p.peak_pts * self.cfg.harvest_retrace_pct / 100.0 {
                     self.close_or_queue(b, p.ticket, CloseReason::Harvest, q);
@@ -9523,7 +7872,6 @@ impl Engine {
                 }
             }
 
-            // out-at-entry po czasie
             if self.cfg.oae_timeout_min > 0.0 {
                 let age_min = (ts - p.open_ts) as f64 / 60_000.0;
                 if age_min >= self.cfg.oae_timeout_min && pts < self.cfg.oae_profit_min {
@@ -9533,7 +7881,6 @@ impl Engine {
                 }
             }
 
-            // stagnacja — dwuczłonowa
             let stag_min = (ts - p.last_peak_ts) as f64 / 60_000.0;
             let s1 = self.cfg.stale_take_min > 0.0
                 && stag_min >= self.cfg.stale_take_min
@@ -9554,13 +7901,12 @@ impl Engine {
                 }
             }
 
-            // trailing
             let runner_teraz = if self.cfg.trail_runners_by_depth {
                 runnerzy.contains(&p.ticket)
             } else {
                 p.is_runner
             };
-            if let Some(cand) = self.trail_candidate(&p, q, runner_teraz) {
+            if let Some(cand) = self.trail_candidate(&p, q, runner_teraz, trail_adaptive.as_ref()) {
                 let improves = p.sl.map(|s| !p.side.better(cand, s)).unwrap_or(true);
                 let above_be = !p.side.better(cand, p.open_price);
                 if improves && above_be {
@@ -9595,9 +7941,6 @@ impl Engine {
                     .and_then(|id| self.basket(id))
                     .map(|bk| (bk.tp_stage, bk.tps.get(bk.tp_stage).copied()))
                     .unwrap_or((0, None));
-                // Etapy po DOTKNIĘCIACH celów SYGNAŁU (`tp_stage` koszyka),
-                // nie po celach własnych warstwy — tak mierzył prototyp i tak
-                // jest odpornie na warstwy bez TP.
                 let aktywna = match self.cfg.trail_sr_activation {
                     TrailSrActivation::Entry => true,
                     TrailSrActivation::Gain => pts >= self.cfg.trail_sr_min_gain,
@@ -9616,9 +7959,6 @@ impl Engine {
                                 .unwrap_or(true);
                             if poprawia && sl_is_valid(p.side, sl_prop, q, stops) {
                                 if self.cfg.virtual_sl && !self.cfg.virtual_sl_only_when_rejected {
-                                    // ta sama gałąź co istniejący trailing —
-                                    // ale z ZAPADKĄ (lekcja audytu C: fallback
-                                    // na virtual_sl bez zapadki był błędem)
                                     let vsl_poprawia = vsl_teraz
                                         .map(|v| {
                                             !p.side.better(sl_prop, v) && (sl_prop - v).abs() > 1e-9
@@ -9644,13 +7984,7 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  TRAILING S/R PO STRUKTURZE 1M (OS_SR_SPEC.md pkt 4)
-    // ============================================================
 
-    /// Czy którakolwiek nowa oś jakości/oddechu jest rzeczywiście czynna.
-    /// Sam `trail_sr_atr_period` nie aktywuje niczego — zgodnie z kontraktem
-    /// pola jest czytany dopiero za jedną z trzech dodatnich bramek.
     #[inline]
     fn sr_dynamic_active(&self) -> bool {
         self.cfg.trail_sr_min_prominence_atr > 0.0
@@ -9670,8 +8004,6 @@ impl Engine {
             && self.sr.spread_ref.is_some()
     }
 
-    /// Efektywny oddech jest wyłącznie funkcją informacji już domkniętej.
-    /// Przy trzech zerach funkcja zwraca dokładnie pole legacy.
     #[inline]
     fn sr_effective_offset(&self) -> f64 {
         if !self.sr_dynamic_active() {
@@ -9687,14 +8019,6 @@ impl Engine {
         out
     }
 
-    /// Rozgrzewa STAN S/R z domkniętych świec M1 pobranych z MT5. Funkcja
-    /// celowo nie woła `on_tick`: historia nie może otwierać ani modyfikować
-    /// pozycji. Agregacja do `trail_sr_tf_min` używa tych samych kubełków co
-    /// strumień ticków, a ostatni kubełek zostaje otwarty — pierwszy live tick
-    /// domknie go dokładnie tak jak w przebiegu bez restartu.
-    ///
-    /// Zwraca `true`, gdy pełne okno dynamiczne jest gotowe. Dla legacy/no-op
-    /// zwraca `true` i nie dotyka stanu.
     pub fn rozgrzej_sr_z_m1(&mut self, bars: &[SrWarmupBar]) -> bool {
         if !self.cfg.trail_sr_enabled || !self.sr_dynamic_active() {
             return true;
@@ -9733,7 +8057,6 @@ impl Engine {
                 self.sr.spread_close = bar.spread.max(0.0);
             }
         }
-        // Historia nie jest rundą zarządzania pozycjami.
         self.sr.nowa_swieca = false;
         self.sr_dynamic_ready()
     }
@@ -9776,12 +8099,13 @@ impl Engine {
         }
     }
 
-    /// Dopisuje metryki jednej właśnie domkniętej świecy. Wszystkie wejścia
-    /// (`high/low/close/spread`) pochodzą z poprzedniego kubełka; pierwszy
-    /// tick nowego kubełka nie uczestniczy w obliczeniu.
 
     fn sr_zamknij_swiece(&mut self, ts: Ts) {
-        sr_state::SrStateMath { cfg: &self.cfg, sr: &mut self.sr }.sr_zamknij_swiece(ts);
+        sr_state::SrStateMath {
+            cfg: &self.cfg,
+            sr: &mut self.sr,
+        }
+        .sr_zamknij_swiece(ts);
     }
 
     fn sr_kandydat(&self, side: Side, mid: Px, next_tp: Option<Px>, ts: Ts) -> Option<Px> {
@@ -9796,17 +8120,12 @@ impl Engine {
         let min_prom = self.cfg.trail_sr_min_prominence_atr;
         swingi
             .iter()
-            // zero lookahead: poziom widzialny dopiero od chwili potwierdzenia
             .filter(|&&(_, t)| t <= ts)
-            // po właściwej stronie bieżącej ceny mid
             .filter(|&&(lvl, _)| match side {
                 Side::Buy => lvl < mid,
                 Side::Sell => lvl > mid,
             })
-            // ODDECH od ceny (0 = brak filtra)
             .filter(|&&(lvl, _)| mdp <= 0.0 || (mid - lvl).abs() >= mdp)
-            // Prominence jest zamrożona przy potwierdzeniu swinga; późniejszy
-            // ATR nie może przepisać jakości historycznego poziomu.
             .filter(|&&(lvl, t)| {
                 if min_prom <= 0.0 {
                     return true;
@@ -9820,14 +8139,11 @@ impl Engine {
                     .map(|&(_, _, v)| v >= min_prom)
                     .unwrap_or(false)
             })
-            // oddech przed NASTĘPNYM nieodhaczonym celem sygnału (runner Hold
-            // po ostatnim TP nie ma następnego celu — filtr wtedy milczy)
             .filter(|&&(lvl, _)| {
                 next_tp
                     .map(|t| (lvl - t).abs() >= self.cfg.trail_sr_min_dist_tp)
                     .unwrap_or(true)
             })
-            // k = 1: najbliższy od ceny spośród pozostałych
             .min_by(|a, b| {
                 (mid - a.0)
                     .abs()
@@ -9853,17 +8169,6 @@ impl Engine {
         }
     }
 
-    /// Które pozycje są RUNNERAMI do luźniejszego trailingu.
-    ///
-    /// Dotąd runnerem była „pozycja bez take-profitu", więc `trail_runners_n`
-    /// nie zmieniało niczego: `n = 1` i `n = 3` dawały wynik identyczny do
-    /// szóstego miejsca po przecinku, bo liczba pozycji bez celu nie zależy
-    /// od tego pola. Pole kłamało użytkownikowi panelu.
-    ///
-    /// Po włączeniu `trail_runners_by_depth` runnerami zostaje N NAJLEPSZYCH
-    /// WEJŚĆ każdego koszyka — dla kupna najniższa cena. To odpowiednik
-    /// `_trail_plan` z `bot.py:7635` i jedyna definicja, przy której liczba
-    /// runnerów cokolwiek znaczy.
     fn runnerzy_wg_glebokosci<B: Broker>(&self, b: &B) -> std::collections::HashSet<Ticket> {
         let mut out = std::collections::HashSet::new();
         if !self.cfg.trail_split || !self.cfg.trail_runners_by_depth {
@@ -9876,7 +8181,6 @@ impl Engine {
                 .iter()
                 .filter(|p| p.basket == Some(bk.id))
                 .collect();
-            // najlepsze wejście = najkorzystniejsza cena dla tej strony
             poz.sort_by(|a, c| {
                 if bk.side.better(a.open_price, c.open_price) {
                     std::cmp::Ordering::Less
@@ -9893,11 +8197,129 @@ impl Engine {
         out
     }
 
-    fn trail_candidate(&self, p: &Position, q: &Quote, jest_runnerem: bool) -> Option<Px> {
-        // Runner koszyka UWOLNIONEGO OD RYZYKA w trybie `TrailGap` dostaje
-        // własną, luźną zapadkę. To jest cała różnica między „stop na BE
-        // i tam zostaje" a „dół zamknięty, góra otwarta": pierwsze zbiera
-        // szum, drugie pozwala runnerowi odjechać.
+    fn trail_adaptive_snapshot(&self, q: &Quote) -> Option<TrailAdaptiveSnapshot> {
+        if !self.cfg.trail_adaptive_enabled {
+            return None;
+        }
+
+        let er_ms = (self.cfg.trail_adaptive_window_s.max(0.0) * 1000.0) as i64;
+        let fast_ms = (self.cfg.trail_adaptive_fast_vol_s.max(0.0) * 1000.0) as i64;
+        let slow_ms = (self.cfg.trail_adaptive_slow_vol_s.max(0.0) * 1000.0) as i64;
+        if er_ms <= 0 {
+            return None;
+        }
+        let oldest = q.ts - er_ms.max(fast_ms).max(slow_ms);
+        let first = self.vol_hist.partition_point(|(ts, _)| *ts < oldest);
+        let er_from = q.ts - er_ms;
+        let fast_from = q.ts - fast_ms;
+        let slow_from = q.ts - slow_ms;
+        let mut er = MovementAccumulator::default();
+        let mut fast = MovementAccumulator::default();
+        let mut slow = MovementAccumulator::default();
+        let mid = q.mid();
+        let current_already_sampled = self
+            .vol_hist
+            .last()
+            .is_some_and(|(ts, px)| *ts == q.ts && px.to_bits() == mid.to_bits());
+
+        let mut feed = |ts: Ts, px: Px| {
+            if ts >= er_from {
+                er.push(ts, px);
+            }
+            if fast_ms > 0 && ts >= fast_from {
+                fast.push(ts, px);
+            }
+            if slow_ms > 0 && ts >= slow_from {
+                slow.push(ts, px);
+            }
+        };
+        for &(ts, px) in &self.vol_hist[first..] {
+            if ts <= q.ts {
+                feed(ts, px);
+            }
+        }
+        if !current_already_sampled {
+            feed(q.ts, mid);
+        }
+
+        let min_samples = self.cfg.trail_adaptive_min_samples.max(2);
+        if er.samples < min_samples || er.path <= 1e-12 {
+            return None;
+        }
+        let price_efficiency = ((er.last_px - er.first_px) / er.path).clamp(-1.0, 1.0);
+        let vol_ratio = match (fast.path_rate(), slow.path_rate()) {
+            (Some(a), Some(b)) if b > 1e-12 => Some(a / b),
+            _ => None,
+        };
+        Some(TrailAdaptiveSnapshot {
+            price_efficiency,
+            vol_ratio,
+        })
+    }
+
+    fn trail_adaptive_gap(
+        &self,
+        p: &Position,
+        jest_runnerem: bool,
+        base_gap: f64,
+        snap: Option<&TrailAdaptiveSnapshot>,
+    ) -> f64 {
+        let Some(snap) = snap else { return base_gap };
+        if !self.cfg.trail_adaptive_enabled
+            || (self.cfg.trail_adaptive_runners_only && !jest_runnerem)
+            || p.peak_pts < self.cfg.trail_adaptive_min_peak.max(0.0)
+        {
+            return base_gap;
+        }
+
+        let signed_er = snap.price_efficiency * p.side.sign();
+        let trend_thr = self.cfg.trail_adaptive_trend_er.abs().clamp(0.0, 1.0);
+        let reversal_thr = self.cfg.trail_adaptive_reversal_er.abs().clamp(0.0, 1.0);
+        let mut mult = if signed_er >= trend_thr {
+            self.cfg.trail_adaptive_trend_gap_mult
+        } else if signed_er <= -reversal_thr {
+            self.cfg.trail_adaptive_reversal_gap_mult
+        } else {
+            self.cfg.trail_adaptive_chop_gap_mult
+        };
+        if !mult.is_finite() {
+            mult = 1.0;
+        }
+        mult = mult.max(0.0);
+
+        if self.cfg.trail_adaptive_vol_ratio > 0.0
+            && snap
+                .vol_ratio
+                .is_some_and(|r| r >= self.cfg.trail_adaptive_vol_ratio)
+        {
+            let vol_mult = if signed_er >= 0.0 {
+                self.cfg.trail_adaptive_vol_favorable_mult
+            } else {
+                self.cfg.trail_adaptive_vol_adverse_mult
+            };
+            if vol_mult.is_finite() {
+                mult *= vol_mult.max(0.0);
+            }
+        }
+
+        let mut gap = base_gap.max(0.0) * mult;
+        let lo = self.cfg.trail_adaptive_min_gap.max(0.0);
+        if lo > 0.0 {
+            gap = gap.max(lo);
+        }
+        if self.cfg.trail_adaptive_max_gap > 0.0 {
+            gap = gap.min(self.cfg.trail_adaptive_max_gap.max(lo));
+        }
+        gap
+    }
+
+    fn trail_candidate(
+        &self,
+        p: &Position,
+        q: &Quote,
+        jest_runnerem: bool,
+        adaptive: Option<&TrailAdaptiveSnapshot>,
+    ) -> Option<Px> {
         if self.cfg.riskfree_enabled
             && self.cfg.riskfree_runner_stop == RiskFreeRunnerStop::TrailGap
             && p.basket
@@ -9905,39 +8327,23 @@ impl Engine {
                 .map(|bk| bk.secured)
                 .unwrap_or(false)
         {
-            let luz = if self.cfg.riskfree_runner_gap > 0.0 {
+            let luz_bazowy = if self.cfg.riskfree_runner_gap > 0.0 {
                 self.cfg.riskfree_runner_gap
             } else {
                 25.0
             };
+            let luz = self.trail_adaptive_gap(p, true, luz_bazowy, adaptive);
             let peak = p.peak_pts;
             if peak <= 0.0 {
                 return None;
             }
             return Some(p.open_price + p.side.sign() * (peak - luz));
         }
-        // `risk_free_trail` — pole, które przez cały czas obiecywało „po RISK
-        // FREE runner dostaje trailing", miało kontrolkę w panelu, domyślną
-        // wartość `true` i siedziało we wszystkich 11 presetach wysyłkowych,
-        // a w rdzeniu NIE MIAŁO ANI JEDNEGO ODCZYTU. Opis presetu kłamał
-        // o zachowaniu bota.
-        //
-        // Znaczenie, które mu nadaję, jest najwęższe z możliwych i zgodne
-        // z nazwą: koszyk ZABEZPIECZONY komunikatem RISK FREE prowadzi runnera
-        // zapadką runnerową NAWET WTEDY, gdy zwykły trailing jest wyłączony.
-        // Przy włączonym trailingu nie zmienia nic — więc presety, które go
-        // niosą razem z aktywnym `trail_mode`, zachowują się jak dotąd.
         let zabezpieczony = p
             .basket
             .and_then(|id| self.basket(id))
             .map(|bk| bk.secured)
             .unwrap_or(false);
-        //
-        // ⚠ NIE dotyczy koszyków prowadzonych przez REGUŁĘ `riskfree_enabled`.
-        // Tam o stopie runnera rozstrzyga `riskfree_runner_stop` i to on musi
-        // wygrać — inaczej tryb `Off` („runner bez stopu") dostawałby stop
-        // z trailingu, czyli dokładnie to, czego się wyparł. `risk_free_trail`
-        // należy do rodziny `risk_free_*`, czyli do reakcji na KOMUNIKAT.
         if self.cfg.risk_free_trail
             && !self.cfg.riskfree_enabled
             && zabezpieczony
@@ -9952,6 +8358,8 @@ impl Engine {
                 self.cfg.trail_runner_gap,
                 self.cfg.trail_runner_lock_pct,
                 &self.cfg.trail_runner_tiers,
+                true,
+                adaptive,
             );
         }
         let runner = self.cfg.trail_split && jest_runnerem;
@@ -9972,15 +8380,9 @@ impl Engine {
                 &self.cfg.trail_tiers,
             )
         };
-        self.trail_z_parametrow(p, q, mode, start, gap, lock, tiers)
+        self.trail_z_parametrow(p, q, mode, start, gap, lock, tiers, jest_runnerem, adaptive)
     }
 
-    /// Wyliczenie poziomu zapadki z JAWNIE podanych parametrów.
-    ///
-    /// Wydzielone, bo ten sam rachunek potrzebny jest dwa razy: dla zwykłego
-    /// trailingu i dla runnera koszyka zabezpieczonego (`risk_free_trail`).
-    /// Duplikat tych czterech gałęzi byłby miejscem, w którym dwie ścieżki
-    /// prędzej czy później zaczęłyby liczyć inaczej.
     fn trail_z_parametrow(
         &self,
         p: &Position,
@@ -9990,13 +8392,18 @@ impl Engine {
         gap: f64,
         lock: f64,
         tiers: &str,
+        jest_runnerem: bool,
+        adaptive: Option<&TrailAdaptiveSnapshot>,
     ) -> Option<Px> {
         if mode == TrailMode::Off || p.peak_pts < start {
             return None;
         }
         let s = p.side.sign();
         match mode {
-            TrailMode::Gap => Some(q.exit(p.side) - s * gap),
+            TrailMode::Gap => {
+                let gap = self.trail_adaptive_gap(p, jest_runnerem, gap, adaptive);
+                Some(q.exit(p.side) - s * gap)
+            }
             TrailMode::LockPct => Some(p.open_price + s * p.peak_pts * lock / 100.0),
             TrailMode::Tiered => {
                 let mut best = None;
@@ -10007,34 +8414,13 @@ impl Engine {
                 }
                 best.map(|k| p.open_price + s * k)
             }
-            // ---- ZMIENNOŚĆ ZAMIAST STAŁEJ LUKI ----
-            //
-            // Obie gałęzie liczą lukę jako `trail_atr_mult × ATR`, gdzie ATR
-            // to `atr_proxy` — zakres max−min w oknie, czyli estymator
-            // ZAKRESOWY. Nie liczymy kwadratów zwrotów świadomie: przy 26 mln
-            // ticków estymator zakresowy jest wielokrotnie efektywniejszy przy
-            // tej samej liczbie obserwacji, a my mamy strumień ticków, nie świece.
-            //
-            // `None` z `atr_proxy` (za mało próbek) znaczy BRAK ZAPADKI, a nie
-            // zapadkę zerową — brak wiedzy nie ma prawa zaciskać stopa.
             TrailMode::Atr | TrailMode::Chandelier => {
                 let mult = self.cfg.trail_atr_mult;
                 if mult <= 0.0 {
                     return None;
                 }
                 let atr = self.atr_proxy(q.ts)?;
-                let luka = mult * atr;
-                // KOTWICA to cała różnica między tymi dwoma trybami.
-                //
-                // `Atr` mierzy od CENY BIEŻĄCEJ — czyli jest to `Gap` z luką
-                // oddychającą razem z rynkiem.
-                //
-                // `Chandelier` (Chuck LeBeau) mierzy od EKSTREMUM osiągniętego
-                // przez pozycję. To nie jest wariant zapisu: gdy rynek
-                // przyspiesza, ATR rośnie, więc luka liczona OD CENY rozszerza
-                // się dokładnie w chwili, w której chciałoby się ją zacisnąć.
-                // Kotwica w szczycie tego nie robi — stop może się tylko
-                // podnosić razem ze szczytem.
+                let luka = self.trail_adaptive_gap(p, jest_runnerem, mult * atr, adaptive);
                 let kotwica = match mode {
                     TrailMode::Chandelier => p.open_price + s * p.peak_pts,
                     _ => q.exit(p.side),
@@ -10045,15 +8431,7 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  CYKLE OKRESOWE TICKU
-    // ============================================================
 
-    /// Anuluje CZEKAJĄCY sygnał, który po X minutach nic nie zrobił.
-    ///
-    /// Dotyczy wyłącznie koszyków, które **nigdy** nie miały otwartej pozycji.
-    /// Koszyk, który już handlował, jest tradem, a nie starym sygnałem —
-    /// kasowanie go po czasie byłoby zamknięciem trwającej transakcji.
     fn expire_stale_baskets<B: Broker>(&mut self, b: &mut B, ts: Ts) {
         if self.cfg.ignore_old_after_min <= 0.0 {
             return;
@@ -10087,7 +8465,6 @@ impl Engine {
         }
     }
 
-    /// Przelicza rozmiar niezafillowanych limitów po zmianie zmienności.
     fn resize_pendings<B: Broker>(&mut self, b: &mut B, ts: Ts) {
         if !self.cfg.pending_resize_on_vol || self.cfg.vol_window_min <= 0.0 {
             return;
@@ -10108,29 +8485,6 @@ impl Engine {
         }
     }
 
-    /// Przelicza WOLUMEN leżących limitów, gdy saldo urosło na tyle, że lot
-    /// bazowy się zmienił.
-    ///
-    /// Bez tego siatka rozstawiona przy 200 $ wypełnia się lotem 0,01 nawet
-    /// wtedy, gdy konto urosło w międzyczasie do 500 $ i normalnie handluje
-    /// 0,03. Najgłębsze szczeble czekają na wypełnienie najdłużej, więc
-    /// rozjazd dotyczy właśnie tych wejść, które przy odbiciu dają najwięcej.
-    ///
-    /// **Nie da się tego zrobić modyfikacją.** MT5 nie pozwala zmienić
-    /// wolumenu zlecenia oczekującego, więc jedyna droga to anuluj i złóż od
-    /// nowa — i trzeba uczciwie powiedzieć, co to kosztuje:
-    ///
-    ///  * między anulowaniem a złożeniem szczebla **nie ma na rynku**; jeśli
-    ///    cena przejdzie akurat wtedy, wejście przepada,
-    ///  * nowe zlecenie może zostać **odrzucone** (`stops_level`, cena po
-    ///    niewłaściwej stronie rynku), a wtedy szczebel znika na dobre,
-    ///  * zlecenie traci swoje miejsce w kolejce u brokera.
-    ///
-    /// Dlatego wymiana jest zawężona najmocniej, jak się da: tylko szczeble
-    /// z żywym koszykiem, tylko gdy różnica lota sięga pełnego kroku 0,01,
-    /// i tylko wtedy, gdy nowy lot jest **większy** — zmniejszanie
-    /// wystawionego szczebla nie ma uzasadnienia w compoundingu, a naraża
-    /// na te same koszty.
     fn relot_pendings<B: Broker>(&mut self, b: &mut B, ts: Ts) {
         if !self.cfg.pending_relot_on_balance {
             return;
@@ -10140,7 +8494,11 @@ impl Engine {
             return;
         }
         let v2 = self.cfg.order_volume_contract_v2;
-        let delta_epsilon = if v2 { b.volume_step().abs() * 0.5 } else { 0.005 };
+        let delta_epsilon = if v2 {
+            b.volume_step().abs() * 0.5
+        } else {
+            0.005
+        };
         let amount = |v: f64| if v2 { v } else { (v * 100.0).round() / 100.0 };
         let gap = (self.cfg.pending_resize_s.max(0.0) * 1000.0) as i64;
         if ts - self.last_relot < gap {
@@ -10158,50 +8516,15 @@ impl Engine {
             .map(|x| x.id)
             .collect();
 
-        // ---- PLAN PRZELICZONY NA BIEŻĄCE SALDO ----
-        //
-        // `cel` to GOŁY lot bazowy i sam w sobie NIE JEST celem szczebla.
-        // `plan_grid` nadaje każdemu poziomowi wolumen `lot × waga RR`,
-        // a `cap_basket_risk` ścina całą siatkę do budżetu liczonego od
-        // EQUITY i do wolnego marginesu portfela. Cel z gołego lota nie wie
-        // ani o wagach, ani o dławiku — spłaszcza drabinkę i odbudowuje
-        // ekspozycję, którą dławik przed chwilą ściął.
-        //
-        // Przeliczamy więc plan tak, jak wyglądałby DZIŚ. Geometria (ceny,
-        // SL, cele) jest własnością koszyka i się nie zmienia; zmienia się
-        // wyłącznie skala. Liczymy raz na koszyk, nie raz na szczebel.
         let wolne = self.wolny_budzet_portfela(b);
         let mut plany: HashMap<u32, Vec<(i32, f64)>> = HashMap::new();
         for id in &zywe {
-            // ŚWIADOMIE `None` — rodzina A żyje w fazie PLANOWANIA koszyka
-            // (reguła 0.3), a relot dotyczy koszyka JUŻ ZAWIĄZANEGO. To jest
-            // ta sama reguła, którą niesie zapadka stempla N10: decyzja
-            // o istniejącym koszyku czyta stempel, a nie stan bieżący.
-            //
-            // Skutek uboczny jest korzystny i zamierzony: gdy A1/A3/A4 przycięły
-            // plan, przeliczenie BEZ sufitu daje inny ZESTAW szczebli, bramka
-            // kształtu niżej to wykrywa i zostawia koszyk w spokoju
-            // (`relot_ksztalt_odmowa`). Relot nie ma jak odbudować ekspozycji,
-            // którą rodzina A przed chwilą ścięła.
             let (p, _, _) = self.plan_grid(*id, ts, wolne, None);
-            // ---- BRAMKA KSZTAŁTU ----
-            //
-            // Relot wolno zmieniać wyłącznie SKALĘ planu. Jeśli przeliczenie
-            // dało inny ZESTAW szczebli albo spłaszczyło drabinkę R:R (a
-            // `rr_multipliers` robi to dla całego koszyka na jeden szczebel
-            // o zerowym ryzyku — `settings.rs`), to nie jest ten sam plan
-            // i doprowadzanie do niego byłoby cichym przepisaniem koszyka.
-            // Wtedy zostawiamy koszyk w spokoju i LICZYMY to.
             if !p.is_empty() && !self.plan_ma_ten_sam_ksztalt(*id, &p) {
                 self.stats.relot_ksztalt_odmowa += 1;
                 continue;
             }
             if p.is_empty() {
-                // Pusty plan znaczy „nic się nie mieści" — ale znaczy też
-                // „nie dało się policzyć". Nie kasujemy na tej podstawie
-                // całego koszyka; brak wpisu = ten koszyk pomijamy w trybie
-                // wg planu. LICZYMY to, bo inaczej „tryb wg planu nic nie
-                // zmienia" byłoby nie do odróżnienia od „planu nie było".
                 self.stats.relot_plan_pusty += 1;
                 continue;
             }
@@ -10209,8 +8532,6 @@ impl Engine {
             plany.insert(*id, p.iter().map(|g| (g.level, g.volume)).collect());
         }
 
-        // Pracujemy na SZCZEBLU, nie na pojedynczym zleceniu: po dokladkach na
-        // jednym poziomie lezy kilka zlecen, a znaczenie ma ich SUMA.
         let mut szczeble: Vec<(u32, i32)> = b
             .pendings()
             .iter()
@@ -10247,24 +8568,9 @@ impl Engine {
             if na_szczeblu.is_empty() {
                 continue;
             }
-            // MIANOWNIK dla wszystkich liczb niżej: ile razy w ogóle było co
-            // sprawdzać. Patrz `Stats::relot_szczebli`.
             self.stats.relot_szczebli += 1;
-            // CEL DLA SZCZEBLA, NIE DLA ZLECENIA.
-            //
-            // Na jednym poziomie leży TYLE ZLECEŃ, ile wynosi `scaled_units`,
-            // każde po jednym locie bazowym — widać to w raporcie MT5 jako
-            // kilka wpisów o tej samej cenie i sekundzie. Porównywanie sumy
-            // szczebla z pojedynczym lotem uznałoby zdrowy szczebel 5 × 0,01
-            // za „za duży" i zaczęłoby go kasować.
-            //
-            // Liczbę sztuk bierzemy z zleceń BAZOWYCH (dokładki jej nie
-            // zmieniają), więc cel to `sztuki × lot bieżący`.
             let sztuki = na_szczeblu.iter().filter(|x| !x.topup).count().max(1) as f64;
             let cel_plaski = amount(sztuki * cel);
-            // Cel wg planu: wolumen JEDNEGO szczebla z przeliczonego planu,
-            // razy liczba żywych sztuk na tym poziomie. Poziom nieobecny
-            // w NIEPUSTYM planie znaczy „na to nas dziś nie stać" — cel zero.
             let cel_planu = plany.get(&id).map(|lv| {
                 let v = lv
                     .iter()
@@ -10276,17 +8582,12 @@ impl Engine {
             let cel_szczebla = if self.cfg.pending_relot_wg_planu {
                 match cel_planu {
                     Some(v) => v,
-                    // koszyk bez policzalnego planu — nie ruszamy go wcale
                     None => continue,
                 }
             } else {
                 cel_plaski
             };
             let suma = amount(na_szczeblu.iter().map(|x| x.vol).sum::<f64>());
-            // ROZJAZD OBU DEFINICJI CELU — mierzony ZAWSZE, także gdy nic się
-            // nie dzieje. To jest liczba odpowiadająca na pytanie „o ile
-            // goły lot mija się z planem", niezależna od tego, który tryb
-            // akurat jest włączony.
             if let Some(p) = cel_planu {
                 self.stats.relot_rozjazd_lotow += (cel_plaski - p).abs();
             }
@@ -10295,17 +8596,9 @@ impl Engine {
                 continue;
             }
 
-            // ---- KIERUNKI: LICZNIKI I BRAMKI ----
-            //
-            // Rozdzielone, bo to dwie różne rzeczy: w górę to ZYSK
-            // (dokończony compounding), w dół to RYZYKO (zlecenie za duże
-            // względem kapitału). Pytanie „czy sam kierunek w dół podnosi
-            // dno" da się zadać tylko wtedy, gdy da się je włączyć osobno.
             if roznica < 0.0 {
                 self.stats.relot_down_zdarzen += 1;
                 self.stats.relot_down_lotow += -roznica;
-                // DIAGNOSTYKA: redukcja, której plan NIE żąda, bierze się
-                // wyłącznie ze spłaszczania wag RR, a nie ze spadku kapitału.
                 if let Some(p) = cel_planu {
                     if p >= suma - delta_epsilon {
                         self.stats.relot_down_bez_spadku += 1;
@@ -10317,36 +8610,21 @@ impl Engine {
             } else {
                 self.stats.relot_up_zdarzen += 1;
                 self.stats.relot_up_lotow += roznica;
-                // DIAGNOSTYKA: dokładka ponad to, na co pozwala plan, to
-                // ominięcie `cap_basket_risk` (liczonego od EQUITY).
                 if let Some(p) = cel_planu {
                     if cel_szczebla > p + delta_epsilon {
                         self.stats.relot_up_ponad_plan += 1;
                     }
                 }
-                // PRÓG KAPITAŁU: poniżej niego działa sama redukcja, czyli
-                // konto jedzie łagodną wersją, dopóki nie urośnie.
                 let wolno_w_gore = self.cfg.pending_relot_up
                     && self.stats.balance >= self.cfg.pending_relot_up_od_salda;
                 if !wolno_w_gore {
                     continue;
                 }
-                // Relot w górę POWIĘKSZA leżące zlecenia, czyli podnosi
-                // margines, który rachunek weźmie na siebie przy wypełnieniu.
-                // Dotąd patrzył wyłącznie na SALDO — a saldo rośnie także
-                // wtedy, gdy poziom marginesu leci w dół.
                 if !self.margines_pozwala(b, self.cfg.ml_min_relot_up) {
                     continue;
                 }
             }
 
-            // MIERNIK ODLEGLOSCI - mierzy, niczego nie blokuje.
-            //
-            // Kazda z obu drog na moment odslania szczebel: wymiana zdejmuje go
-            // z rynku, a redukcja kasuje czesc wolumenu tuz przed mozliwym
-            // wypelnieniem. Jesli cena jest wtedy blisko, to okno kosztuje.
-            // Zbieramy rozklad "jak blisko bylo", zeby dalo sie POZNIEJ
-            // zdecydowac o progu bezpieczenstwa, a nie zgadywac.
             let wzor = &na_szczeblu[0];
             let ref_px = if wzor.kind.side() == Side::Buy {
                 q.ask
@@ -10363,15 +8641,6 @@ impl Engine {
                 self.stats.relot_blisko += 1;
             }
 
-            // ---- SALDO SPADLO: szczebel jest ZA DUZY ----
-            //
-            // To nie jest kwestia zysku, tylko RYZYKA. Zlecenie zlozone przy
-            // 5000 $ lezace, gdy konto spadlo do 200 $, otwiera pozycje
-            // wielokrotnie za duza wzgledem kapitalu - i robi to dokladnie
-            // wtedy, gdy konto najmniej moze to zniesc.
-            //
-            // Redukujemy NAJPIERW przez kasowanie dokladek, bo to nie rusza
-            // pierwotnego szczebla ani jego miejsca w kolejce.
             if roznica < 0.0 {
                 let mut nadmiar = -roznica;
                 for s in na_szczeblu.iter().filter(|x| x.topup) {
@@ -10388,36 +8657,38 @@ impl Engine {
                         self.stats.relot_udane += 1;
                     }
                 }
-                // Same dokladki nie wystarczyly - trzeba zmniejszyc baze.
                 if nadmiar >= delta_epsilon {
                     if let Some(s) = na_szczeblu.iter().find(|x| !x.topup) {
-                        // `wolumen_zlecenia`, nie gołe `.max(0.01)`: to jest
-                        // WOLUMEN ZLECENIA, więc obowiązują go `lot_min`
-                        // i `lot_max` z presetu. Podłoga wpisana na sztywno
-                        // ignorowała `lot_min` ustawione wyżej niż 0,01.
                         let nowy = self.wolumen_zlecenia(s.vol - nadmiar);
-                        // Do not cancel an existing order for an illegal V2 replacement.
                         let nowy = if v2 {
-                            match self.final_open_volume(b, nowy) { Ok(v) => v, Err(_) => continue }
-                        } else { nowy };
+                            match self.final_open_volume(b, nowy) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            }
+                        } else {
+                            nowy
+                        };
                         cien::z(cakt::A_KSZTALT_ZLEC, s.t, czr::Z_RELOT_ZMNIEJSZ, 0);
                         if (nowy - s.vol).abs() >= delta_epsilon && b.cancel_pending(s.t).is_ok() {
                             let tt = s.t;
                             if let Some(bk) = self.basket_mut(id) {
                                 bk.pendings.retain(|x| *x != tt);
                             }
-                            match self.place_pending_order(b, PendingReq {
-                                kind: s.kind,
-                                volume: nowy,
-                                price: s.price,
-                                sl: s.sl,
-                                tp: s.tp,
-                                basket: Some(id),
-                                level: poziom,
-                                is_toucher: s.touch,
-                                is_topup: false,
-                                comment: s.com.clone(),
-                            }) {
+                            match self.place_pending_order(
+                                b,
+                                PendingReq {
+                                    kind: s.kind,
+                                    volume: nowy,
+                                    price: s.price,
+                                    sl: s.sl,
+                                    tp: s.tp,
+                                    basket: Some(id),
+                                    level: poziom,
+                                    is_toucher: s.touch,
+                                    is_topup: false,
+                                    comment: s.com.clone(),
+                                },
+                            ) {
                                 Ok(n) => {
                                     if let Some(bk) = self.basket_mut(id) {
                                         bk.pendings.push(n);
@@ -10442,34 +8713,28 @@ impl Engine {
                 continue;
             }
 
-            // ---- SALDO UROSLO: szczebel jest ZA MALY ----
             if dokladka {
-                // Pierwotny szczebel zostaje nietkniety; dokladamy roznice.
-                // Odmowa brokera kosztuje wtedy tylko ja, a nie cale wejscie.
-                // DOKŁADKA TEŻ PODLEGA `lot_max`.
-                //
-                // To jest drugie miejsce, w którym powstaje wolumen zlecenia,
-                // i przez nie ogranicznik przeciekał: przy `lot_max = 10`
-                // największa pozycja miała 27,10 lota, bo relot składa OSOBNE
-                // zlecenie na różnicę i liczył ją z pominięciem sufitu.
                 let vol = self.wolumen_zlecenia(roznica);
                 if !v2 && vol < 0.01 {
                     continue;
                 }
                 let s = &na_szczeblu[0];
                 cien::z(cakt::A_KSZTALT_ZLEC, s.t, czr::Z_RELOT_DOSTAW, 0);
-                match self.place_pending_order(b, PendingReq {
-                    kind: s.kind,
-                    volume: vol,
-                    price: s.price,
-                    sl: s.sl,
-                    tp: s.tp,
-                    basket: Some(id),
-                    level: poziom,
-                    is_toucher: s.touch,
-                    is_topup: true,
-                    comment: s.com.clone(),
-                }) {
+                match self.place_pending_order(
+                    b,
+                    PendingReq {
+                        kind: s.kind,
+                        volume: vol,
+                        price: s.price,
+                        sl: s.sl,
+                        tp: s.tp,
+                        basket: Some(id),
+                        level: poziom,
+                        is_toucher: s.touch,
+                        is_topup: true,
+                        comment: s.com.clone(),
+                    },
+                ) {
                     Ok(n) => {
                         if let Some(bk) = self.basket_mut(id) {
                             bk.pendings.push(n);
@@ -10479,24 +8744,29 @@ impl Engine {
                     Err(_) => self.stats.relot_odmowy += 1,
                 }
             } else {
-                // Wymiana bazy: szczebel na moment znika z rynku.
                 if let Some(s) = na_szczeblu.iter().find(|x| !x.topup) {
-                    // Wymieniamy JEDNO zlecenie bazowe na takie o bieżącym
-                    // locie; pozostałe sztuki tego szczebla dojdą w kolejnych
-                    // przebiegach, po jednej na cykl.
-                    // W trybie „wg planu" bazą jest wolumen szczebla z planu,
-                    // nie goły lot — inaczej wymiana spłaszczyłaby drabinkę
-                    // dokładnie tak, jak robi to tryb stary.
                     let jednostka = if self.cfg.pending_relot_wg_planu {
-                        if v2 { cel_szczebla / sztuki.max(1.0) }
-                        else { (cel_szczebla / sztuki.max(1.0)).max(0.01) }
+                        if v2 {
+                            cel_szczebla / sztuki.max(1.0)
+                        } else {
+                            (cel_szczebla / sztuki.max(1.0)).max(0.01)
+                        }
                     } else {
-                        if v2 { cel } else { cel.max(0.01) }
+                        if v2 {
+                            cel
+                        } else {
+                            cel.max(0.01)
+                        }
                     };
                     let baza = amount(jednostka);
                     let baza = if v2 {
-                        match self.final_open_volume(b, baza) { Ok(v) => v, Err(_) => continue }
-                    } else { baza };
+                        match self.final_open_volume(b, baza) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        }
+                    } else {
+                        baza
+                    };
                     if (baza - s.vol).abs() < delta_epsilon {
                         continue;
                     }
@@ -10508,18 +8778,21 @@ impl Engine {
                     if let Some(bk) = self.basket_mut(id) {
                         bk.pendings.retain(|x| *x != tt);
                     }
-                    match self.place_pending_order(b, PendingReq {
-                        kind: s.kind,
-                        volume: baza,
-                        price: s.price,
-                        sl: s.sl,
-                        tp: s.tp,
-                        basket: Some(id),
-                        level: poziom,
-                        is_toucher: s.touch,
-                        is_topup: false,
-                        comment: s.com.clone(),
-                    }) {
+                    match self.place_pending_order(
+                        b,
+                        PendingReq {
+                            kind: s.kind,
+                            volume: baza,
+                            price: s.price,
+                            sl: s.sl,
+                            tp: s.tp,
+                            basket: Some(id),
+                            level: poziom,
+                            is_toucher: s.touch,
+                            is_topup: false,
+                            comment: s.com.clone(),
+                        },
+                    ) {
                         Ok(n) => {
                             if let Some(bk) = self.basket_mut(id) {
                                 bk.pendings.push(n);
@@ -10543,9 +8816,6 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  REDUKCJA EKSPOZYCJI JUŻ ISTNIEJĄCEJ
-    // ============================================================
 
     #[inline]
     fn dzwignia_efektywna(&self, acc: &Account) -> f64 {
@@ -10560,9 +8830,6 @@ impl Engine {
         let acc = b.account();
         let eq = acc.equity;
         if eq <= 0.0 {
-            // Konto bez equity nie ma poziomu marginesu, tylko problem.
-            // Zwracamy zera, żeby KAŻDA bramka tej rodziny zamknęła się
-            // szczelnie, zamiast dzielić przez zero i przepuścić wszystko.
             return (Some(0.0), Some(0.0));
         }
         let lev = self.dzwignia_efektywna(&acc);
@@ -10594,15 +8861,6 @@ impl Engine {
         (teraz, docelowy)
     }
 
-    /// Czy poziom marginesu pozwala ZWIĘKSZYĆ ekspozycję?
-    ///
-    /// `prog <= 0` = oś wyłączona i funkcja wychodzi PRZED odczytem rachunku.
-    /// To nie jest mikrooptymalizacja, tylko warunek parytetu: preset sprzed
-    /// tej zmiany nie może zapłacić za nią ani jednym odczytem konta.
-    ///
-    /// Przy `ml_licz_wiszace` bramka patrzy na poziom PO wypełnieniu leżących
-    /// zleceń — czyli na najgorszy scenariusz, który rachunek sam sobie
-    /// przygotował.
     #[inline]
     fn margines_pozwala<B: Broker>(&self, b: &B, prog: f64) -> bool {
         if prog <= 0.0 {
@@ -10620,25 +8878,7 @@ impl Engine {
         }
     }
 
-    // ========================================================================
-    //  RODZINA A — EKSPOZYCJA WOBEC STANU RACHUNKU  (FALA 1)
-    //  `wiedza/EA_RODZINA_A.md`, osie A1–A4
-    // ========================================================================
 
-    /// **BRAMA RODZINY A** — jedyne miejsce, w którym wolno zapytać, czy osie
-    /// A1–A4 w ogóle są czytane.
-    ///
-    /// `ea_enabled` **albo** `tryb_auto_ea`. Dwa źródła, bo pola rodziny A są
-    /// dwiema różnymi rzeczami naraz:
-    ///  * dla presetu, który jawnie włącza warstwę EA, są jej częścią,
-    ///  * dla trybu AUTO-EA są POWODEM, dla którego ten tryb w ogóle istnieje
-    ///    — do dziś flaga `tryb_auto_ea` nie zmieniała ani jednej decyzji.
-    ///
-    /// Sama brama NIE WYSTARCZA do parytetu i nie ma wystarczać: każda oś
-    /// wychodzi dodatkowo na własnym zerze i wychodzi PRZED odczytem
-    /// rachunku (wzorzec `margines_pozwala`). Dzięki temu włączenie samego
-    /// trybu AUTO-EA na presecie bez pól rodziny A jest przebiegiem
-    /// identycznym co do centa — punkt (c) potrójnego kontraktu zera.
     #[inline]
     fn ea_osie_a(&self) -> bool {
         self.cfg.ea_enabled || self.tryb_auto_ea
@@ -10652,9 +8892,6 @@ impl Engine {
         let a3 = self.cfg.ea_redukcja_przy_zageszczeniu;
         let a4 = !matches!(self.cfg.ea_stan_dnia, crate::settings::EaStanDnia::Off)
             && self.ea_a.dzien_uzbrojony(self.cfg.ea_stan_dnia_prog_sl);
-        // WYJŚCIE PRZED ODCZYTEM RACHUNKU. Ta linijka jest warunkiem parytetu,
-        // a nie oszczędnością: preset z zerami nie ma zapłacić za tę falę ani
-        // jednym `b.account()`.
         if a1 <= 0.0 && a3 <= 0.0 && !a4 {
             return None;
         }
@@ -10664,9 +8901,6 @@ impl Engine {
             let acc = b.account();
             let q = b.quote();
             let lev = self.dzwignia_efektywna(&acc);
-            // Cena środkowa: bid i ask różnią się na złocie o ~0,3 $ przy
-            // 4 000 $, czyli o 0,008 % budżetu. Wybór strony byłby udawaniem
-            // precyzji, której ta wielkość nie ma.
             let px = (q.bid + q.ask) / 2.0;
             let lot = self.lot_size(self.podstawa_lota()).max(self.cfg.lot_min);
             let margines_jednostki = lot * XAU_CONTRACT * px / lev.max(1.0);
@@ -10679,12 +8913,6 @@ impl Engine {
                     ile.max(0.0) as u32
                 };
             }
-            // SUFIT SLOTÓW. `max_open_positions = 0` znaczy „brak limitu"
-            // i wtedy ta połowa osi milczy — konwencja zera jest ta sama, co
-            // w `enforce_position_limit`. Liczymy OTWARTE POZYCJE, nie
-            // zlecenia: to jest ta wielkość, którą limit naprawdę egzekwuje,
-            // a doliczenie wiszących szczebli zabrałoby pokrycie tam, gdzie
-            // siatka jest gęsta.
             let limit = self.max_open_positions_eff();
             if limit > 0 {
                 let zajete = b.positions().len() as u32;
@@ -10703,42 +8931,22 @@ impl Engine {
             mult *= (1.0 - a3 * zywe).clamp(podloga, 1.0);
         }
         if a4 {
-            // Przycięcie do (0; 1] siedzi w `SufitEa::nowy` — tam, gdzie
-            // niezmiennik „ryzyko nie rośnie po stracie" jest EGZEKWOWANY.
             mult *= self.cfg.ea_stan_dnia_jednostki_mult;
         }
 
         Some(crate::ea::SufitEa::nowy(jednostki_max, mult))
     }
 
-    /// **A2 + A4 — CZY WOLNO DOŁOŻYĆ DO KOSZYKA `id`.**
-    ///
-    /// Jedno miejsce prawdy dla czterech ścieżek dokładania: `fast_addon_sweep`,
-    /// `rearm_pass`, `reentry_pass` i piramida. Cztery kopie tego warunku to
-    /// cztery okazje, żeby jedna z nich została w tyle przy następnej zmianie.
-    ///
-    /// # Co NIE jest dokładką
-    ///
-    /// Nowy koszyk (pokrycie sygnałów jest święte — `EA_DYNAMICZNE_SPEC` §4:
-    /// „NIE blokuje nowych koszyków") oraz drabina wejścia rynkowego
-    /// (`market_ladder_pass`), która DOMYKA plan zawiązany w ramach stempla,
-    /// zamiast dokładać ponad niego. Blokowanie jej zmieniałoby geometrię
-    /// wejścia, a nie budżet ryzyka.
-    ///
-    /// # Kolejność: A4 przed A2
-    ///
-    /// A4 jest NIEZMIENNIKIEM (w `TylkoInkaso` nie ma dokładek w ogóle),
-    /// a A2 progiem. Niezmiennik nie może przegrać z progiem, więc pytamy
-    /// o niego pierwszy.
     fn ea_dokladki_wolno<B: Broker>(&mut self, b: &B, q: &Quote, id: u32) -> bool {
-        if self.basket_exit_pending(id) { return false; }
+        if self.basket_exit_pending(id) {
+            return false;
+        }
         if !self.ea_osie_a() {
             return true;
         }
         let prog = self.cfg.ea_stop_dokladek_przy_stracie;
         let a4 = !matches!(self.cfg.ea_stan_dnia, crate::settings::EaStanDnia::Off)
             && self.ea_a.dzien_uzbrojony(self.cfg.ea_stan_dnia_prog_sl);
-        // WYJŚCIE PRZED ODCZYTEM RACHUNKU — jak wyżej.
         if prog <= 0.0 && !a4 {
             return true;
         }
@@ -10747,10 +8955,6 @@ impl Engine {
             return false;
         }
 
-        // Pływający wynik SAMEGO KOSZYKA. Bez zrealizowanego: pytanie brzmi
-        // „czy to, co teraz stoi na rynku, idzie pod wodę", a nie „czy koszyk
-        // jest na plusie od początku". Koszyk, który zebrał TP1 i wrócił pod
-        // wodę resztą, ma dokładnie ten problem, o który tu chodzi.
         let mut fl = 0.0;
         for p in b.positions() {
             if p.basket == Some(id) {
@@ -10767,9 +8971,6 @@ impl Engine {
                 }
             }
             EaStateSrc::FloatR => {
-                // Koszyk bez zapamiętanego R nie wchodzi do mianownika —
-                // dzielenie przez „0 zamiast braku" dawałoby nieskończoność
-                // i migotanie progu (ta sama reguła co w `EaRdzen::sygnal`).
                 let r = self.basket(id).map(|k| k.risk_initial_usd).unwrap_or(0.0);
                 if r > 0.0 {
                     fl / r
@@ -10779,9 +8980,6 @@ impl Engine {
             }
         };
 
-        // HISTEREZA DWUSTRONNA, asymetryczna tak samo jak maszyna stanu
-        // EA-CORE: zaciśnięcie natychmiast, zdjęcie dopiero po powrocie do
-        // progu wyjścia. `0` = brak osobnego progu wyjścia.
         let powrot = if self.cfg.ea_stop_dokladek_powrot > 0.0 {
             self.cfg.ea_stop_dokladek_powrot
         } else {
@@ -10804,9 +9002,6 @@ impl Engine {
     }
 
     fn redukuj_ekspozycje<B: Broker>(&mut self, b: &mut B, ts: Ts) {
-        // BRAMKA NIERUSZALNOŚCI. Pierwsza linijka, przed jakimkolwiek
-        // odczytem rachunku — preset, który o tej regule nie wie, nie płaci
-        // za nią nawet jednym odczytem konta.
         if self.cfg.expo_cap_pct <= 0.0 && self.cfg.expo_cap_ml_pct <= 0.0 {
             return;
         }
@@ -10821,9 +9016,6 @@ impl Engine {
         if eq <= 0.0 {
             return;
         }
-        // wspólny helper — patrz `dzwignia_efektywna`: ta funkcja liczyła
-        // margines surowym `acc.leverage`, `poziom_marginesu` honorował
-        // `konto_dzwignia`, i obie udawały tę samą miarę
         let lev = self.dzwignia_efektywna(&acc);
         let mar = |vol: f64, px: Px| vol * XAU_CONTRACT * px / lev;
 
@@ -10842,27 +9034,14 @@ impl Engine {
             .sum();
         let razem = m_poz + m_pend;
 
-        // MIERNIK — zbierany zawsze, także gdy próg nie wiąże. To on mówi,
-        // w jakim zakresie próg ma prawo cokolwiek zrobić.
         let pct = razem / eq * 100.0;
         if pct > self.stats.expo_max_pct {
             self.stats.expo_max_pct = pct;
         }
 
-        // ---- WŁASNY STOP-OUT PO POZIOMIE MARGINESU ----
-        //
-        // Osobna, wcześniejsza gałąź, bo mierzy co innego: nie stosunek
-        // ekspozycji do kapitału, tylko ODLEGŁOŚĆ OD LIKWIDACJI. Wykonuje
-        // dokładnie to, co zrobiłby broker (najbardziej stratna pozycja,
-        // przeliczenie, powtórka), tylko przy wyższym progu i po naszej
-        // cenie — zanim kaskada zabierze cały rachunek.
         if self.cfg.expo_cap_ml_pct > 0.0 {
             let mut zadzialalo = false;
             loop {
-                // Ten sam ułamek co w `poziom_marginesu`: equity CAŁEGO konta
-                // przez margines CAŁEGO konta. Pętla i tak kończy się na braku
-                // WŁASNEJ ofiary (`min_by` niżej zwraca `None`), więc noga nie
-                // wpadnie w kierat, gdy margines trzyma cudza pozycja.
                 let m: f64 = b
                     .positions()
                     .iter()
@@ -10877,16 +9056,15 @@ impl Engine {
                     break;
                 }
                 let q2 = b.quote();
-                // najbardziej stratna — remis po numerze zlecenia, żeby
-                // przebieg był powtarzalny co do centa. Pozycje `frozen` nie
-                // są ofiarami: ręczne zamrożenie to kontrakt „silnik tego nie
-                // dotyka" i strażnik marginesu nie jest od niego wyjątkiem
-                // (w btp frozen nie występuje — zero wpływu na bramkę).
                 let Some((_, t)) = b
                     .positions()
                     .iter()
                     .filter(|p| !p.frozen)
-                    .filter(|p| !p.basket.map(|id| self.basket_exit_pending(id)).unwrap_or(false))
+                    .filter(|p| {
+                        !p.basket
+                            .map(|id| self.basket_exit_pending(id))
+                            .unwrap_or(false)
+                    })
                     .map(|p| (p.profit_usd(&q2), p.ticket))
                     .min_by(|x, y| {
                         x.0.partial_cmp(&y.0)
@@ -10914,12 +9092,6 @@ impl Engine {
         if self.cfg.expo_cap_pct <= 0.0 {
             return;
         }
-        // PRZELICZAMY OD NOWA. Gałąź poziomu marginesu wyżej mogła właśnie
-        // pozamykać pozycje, więc `razem` i `eq` policzone przed nią opisują
-        // rachunek, którego już nie ma. Przy jednym włączonym wyzwalaczu to
-        // nic nie zmienia (tamta gałąź nic nie zrobiła), ale przy obu naraz
-        // stara wartość kazałaby kasować szczeble za ekspozycję, która
-        // przed chwilą zniknęła.
         let acc = b.account();
         let eq = acc.equity;
         if eq <= 0.0 {
@@ -10946,14 +9118,17 @@ impl Engine {
         self.stats.expo_zdarzen += 1;
         let mut nadmiar = razem - limit;
 
-        // ---- (a) KASOWANIE NIEWYPEŁNIONYCH SZCZEBLI ----
         let q = b.quote();
         let mid = (q.bid + q.ask) / 2.0;
         let mut ofiary: Vec<(f64, Ticket, f64, f64, Option<u32>, i32)> = b
             .pendings()
             .iter()
             .filter(|p| !p.frozen)
-            .filter(|p| !p.basket.map(|id| self.basket_exit_pending(id)).unwrap_or(false))
+            .filter(|p| {
+                !p.basket
+                    .map(|id| self.basket_exit_pending(id))
+                    .unwrap_or(false)
+            })
             .map(|p| {
                 (
                     (p.price - mid).abs(),
@@ -11006,7 +9181,8 @@ impl Engine {
                         "expo_cap_pct {:.4}%: anulowano ticket {t} koszyka {} poziom {lvl}; \
                          ekspozycja {:.4} -> {:.4} $, limit {:.4} $",
                         self.cfg.expo_cap_pct,
-                        bid.map(|x| format!("B{x}")).unwrap_or_else(|| "bez koszyka".into()),
+                        bid.map(|x| format!("B{x}"))
+                            .unwrap_or_else(|| "bez koszyka".into()),
                         exposure_before,
                         (limit + nadmiar.max(0.0)),
                         limit,
@@ -11032,27 +9208,20 @@ impl Engine {
         if nadmiar <= 0.0 {
             return;
         }
-        // Zeszliśmy do zera leżących zleceń i wciąż jesteśmy nad progiem.
         self.stats.expo_niedosyt += 1;
         if !self.cfg.expo_cap_close {
             return;
         }
 
-        // ---- (b) DOMYKANIE POZYCJI ----
-        //
-        // Kolejność: NAJGŁĘBIEJ POD WODĄ NAJPIERW. To te pozycje wypełniły się
-        // na ruchu przeciw i to one drenują equity; zamknięcie takiej pozycji
-        // zdejmuje margines, nie ruszając equity (strata pływająca była już
-        // policzona). Ofiara jest ta sama, którą stop-out brokera wybrałby
-        // chwilę później — tylko po naszej cenie i po naszym progu.
-        // `!frozen` — ten sam kontrakt ręcznego zamrożenia co w gałęzi
-        // poziomu marginesu wyżej i w kasowaniu szczebli (a): zamrożonych
-        // silnik nie domyka
         let mut poz: Vec<(f64, Ticket, f64)> = b
             .positions()
             .iter()
             .filter(|p| !p.frozen)
-            .filter(|p| !p.basket.map(|id| self.basket_exit_pending(id)).unwrap_or(false))
+            .filter(|p| {
+                !p.basket
+                    .map(|id| self.basket_exit_pending(id))
+                    .unwrap_or(false)
+            })
             .map(|p| (p.profit_usd(&q), p.ticket, mar(p.volume, p.open_price)))
             .collect();
         poz.sort_by(|x, y| {
@@ -11075,43 +9244,16 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  RISK FREE JAKO REGUŁA SILNIKA
-    // ============================================================
 
-    /// M15: DOMKNIĘCIE RUNNERA PO CZASIE — jedyne wyjście, które nie płaci
-    /// ani sufitem, ani stopem.
-    ///
-    /// Wydzielone z `riskfree_pass`, bo limit trzymania jest potrzebny także
-    /// wtedy, gdy koszyk uwolnił KOMUNIKAT kanału, a nie reguła silnika —
-    /// a `riskfree_pass` zaczyna się od `if !riskfree_enabled { return; }`.
-    /// Włącznik `runner_max_hold_bez_reguly` pozwala objąć tym limitem także
-    /// koszyki zabezpieczone komunikatem zewnętrznym.
-    ///
-    /// Zamknięcie idzie PO RYNKU, nie stopem — i to jest cała różnica wobec
-    /// dwóch pozostałych dróg. Stop na BE (`be_offset = 21`) i zapadka
-    /// runnerowa muszą przejść `sl_is_valid`, czyli leżeć `stops_level` od
-    /// ceny; przy 21 $ nad wejściem warunek nie przechodzi nigdy, bo to dalej
-    /// niż najdalszy cel sygnału. Zamknięcie po rynku nie ma tego warunku.
     fn limit_trzymania_runnera<B: Broker>(&mut self, b: &mut B, q: &Quote) {
         let ts = q.ts;
-        // Termin ważności ogranicza ryzyko oddania wcześniej wypracowanego
-        // zysku przez bezterminowo pozostawionego runnera.
         if self.cfg.riskfree_runner_max_hold_min > 0.0 {
             let max_age = (self.cfg.riskfree_runner_max_hold_min * 60_000.0) as i64;
-            // Zegar biegnie OD UWOLNIENIA KOSZYKA, nie od otwarcia pozycji:
-            // koszyk potrafi czekać na wypełnienie wiele godzin, a runnerem
-            // staje się dopiero tutaj. Mieszanie tych zegarów dawałoby „72 h",
-            // które w rzeczywistości znaczy 76 h.
             let zabezpieczone: HashMap<u32, Ts> = self
                 .baskets
                 .iter()
                 .filter(|x| x.secured && x.secured_ts > 0)
                 .filter(|x| !self.basket_exit_pending(x.id))
-                // Z-10: przy `runner_max_hold_rule_only` limit dotyczy
-                // wyłącznie koszyków uwolnionych REGUŁĄ — zgodnie z opisem
-                // pola. Bez tego komunikat „RISK FREE" z kanału włączał zegar,
-                // którego użytkownik nie prosił.
                 .filter(|x| !self.cfg.runner_max_hold_rule_only || x.secured_by_rule)
                 .map(|x| (x.id, x.secured_ts))
                 .collect();
@@ -11153,32 +9295,7 @@ impl Engine {
         }
     }
 
-    /// Uwolnienie koszyka od ryzyka bez czekania na komunikat z kanału.
-    ///
-    /// Tak prowadzi koszyk autor ATFX i to jest struktura wypłaty, której
-    /// w silniku nie było: zabankować tyle zysku, żeby pokryć stratę reszty,
-    /// a runnera zostawić ze stopem na ŚREDNIEJ WAŻONEJ CENIE WEJŚCIA
-    /// koszyka. Od tej chwili koszyk nie może już oddać pieniędzy, a runner
-    /// ma otwartą górę.
-    ///
-    /// Trzy rzeczy, które odróżniają to od `handle_risk_free`:
-    ///  * wyzwala SILNIK po progu zysku, nie sygnalista,
-    ///  * stop ląduje na średniej KOSZYKA, a nie na własnej cenie każdej nogi
-    ///    — dzięki temu na zero wychodzi całość, a nie pojedyncza pozycja,
-    ///  * reguła NIE ZADZIAŁA, jeśli zabankowana kwota nie pokryłaby strat;
-    ///    „risk free", które zostawia koszyk pod wodą, byłoby kłamstwem.
-    ///
-    /// ⚠ Uczciwe zastrzeżenie: to nie jest darmowy pieniądz. Domknięcie na BE
-    /// też płaci spread, a stop na średniej bywa zbierany tuż przed ruchem we
-    /// właściwą stronę — wtedy reguła zamienia dużą wygraną na zero.
-    ///
-    /// Limit może działać także przy wyłączonej regule, jeśli włączono
-    /// `runner_max_hold_bez_reguly`.
     fn riskfree_pass<B: Broker>(&mut self, b: &mut B, q: &Quote) {
-        // M15: LIMIT TRZYMANIA RUNNERA MUSI DZIAŁAĆ TAKŻE BEZ REGUŁY.
-        //
-        // Zegar może działać niezależnie od autonomicznej reguły RF; nie
-        // zmienia celu ani stopu, więc nie zależy od brokerowego stops_level.
         if self.cfg.riskfree_enabled || self.cfg.runner_max_hold_bez_reguly {
             self.limit_trzymania_runnera(b, q);
         }
@@ -11193,8 +9310,6 @@ impl Engine {
         let ids: Vec<u32> = self
             .baskets
             .iter()
-            // `secured` znaczy „koszyk już zabezpieczony" — komunikatem albo
-            // tą regułą. Drugi raz nie ma czego uwalniać.
             .filter(|x| x.alive() && !x.secured && !x.tickets.is_empty())
             .filter(|x| !self.basket_exit_pending(x.id))
             .map(|x| x.id)
@@ -11215,7 +9330,6 @@ impl Engine {
                 continue;
             }
 
-            // ---- 1. czy próg zysku został przekroczony? ----
             let otwarte: f64 = zywe.iter().map(|p| p.profit_usd(q)).sum();
             let wynik = zrealizowane + otwarte;
             let ryzyko: f64 = zywe
@@ -11233,10 +9347,6 @@ impl Engine {
                 continue;
             }
 
-            // ---- 2. kto zostaje runnerem ----
-            // Zostają NAJBARDZIEJ ZYSKOWNE: przy jednym wspólnym SL to są
-            // wejścia najgłębsze, czyli te o najlepszym stosunku zysku do
-            // ryzyka — a więc te, którym najbardziej opłaca się dać biec.
             let mut wg_zysku = zywe.clone();
             wg_zysku.sort_by(|a, c| {
                 c.profit_usd(q)
@@ -11255,10 +9365,6 @@ impl Engine {
                 .map(|p| p.ticket)
                 .collect();
 
-            // ---- 3. czy to naprawdę wyjdzie na zero lub plus? ----
-            // Bankujemy `bank`, a runnery wyjdą po średniej koszyka, czyli
-            // około zera. Jeśli suma jest ujemna, koszyk NIE JEST wolny od
-            // ryzyka i reguła nie ma prawa się tak nazwać.
             let bank: f64 = wg_zysku
                 .iter()
                 .skip(ile_runnerow)
@@ -11274,7 +9380,6 @@ impl Engine {
             }
             let srednia: Px = zywe.iter().map(|p| p.open_price * p.volume).sum::<f64>() / suma_wol;
 
-            // ---- 5. domknięcie części zyskownej ----
             let mut zamkniete = 0usize;
             let mut zabankowane = 0.0;
             for t in &do_zamkniecia {
@@ -11284,12 +9389,6 @@ impl Engine {
                     zamkniete += 1;
                 }
             }
-            // „Wyjdzie na zero" w punkcie 3 było PROJEKCJĄ banku — dopiero tu
-            // wiadomo, co broker naprawdę zamknął. Odmowa części zamknięć
-            // znaczy, że bank NIE pokrywa ryzyka reszty: koszyk nie ma prawa
-            // dostać `secured` (ten sam wzorzec `zostalo > 0` co przy
-            // wygaśnięciu). Zrealizowane księgujemy, resztę zrobi następny
-            // przebieg — warunki progu wciąż stoją, więc reguła sama ponowi.
             let zostalo = do_zamkniecia.len() - zamkniete;
             if zostalo > 0 {
                 self.book_command_profit_legacy(id, zabankowane);
@@ -11306,7 +9405,6 @@ impl Engine {
                 continue;
             }
 
-            // ---- 6. runner: stop na średniej, cel wg ustawienia ----
             let be = srednia + side.sign() * self.cfg.riskfree_be_offset;
             let stops = b.stops_level();
             let mut uzbrojone = 0usize;
@@ -11337,18 +9435,8 @@ impl Engine {
                     }
                     continue;
                 }
-                // Stop cofamy tylko WPRZÓD. Gdyby średnia koszyka leżała gorzej
-                // niż stop, który runner już ma, przesunięcie zwiększałoby
-                // ryzyko — a reguła ma je wyłącznie zdejmować.
-                //
-                // W trybie `TrailGap` to jest DOPIERO PUNKT STARTOWY: stop
-                // rusza z BE, a potem prowadzi go luźna zapadka z
-                // `trail_candidate`, więc runner nie zostaje przyklejony do
-                // średniej na resztę życia.
                 let lepszy = biezacy_sl.map(|s| side.better(s, be)).unwrap_or(true);
                 if lepszy && sl_is_valid(side, be, q, stops) {
-                    // przez `try_modify`, żeby odrzucenie brokera nie zgubiło
-                    // zamiaru — stop na BE jest tu całą wartością reguły
                     self.try_modify(b, *t, Some(be), nowy_tp, ts);
                     uzbrojone += 1;
                 } else if nowy_tp != biezacy_tp {
@@ -11368,9 +9456,6 @@ impl Engine {
                 bk.state = BasketState::RiskFree;
                 bk.secured = true;
                 bk.secured_ts = ts;
-                // Z-10: to jest JEDYNE miejsce, w którym koszyk uwalnia REGUŁA
-                // silnika. Zegar `riskfree_runner_max_hold_min` opisuje właśnie
-                // ten przypadek.
                 bk.secured_by_rule = true;
             }
             let powod = if prog_kwota {
@@ -11385,9 +9470,6 @@ impl Engine {
                     ryzyko * self.cfg.riskfree_trigger_r
                 )
             };
-            // Opis stopu wg TRYBU — stała fraza „ze stopem {be}" (średnia
-            // koszyka) kłamała w `BeOwn` (stop na WŁASNYM wejściu każdej
-            // warstwy) i w `Off` (stopu nie ma wcale).
             let opis_stopu = match self.cfg.riskfree_runner_stop {
                 RiskFreeRunnerStop::Off => "BEZ stopu (tryb Off)".to_string(),
                 RiskFreeRunnerStop::BeOwn => {
@@ -11451,11 +9533,6 @@ impl Engine {
         d <= prog
     }
 
-    /// Kasuje siatki, którym minęło OKNO ŁASKI — patrz `pending_drop_grace_min`.
-    ///
-    /// Stoi PRZED `expire_old_baskets` celowo: koszyk, któremu minęło okno,
-    /// ma stracić zlecenia, a nie zostać zamknięty — to dwie różne rzeczy
-    /// i kolejność je rozdziela.
     fn dokoncz_odroczone_kasowanie<B: Broker>(&mut self, b: &mut B, ts: Ts) {
         if self.cfg.pending_drop_grace_min <= 0.0 {
             return;
@@ -11466,8 +9543,6 @@ impl Engine {
             .filter(|x| x.alive() && x.drop_po_ts > 0)
             .map(|x| x.id)
             .collect();
-        // Kasowanie następuje po upływie czasu albo po przekroczeniu
-        // skonfigurowanej odległości; raportowany powód rozróżnia te ścieżki.
         let gotowe: Vec<(u32, bool)> = czekajace
             .into_iter()
             .filter_map(|id| {
@@ -11507,9 +9582,6 @@ impl Engine {
     }
 
     fn expire_old_baskets<B: Broker>(&mut self, b: &mut B, ts: Ts) {
-        // Globalny limit MOŻE być wyłączony, a mimo to koszyk może mieć własny,
-        // krótszy — nadany przez filtr tempa w trybie miękkim. Wczesny powrót
-        // przy `basket_max_age_min == 0` zjadłby tamten mechanizm po cichu.
         let limit_wieku = self.basket_max_age_eff();
         if limit_wieku <= 0.0
             && !self
@@ -11524,7 +9596,6 @@ impl Engine {
             .iter()
             .filter(|x| x.alive())
             .filter(|x| {
-                // krótszy z dwóch limitów wygrywa
                 let mut lim = f64::INFINITY;
                 if limit_wieku > 0.0 {
                     lim = limit_wieku;
@@ -11585,9 +9656,6 @@ impl Engine {
                 }
             }
             if zostalo > 0 {
-                // Koszyk ZOSTAJE żywy, więc przy następnym ticku spróbujemy
-                // ponownie. Wpis jest głośny, bo cicha odmowa przy wygaśnięciu
-                // to dokładnie ten tryb awarii, którego nikt nie zauważa.
                 self.basket_note(
                     id,
                     ts,
@@ -11695,18 +9763,6 @@ impl Engine {
         }
     }
 
-    /// Wariant `limit_kasuje_tylko_nadmiar` — patrz doc pola w `settings.rs`.
-    ///
-    /// Dwie różnice wobec ścieżki zbiorczej wyżej:
-    ///  1. NADMIAR zamiast wszystkiego: pilnowana jest suma pozycje + wiszące
-    ///     ≤ limit, a ofiarą pada tyle zleceń, ile trzeba — od najdalszych od
-    ///     ceny (ten sam porządek ofiar co `redukuj_ekspozycje`). Stara
-    ///     ścieżka rusza dopiero przy pełnym liczniku pozycji i wtedy kasuje
-    ///     KAŻDY pending KAŻDEGO koszyka, także te, które by się zmieściły.
-    ///  2. Znacznik `cancelled` jest ODZNACZALNY: gdy pozycje się domkną
-    ///     i limit ma luz, szczeble skasowane TĄ regułą wracają do puli
-    ///     (odznaczamy najwyżej tyle, ile luzu zostało — inaczej najbliższy
-    ///     przebieg kasowałby je z powrotem i reguła byłaby kieratem).
     fn limit_kasuj_nadmiar<B: Broker>(&mut self, b: &mut B, ts: Ts, limit: usize, ile: usize) {
         let moje: Vec<u32> = self
             .baskets
@@ -11730,12 +9786,10 @@ impl Engine {
         let luz = limit.saturating_sub(ile);
 
         if wiszace.len() <= luz {
-            // ---- ODZNACZANIE: limit ma luz, ofiary wracają do puli ----
             let wolne = luz - wiszace.len();
             if wolne == 0 || self.limit_cancelled.is_empty() {
                 return;
             }
-            // wpisy martwych koszyków wypadają
             let baskets = &self.baskets;
             self.limit_cancelled
                 .retain(|(id, _)| baskets.iter().any(|x| x.id == *id && x.alive()));
@@ -11770,7 +9824,6 @@ impl Engine {
             return;
         }
 
-        // ---- KASOWANIE NADMIARU: najdalsze od ceny pierwsze ----
         let mut ofiary = wiszace;
         ofiary.sort_by(|x, y| {
             y.0.partial_cmp(&x.0)
@@ -11829,12 +9882,6 @@ impl Engine {
         let potrzeba = self.cfg.fast_fill_layers.max(2) as usize;
         let prog = (self.cfg.fast_fill_reject_s * 1000.0) as i64;
 
-        // Kandydaci: żywe koszyki, w których wypełniło się już `potrzeba`
-        // warstw, a odstęp między pierwszym a n-tym wypełnieniem jest krótszy
-        // niż próg. `fill_ts == 0` znaczy „niewypełniony" i musi wypaść.
-        // Ocena tempa KAZDEGO kwalifikujacego sie koszyka — takze tych, ktore
-        // prog przechodza. Historia rezimu musi widziec OBIE odpowiedzi,
-        // inaczej mierzy tylko liczbe przelotow, a nie ich UDZIAL.
         let ocenione: Vec<(u32, i64, bool)> = self
             .baskets
             .iter()
@@ -11854,9 +9901,6 @@ impl Engine {
                 Some((x.id, rozpietosc, rozpietosc < prog))
             })
             .collect();
-        // Ocena jednorazowa: znacznik stawiamy OD RAZU, także dla koszyków,
-        // które próg przechodzą. Inaczej koszyk „zdrowy" byłby oceniany co tick
-        // aż do śmierci i zdominowałby okno historii.
         for (id, _, przelot) in &ocenione {
             self.regime_hist.push((ts, *przelot));
             if let Some(bk) = self.basket_mut(*id) {
@@ -11874,7 +9918,9 @@ impl Engine {
             .collect();
 
         for (id, rozpietosc) in szybkie {
-            if self.basket_exit_pending(id) { continue; }
+            if self.basket_exit_pending(id) {
+                continue;
+            }
             let sek = rozpietosc as f64 / 1000.0;
 
             let miekki = self.kap_f(
@@ -11903,7 +9949,9 @@ impl Engine {
             }
 
             if self.cfg.confirmed_exit_retry {
-                if let Some(bk) = self.basket_mut(id) { bk.tempo_fast = true; }
+                if let Some(bk) = self.basket_mut(id) {
+                    bk.tempo_fast = true;
+                }
                 self.request_confirmed_exit(b, id, ts, CloseReason::Expired);
                 continue;
             }
@@ -11992,13 +10040,6 @@ impl Engine {
         }
         let ts = q.ts;
 
-        // Live MT5 can return an ambiguous/negative RPC acknowledgement even
-        // though the order is accepted and becomes visible in the following
-        // account snapshot.  The position snapshot is the authoritative fact:
-        // recover the per-basket counter from every observed fast-addon before
-        // deciding whether another one may be sent.  Without this reconciliation
-        // a delayed level=-4 position leaves `fast_addons == 0` and max=1 can be
-        // breached by the very next retry.
         let mut observed_addons: HashMap<u32, u32> = HashMap::new();
         for p in b.positions().iter().filter(|p| p.level == -4) {
             if let Some(id) = p.basket {
@@ -12017,15 +10058,11 @@ impl Engine {
             self.basket_note(
                 id,
                 ts,
-                format!(
-                    "DOKŁADKA TEMPOWA: licznik odzyskany z migawki brokera → {observed}"
-                ),
+                format!("DOKŁADKA TEMPOWA: licznik odzyskany z migawki brokera → {observed}"),
             );
         }
 
         let t0 = ts - (self.cfg.fast_addon_window_s * 1000.0) as i64;
-        // najstarsza próbka MIESZCZĄCA SIĘ w oknie; przy zbyt krótkiej
-        // historii nie zgadujemy — brak wiedzy nie może otwierać pozycji
         let mut baza: Option<Px> = None;
         let mut n = 0usize;
         for (t, p) in self.vol_hist.iter().rev() {
@@ -12044,26 +10081,21 @@ impl Engine {
         };
         let mid = q.mid();
 
-        // Koszyki kwalifikujące się w tym ticku. Zbieramy najpierw, bo
-        // `place` pożycza brokera na mutowalnie.
         let prog = self.cfg.fast_addon_move_usd;
         let ostyg = (self.cfg.fast_addon_cooldown_s * 1000.0) as i64;
         let min_stage = self.cfg.fast_addon_min_stage as usize;
         let maks = self.cfg.fast_addon_max;
         let mut kandydaci: Vec<(u32, Side, Option<Px>, Option<Px>, Px, Px)> = Vec::new();
-        // DOKŁADKA DOKŁADA SIĘ DO POZYCJI, a nie do wspomnienia o pozycji.
-        // `had_positions` znaczy „kiedykolwiek miał" i nigdy nie wraca do
-        // `false`, więc koszyk po stopie, z samą wiszącą siatką, kwalifikował
-        // się do wejścia PO RYNKU w środku szybkiego ruchu.
         for bk in self.baskets.iter().filter(|x| x.alive() && x.ma_pozycje()) {
-            if self.basket_exit_pending(bk.id) { continue; }
+            if self.basket_exit_pending(bk.id) {
+                continue;
+            }
             if bk.fast_addons >= maks || bk.tp_stage < min_stage {
                 continue;
             }
             if ostyg > 0 && bk.last_addon_ts > 0 && ts - bk.last_addon_ts < ostyg {
                 continue;
             }
-            // ruch W STRONĘ koszyka
             let ruch = (mid - baza) * bk.side.sign();
             if ruch < prog {
                 continue;
@@ -12086,25 +10118,12 @@ impl Engine {
             if limit > 0 && b.positions().len() >= limit as usize {
                 break;
             }
-            // NIEZMIENNIK KRAWĘDZI. Dokładka tempowa wchodzi po rynku i nie
-            // pyta o strefę wcale — wyzwalaczem jest sama PRĘDKOŚĆ ceny.
-            // Ruch „w stronę koszyka" jest zwykle ruchem OD strefy, ale przy
-            // sygnale odwróconym (koszyk kupna, cena wraca z dołu) trafia
-            // dokładnie pod dalszą krawędź.
             if self.za_dalsza_krawedzia(side, q.entry(side), sig_lo, sig_hi) {
                 continue;
             }
-            // TA ŚCIEŻKA NIE WOŁA `entry_gate` — sprawdza wyłącznie licznik
-            // pozycji, mimo komentarza wyżej twierdzącego, że „bramka
-            // ekspozycji obowiązuje TAK SAMO jak przy zwykłym wejściu".
-            // Dopóki `fast_addon_move_usd = 0` w każdym wydanym presecie,
-            // cała funkcja wychodzi wcześniej i nikt tego nie zauważył.
             if !self.margines_pozwala(b, self.cfg.ml_min_fast_addon) {
                 break;
             }
-            // `lot_max` ogranicza KAŻDE pojedyncze zlecenie — mnożnik dokładki
-            // stosowany PO klamrach lot_size potrafił go przekroczyć (10 × 1,5
-            // = 15 lotów), czyli obchodził sufit, dla którego lot_max istnieje.
             let mut vol = (self.lot_size(self.podstawa_lota())
                 * self.cfg.fast_addon_lot_mult.max(0.0))
             .max(self.cfg.lot_min);
@@ -12112,11 +10131,6 @@ impl Engine {
                 vol = vol.min(self.cfg.lot_max);
             }
 
-            // Nie wysyłaj w kółko zlecenia, którego ostatni TP jest już za
-            // rynkiem. Jest to zużyta okazja, nie przejściowy błąd transportu:
-            // broker odpowie InvalidStops na każdym następnym ticku. Zużycie
-            // slotu zachowuje ten sam fail-safe kontrakt co każda wysłana
-            // (także odrzucona/niejednoznaczna) próba dokładki.
             if let Some(tp) = tp_ost {
                 if !tp_is_valid(side, tp, q, b.stops_level()) {
                     if let Some(bk) = self.basket_mut(id) {
@@ -12134,16 +10148,19 @@ impl Engine {
                 }
             }
             cien::z(cakt::A_DOLOZENIE, id as u64, czr::Z_FAST_ADDON, 0);
-            let res = self.open_market_order(b, OrderReq {
-                side,
-                volume: vol,
-                sl: self.broker_sl(bsl, side),
-                tp: tp_ost,
-                basket: Some(id),
-                level: -4,
-                is_toucher: false,
-                comment: format!("B{id}"),
-            });
+            let res = self.open_market_order(
+                b,
+                OrderReq {
+                    side,
+                    volume: vol,
+                    sl: self.broker_sl(bsl, side),
+                    tp: tp_ost,
+                    basket: Some(id),
+                    level: -4,
+                    is_toucher: false,
+                    comment: format!("B{id}"),
+                },
+            );
             match res {
                 Ok(_) => {
                     if let Some(bk) = self.basket_mut(id) {
@@ -12173,11 +10190,6 @@ impl Engine {
                     );
                 }
                 Err(e) => {
-                    // Odmowa brokera nie może zapętlić reguły: zapisujemy
-                    // próbę tak samo jak udaną, żeby nie dobijać się co tick.
-                    // `Rejected` może być też niejednoznacznym ACK wykonania;
-                    // zużycie slotu jest jedyną bezpieczną decyzją bez
-                    // potwierdzenia, że zlecenie na pewno nie powstało.
                     if let Some(bk) = self.basket_mut(id) {
                         bk.fast_addons = bk.fast_addons.saturating_add(1).min(maks);
                         bk.last_addon_ts = ts;
@@ -12192,16 +10204,9 @@ impl Engine {
         if self.cfg.zone_exit_adverse_s == 0.0 {
             return;
         }
-        // KONTROLA LUSTRZANA. Wartość UJEMNA odpala tę samą maszynerię na
-        // stronie ZA NAMI. Bez niej nie da się odróżnić „reguła czyta kierunek"
-        // od „kasowanie limitów co jakiś czas zawsze pomaga" — a to drugie
-        // tłumaczyłoby wynik bez żadnej informacji.
         let lustro = self.cfg.zone_exit_adverse_s < 0.0;
         let prog = (self.cfg.zone_exit_adverse_s.abs() * 1000.0) as i64;
         let mut dojrzale: Vec<u32> = Vec::new();
-        // Reguła mierzy „ile czasu rynek stoi PRZECIWKO NAM" — a przeciwko
-        // nam stoi tylko wtedy, gdy coś trzymamy. Koszyk bez pozycji nie
-        // traci na ruchu poza strefą ani centa.
         for bk in self
             .baskets
             .iter_mut()
@@ -12213,7 +10218,6 @@ impl Engine {
             } else {
                 (bk.zone_hi, bk.zone_lo)
             };
-            // strona PRZECIWNA: kupno traci pod strefą, sprzedaż nad nią
             let przeciw = match (bk.side, lustro) {
                 (Side::Buy, false) | (Side::Sell, true) => q.bid < lo,
                 (Side::Sell, false) | (Side::Buy, true) => q.ask > hi,
@@ -12256,18 +10260,9 @@ impl Engine {
                 }
             }
             let skasowane = self.cancel_pendings(b, id);
-            // Done dopiero po POTWIERDZONYCH zamknięciach (wzorzec
-            // `zostalo > 0` z wygaśnięcia) — bezwarunkowe Done przy odmowie
-            // brokera zostawiało pozycję-SIEROTĘ bez właściciela. Zerowanie
-            // `adverse_since` niżej wystarcza jako kadencja: cena wciąż stoi
-            // poza strefą, więc reguła sama ponowi po pełnym progu czasu.
             let zostalo = ile_bylo - zamkniete;
             self.book_command_profit_legacy(id, wynik);
             if let Some(bk) = self.basket_mut(id) {
-                // Znacznik zerujemy TU, a nie przy powrocie ceny: bez tego
-                // koszyk z pozostawionymi pozycjami wpadałby w regułę na
-                // każdym ticku i zaśmiecał dziennik setkami wpisów o zerowym
-                // skutku.
                 bk.adverse_since = 0;
                 if zamykaj && zostalo == 0 {
                     bk.state = BasketState::Done;
@@ -12334,8 +10329,6 @@ impl Engine {
         let okno = (self.cfg.trend_filter_window_h.max(1.0) * 3_600_000.0) as i64;
         let t0 = ts - okno;
         let teraz = self.price_hist.last()?.1;
-        // najstarsza próbka MIEŚCIĄCA SIĘ w oknie; gdy bufor jest krótszy
-        // niż okno, nie udajemy, że wiemy — zwracamy `None`
         let dawniej = self.price_hist.iter().find(|(t, _)| *t >= t0)?;
         if self
             .price_hist
@@ -12411,9 +10404,6 @@ impl Engine {
                 Some(bk) => (bk.side, bk.levels.clone()),
                 None => continue,
             };
-            // Reżim oceniamy po cenie NAJLEPSZEGO nieaktywnego szczebla —
-            // tego, po którym nastąpiłoby wypełnienie. Przy kupnie jest to
-            // szczebel najniższy, przy sprzedaży najwyższy.
             let odniesienie = match side {
                 Side::Buy => poziomy
                     .iter()
@@ -12441,13 +10431,6 @@ impl Engine {
                     );
                 }
             } else if wolno && wiszace == 0 {
-                // `true`, nie `false` — z tego samego powodu, dla którego
-                // budzenie SESYJNE ma je od zawsze. Przy `false` reżim odbudowuje
-                // CAŁĄ siatkę od nowa, więc odstawia zlecenia także na szczeblach,
-                // które już się wypełniły (ciche re-entry) i na tych, które
-                // skasowała reguła „plan wykonał się bez nas". Reguła kasująca
-                // siatkę była w ten sposób cicho cofana przez regułę o zupełnie
-                // innym temacie.
                 let n = self.sync_grid(b, id, q.ts, true);
                 if n > 0 {
                     self.basket_note(
@@ -12464,12 +10447,9 @@ impl Engine {
         if !self.cfg.rearm_grid_on_return {
             return;
         }
-        // Przezbrojenie kładzie CAŁĄ siatkę od nowa, więc jego koszt
-        // marginesowy jest taki jak pierwszego wejścia — i ma własną oś.
         if !self.margines_pozwala(b, self.cfg.ml_min_rearm) {
             return;
         }
-        // Przezbrojenie jest WEJŚCIEM, więc obowiązują wszystkie bramki.
         if self.wejscie_zablokowane(b, q.ts) {
             return;
         }
@@ -12478,18 +10458,16 @@ impl Engine {
             .baskets
             .iter()
             .filter(|x| {
-                if !x.alive() || x.levels.is_empty() || self.basket_exit_pending(x.id)
-                    || self.entry_edit_blocks(Some(x.id)) {
+                if !x.alive()
+                    || x.levels.is_empty()
+                    || self.basket_exit_pending(x.id)
+                    || self.entry_edit_blocks(Some(x.id))
+                {
                     return false;
                 }
                 if x.had_positions {
                     return true;
                 }
-                // USPIENIE: koszyk BEZ ani jednego wypelnienia tez moze wrocic,
-                // jesli oś na to pozwala i setup nie jest jeszcze przeterminowany.
-                // Warunki 1 i 2 nizej (cena w strefie, stop nieprzebity) i tak
-                // musza przejsc — tu decydujemy tylko o tym, czy koszyk W OGOLE
-                // jest kandydatem.
                 if !self.cfg.rearm_bez_pozycji {
                     return false;
                 }
@@ -12500,9 +10478,6 @@ impl Engine {
                 let wiek_ms = q.ts.saturating_sub(x.created_ts);
                 (wiek_ms as f64) <= sufit * 3_600_000.0
             })
-            // RF/SPP redukuje ryzyko koszyka. Przy włączonej osi pełna
-            // siatka nie może tego ryzyka po cichu odtworzyć bez nowego
-            // sygnału kanału. Wyłączone = stara ścieżka co do bitu.
             .filter(|x| !self.cfg.rearm_block_after_secured || !x.secured)
             .filter(|x| !self.cfg.spp_blocks_rearm_when_flat || !x.rearm_blocked_by_spp)
             .filter(|x| self.cfg.rearm_max_times == 0 || x.rearms < self.cfg.rearm_max_times)
@@ -12525,20 +10500,13 @@ impl Engine {
                     ),
                     None => continue,
                 };
-            // 1) cena musi WRÓCIĆ do strefy
             let px = q.entry(side);
             if px < lo - 1e-9 || px > hi + 1e-9 {
                 continue;
             }
-            // NIEZMIENNIK KRAWĘDZI: przezbrojenie kładzie CAŁĄ siatkę od nowa,
-            // więc przy cenie za dalszą krawędzią wariant zastępczy zamieniłby
-            // ją w komplet zleceń rynkowych pod strefą. `sync_grid` już tego
-            // nie zrobi, ale odmowa TU oszczędza cały przebieg i wpis w logu
-            // mówi prawdziwy powód.
             if self.za_dalsza_krawedzia(side, px, sig_lo, sig_hi) {
                 continue;
             }
-            // 2) setup nie może być już unieważniony
             if let Some(s) = sl {
                 let przebity = match side {
                     Side::Buy => px <= s,
@@ -12548,8 +10516,6 @@ impl Engine {
                     continue;
                 }
             }
-            // 3) Jawny próg wyniku (zrealizowane + otwarte). Zero wymaga >=0;
-            // ujemna wartość świadomie dopuszcza stratę, nie usuwa jej z ledger.
             let otwarte: f64 = b
                 .positions()
                 .iter()
@@ -12557,24 +10523,19 @@ impl Engine {
                 .map(|p| p.profit_usd(q))
                 .sum();
             let wynik = zrealizowane + otwarte;
-            // KOSZYK USPIONY ma wynik ZERO z definicji — nigdy nic nie zagral.
-            // Zadanie od niego dodatniego wyniku unieważniałoby oś w jedynym
-            // przypadku, dla którego powstała. Bezpieczeństwo daje mu warunek 2
-            // (stop nieprzebity) i sufit wieku, a nie zysk, którego nie ma.
             let uspiony = !mial_pozycje;
             if !uspiony && wynik < self.cfg.rearm_min_basket_profit {
                 continue;
             }
 
-            // Telemetry only: freeze the inputs BEFORE new orders change
-            // exposure. The old post-order snapshot could not explain which
-            // ledger authorized the rearm. No change to the trading decision.
-            let audit_rearm = self.journal.wants(EventLevel::Info).then(|| (
-                self.jsnap(b),
-                self.basket(id).map(|bk| bk.secured).unwrap_or(false),
-                b.close_receipt_reconciliation_active(),
-                b.close_receipts_pending(),
-            ));
+            let audit_rearm = self.journal.wants(EventLevel::Info).then(|| {
+                (
+                    self.jsnap(b),
+                    self.basket(id).map(|bk| bk.secured).unwrap_or(false),
+                    b.close_receipt_reconciliation_active(),
+                    b.close_receipts_pending(),
+                )
+            });
             let dostawione = self.sync_grid(b, id, q.ts, false);
             if dostawione == 0 {
                 continue;
@@ -12617,9 +10578,6 @@ impl Engine {
                         .put("rearm_block_after_secured", self.cfg.rearm_block_after_secured)
                         .put("close_receipt_reconcile_active", receipts_active)
                         .put("close_receipts_pending_before", receipts_pending)
-                        // Human-readable numbers above keep the old journal's
-                        // 4-decimal convention. Bits preserve exact decision
-                        // operands even when a threshold differs below 0.0001.
                         .put("decision_inputs_f64_bits", serde_json::json!({
                             "bid": format!("{:016x}", q.bid.to_bits()),
                             "ask": format!("{:016x}", q.ask.to_bits()),
@@ -12634,20 +10592,6 @@ impl Engine {
         }
     }
 
-    /// DRABINA WEJŚCIA RYNKOWEGO: kolejny szczebel co `market_entry_step`.
-    ///
-    /// To jest treść, którą opis `market_entry_step` obiecywał od zawsze,
-    /// a której kod nie miał. Pole miało w całym silniku JEDNO wywołanie —
-    /// w `reentry_pass` — więc pierwszego wejścia rynkowego nie dotykało:
-    /// wszystkie jednostki wszystkich poziomów szły w jednym ticku po jednej
-    /// cenie. Tu odmierzamy je ruchem rynku.
-    ///
-    /// „Na korzyść wejścia" i „przeciw pozycji" to dla dokładania ta sama
-    /// strona: dla kupna cena musi SPAŚĆ o krok, żeby kolejny szczebel wszedł
-    /// taniej. Bez tego warunku bot dokładałby na każdym ticku.
-    ///
-    /// Cały przebieg jest martwy poza `market_entry_mode = Laddered`, więc
-    /// żaden wydany preset (wszystkie mają `auto_limit = true`) go nie dotyka.
     fn market_ladder_pass<B: Broker>(&mut self, b: &mut B, q: &Quote) {
         if !self.margines_pozwala(b, self.cfg.ml_min_drabina) {
             return;
@@ -12655,7 +10599,6 @@ impl Engine {
         if self.cfg.market_entry_mode != MarketEntryMode::Laddered || self.cfg.auto_limit {
             return;
         }
-        // Dokładanie jest WEJŚCIEM, więc obowiązują wszystkie bramki.
         if self.wejscie_zablokowane(b, q.ts) {
             return;
         }
@@ -12665,7 +10608,6 @@ impl Engine {
             .iter()
             .filter(|x| x.alive() && !x.is_limit && !x.levels.is_empty())
             .filter(|x| !self.basket_exit_pending(x.id))
-            // został jeszcze jakiś nieuwolniony szczebel?
             .filter(|x| x.levels.iter().any(|g| !g.filled && !g.cancelled))
             .map(|x| x.id)
             .collect();
@@ -12676,7 +10618,6 @@ impl Engine {
                 None => continue,
             };
             let px = q.entry(side);
-            // setup unieważniony — do trupa się nie dokłada
             if let Some(s) = sl {
                 let przebity = match side {
                     Side::Buy => px <= s,
@@ -12691,8 +10632,6 @@ impl Engine {
                     continue;
                 }
             }
-            // `sync_grid` sam wybierze najpłytszy nietknięty szczebel, sam
-            // przytnie wolumen do budżetu i sam zapisze `last_entry_px`.
             if self.sync_grid(b, id, q.ts, false) > 0 {
                 self.basket_note(
                     id,
@@ -12703,21 +10642,7 @@ impl Engine {
         }
     }
 
-    /// RE-ENTRY: powrót ceny do strefy po trafionym celu.
-    ///
-    /// „TP1 HIT AGAIN AFTER PULLING BACK" — sygnalista prowadzi strefę, a nie
-    /// pojedynczą transakcję, więc powrót do niej jest kolejną okazją, a nie
-    /// końcem setupu. Trzy warunki, bez których to zamienia się w dokładanie
-    /// do przegranej pozycji:
-    ///
-    ///  * etap celu ≥ `reenter_min_tp_stage` (domyślnie: po TP1),
-    ///  * cena musi przejść `market_step()` NA NASZĄ KORZYŚĆ od ostatniego
-    ///    wejścia — inaczej bot dokłada pozycję na każdym ticku w strefie,
-    ///  * obowiązują wszystkie zwykłe bramki wejść.
     fn reentry_pass<B: Broker>(&mut self, b: &mut B, q: &Quote) {
-        // Re-entry wchodzi PO RYNKU, czyli natychmiast zamienia się
-        // w margines — a `reenter_max = 0` we wszystkich wydanych presetach
-        // znaczy BEZ LIMITU powtórzeń.
         if !self.margines_pozwala(b, self.cfg.ml_min_reentry) {
             return;
         }
@@ -12727,9 +10652,6 @@ impl Engine {
         if self.wejscie_zablokowane(b, q.ts) {
             return;
         }
-        // BRAMKA KAPITAŁOWA: ile dokładek po celu wolno zrobić, zanim konto
-        // urośnie. Na 200 $ każda dokładka to kolejna warstwa przy locie
-        // leżącym na podłodze — koszt nieproporcjonalny do salda.
         let reenter_lim = self.kap_u(
             self.cfg.reenter_max,
             self.cfg.reenter_max_small,
@@ -12741,18 +10663,12 @@ impl Engine {
             .filter(|x| x.alive() && x.had_positions)
             .filter(|x| !self.basket_exit_pending(x.id))
             .filter(|x| x.tp_stage >= self.cfg.reenter_min_tp_stage)
-            // GÓRNY próg ważności — patrz `no_reenter_from_stage`. Nadawca:
-            // „every single trade is valid until stop loss or TP2".
             .filter(|x| {
                 self.cfg.no_reenter_from_stage == 0
                     || x.tp_stage < self.cfg.no_reenter_from_stage as usize
             })
-            // Po „RISK FREE" kanał kończy budowanie pozycji. Dokładka po tym
-            // komunikacie odbudowuje ekspozycję, którą kanał właśnie zdjął.
             .filter(|x| !self.cfg.reenter_stop_after_riskfree || !x.secured)
             .filter(|x| reenter_lim == 0 || x.reentries < reenter_lim)
-            // ANTY-PIŁA: bez odstępu od ostatniego celu bot dokłada natychmiast
-            // po trafieniu i piłuje w kółko ten sam poziom.
             .filter(|x| {
                 self.cfg.reenter_min_return_s <= 0.0
                     || x.last_tp_ts == 0
@@ -12783,14 +10699,9 @@ impl Engine {
             if px < lo - 1e-9 || px > hi + 1e-9 {
                 continue;
             }
-            // NIEZMIENNIK KRAWĘDZI. Warunek wyżej pilnuje strefy ROBOCZEJ
-            // (`zone_lo`/`zone_hi`), a ta przy `entry_deep_offset > 0` sięga
-            // POD krawędź z sygnału — dokładka wchodziłaby wtedy w miejsce,
-            // którego zakazuje siatka.
             if self.za_dalsza_krawedzia(side, px, sig_lo, sig_hi) {
                 continue;
             }
-            // sygnał, którego SL już padł, nie jest okazją
             if let Some(s) = sl {
                 let breached = match side {
                     Side::Buy => px <= s,
@@ -12824,8 +10735,11 @@ impl Engine {
                 None
             };
             let skala = self.market_risk_scale(lot, px, sl, cap);
-            let vol = if self.cfg.order_volume_contract_v2 { lot * skala }
-                else { round_lot((lot * skala).max(self.cfg.lot_min)) };
+            let vol = if self.cfg.order_volume_contract_v2 {
+                lot * skala
+            } else {
+                round_lot((lot * skala).max(self.cfg.lot_min))
+            };
             if let (Some(c), Some(s)) = (cap, sl) {
                 let ryzyko = (px - s).abs() * XAU_CONTRACT * vol;
                 if ryzyko > c + 1e-9 {
@@ -12842,16 +10756,19 @@ impl Engine {
             }
 
             cien::z(cakt::A_DOLOZENIE, id as u64, czr::Z_REENTRY, 0);
-            if let Ok(t) = self.open_market_order(b, OrderReq {
-                side,
-                volume: vol,
-                sl: self.broker_sl(sl, side),
-                tp,
-                basket: Some(id),
-                level: -2,
-                is_toucher: false,
-                comment: format!("B{id}R"),
-            }) {
+            if let Ok(t) = self.open_market_order(
+                b,
+                OrderReq {
+                    side,
+                    volume: vol,
+                    sl: self.broker_sl(sl, side),
+                    tp,
+                    basket: Some(id),
+                    level: -2,
+                    is_toucher: false,
+                    comment: format!("B{id}R"),
+                },
+            ) {
                 self.apply_virtual_sl(b, t, sl);
                 if let Some(bk) = self.basket_mut(id) {
                     bk.tickets.push(t);
@@ -12870,17 +10787,6 @@ impl Engine {
         }
     }
 
-    /// REVERSAL-EXIT: bankuj zysk, gdy rynek gwałtownie zawraca.
-    ///
-    /// Warunek jest dwuczłonowy i oba człony są potrzebne. Sam zakres mówi
-    /// tylko „rynek jest ruchliwy"; samo nachylenie odpala się przy każdym
-    /// spokojnym dryfie. Dopiero „duży zakres ORAZ szybki ruch przeciw nam"
-    /// opisuje sytuację, w której trzymanie otwartego zysku przestaje się
-    /// opłacać.
-    ///
-    /// Okno liczone jest wyłącznie z czasu zdarzeń. Poprzedni bot cache'ował
-    /// wynik po DŁUGOŚCI bufora, a ta po zapełnieniu przestawała się zmieniać —
-    /// reguła zamarzała na stałej wartości i cicho przestawała działać.
     fn rev_exit_sweep<B: Broker>(&mut self, b: &mut B, q: &Quote) {
         if self.cfg.rev_exit_range <= 0.0 {
             return;
@@ -12917,13 +10823,13 @@ impl Engine {
                 Some(p) => p.clone(),
                 None => continue,
             };
-            if p.frozen || p.basket.map(|id| self.basket_exit_pending(id)).unwrap_or(false) {
+            if p.frozen
+                || p.basket
+                    .map(|id| self.basket_exit_pending(id))
+                    .unwrap_or(false)
+            {
                 continue;
             }
-            // Ruch PRZECIW tej pozycji mierzymy od SKRAJU KORZYSTNEGO dla niej,
-            // a nie od początku okna. „Odwrócenie" to oddanie już osiągniętej
-            // przewagi — liczone od startu okna byłoby po prostu trendem i dla
-            // pozycji otwartej w międzyczasie nie znaczyłoby nic.
             let against = match p.side {
                 Side::Buy => hi - q.mid(),
                 Side::Sell => q.mid() - lo,
@@ -12934,13 +10840,6 @@ impl Engine {
             if p.profit_pts(q) < self.cfg.rev_exit_profit {
                 continue;
             }
-            // ŚWIADOMIE po rynku, mimo `exit_via_limit`. Ta reguła odpala się
-            // dokładnie wtedy, gdy cena szybko idzie przeciw nam — czekanie na
-            // drugą stronę spreadu znaczyłoby tu czekanie na powrót, którego
-            // reguła właśnie się wyparła.
-            // Własny kod `RevExit`, nie `Harvest`: reguła z historią
-            // 12-godzinnego zamarznięcia musi być widoczna w forensyce
-            // osobno — pod `Harvest` rozjazd −80 % był nieodróżnialny.
             cien::z(cakt::A_ZYCIE_POZ, t, czr::Z_REV_EXIT, 0);
             if b.close_position(t, CloseReason::RevExit).is_ok() {
                 closed += 1;
@@ -12957,9 +10856,6 @@ impl Engine {
         }
     }
 
-    // ============================================================
-    //  BRAMKI
-    // ============================================================
 
     pub fn entry_gate<B: Broker>(&self, b: &B, ts: Ts) -> Gate {
         self.bramka_wejscia::<B, true>(b, ts)
@@ -12971,9 +10867,6 @@ impl Engine {
     }
 
     fn bramka_wejscia<B: Broker, const MSG: bool>(&self, b: &B, ts: Ts) -> Gate {
-        // Zdanie powstaje TYLKO w wariancie z tekstami. Przy `MSG = false`
-        // domknięcie nie jest wołane, a `String::new()` nie alokuje —
-        // monomorfizacja wycina całą maszynerię `format!`.
         #[inline(always)]
         fn zd<const MSG: bool>(f: impl FnOnce() -> String) -> String {
             if MSG {
@@ -12983,17 +10876,22 @@ impl Engine {
             }
         }
         if self.continuation_entry_blocked() {
-            return Gate::Halted(zd::<MSG>(||"CONTINUATION REVIEW: strategy state is unbound or incomplete".into()));
+            return Gate::Halted(zd::<MSG>(|| {
+                "CONTINUATION REVIEW: strategy state is unbound or incomplete".into()
+            }));
         }
-        if let Some(reason)=self.cost_entry_blocked(b) {
-            return Gate::Halted(zd::<MSG>(||format!("COST HOLD: {reason}")));
+        if let Some(reason) = self.cost_entry_blocked(b) {
+            return Gate::Halted(zd::<MSG>(|| format!("COST HOLD: {reason}")));
         }
         if let Some(r) = &self.halted {
             return Gate::Halted(zd::<MSG>(|| r.clone()));
         }
         if b.close_receipts_pending() {
             return Gate::Blocked(
-                zd::<MSG>(|| "oczekiwanie na zaksięgowanie potwierdzonych zamknięć; nowe wejścia wstrzymane".into()),
+                zd::<MSG>(|| {
+                    "oczekiwanie na zaksięgowanie potwierdzonych zamknięć; nowe wejścia wstrzymane"
+                        .into()
+                }),
                 RejectCode::EntryGateBlocked,
             );
         }
@@ -13010,22 +10908,12 @@ impl Engine {
                 RejectCode::StreakPause,
             );
         }
-        // Z-2: doba zamknięta przez strażnika (stop dnia / EOD / weekend).
-        //
-        // To jest DRUGA POŁOWA reguły, której dotąd nie było. Strażnik
-        // zamykał pozycje i na tym kończył, a bramka — nic o tym nie wiedząc —
-        // wpuszczała następny sygnał w tę samą dobę. Para „otwórz i natychmiast
-        // zamknij" kosztuje pełny spread i powtarzała się do północy silnika.
         if self.day_stop != i64::MIN && day_of(ts, self.cfg.session_offset()) == self.day_stop {
             return Gate::Blocked(
                 zd::<MSG>(|| "doba zamknięta przez strażnika".into()),
                 RejectCode::EntryGateBlocked,
             );
         }
-        // OKNO GODZIN — pytanie o godzinę PRZYJŚCIA zadajemy tylko wtedy,
-        // gdy oś `sesja_bramka` tego chce. W trybie `Wypelnienie` sygnał wchodzi
-        // o każdej porze, a o godzinę pyta dopiero `sesja_limity_pass` w chwili,
-        // gdy limit ma się wypełnić.
         if self.cfg.sesja_bramka != crate::settings::SesjaBramka::Wypelnienie {
             let hour = hour_of(ts, self.cfg.session_offset());
             if !self.cfg.hours_ok(hour) {
@@ -13066,24 +10954,18 @@ impl Engine {
             n => n + bonus_poz,
         };
         if wlasny_poz > 0 || self.pulapy.max_pozycji > 0 {
-            // `b.positions()` to pozycje TEGO silnika: warstwa żywa podaje
-            // każdemu silnikowi WIDOK odfiltrowany po slocie koszyka
-            // (`conduit_core::routing`). Przy pojedynczym silniku widok
-            // przepuszcza wszystko, więc liczba jest ta sama co przed zmianą.
             let wlasne = b.positions().len()
                 + if self.cfg.exposure_count_pendings {
                     b.pendings().len()
                 } else {
                     0
                 };
-            // WARSTWA 1 — limit PRESETU, wyłącznie z własnych pozycji.
             if wlasny_poz > 0 && wlasne >= wlasny_poz as usize {
                 return Gate::Blocked(
                     zd::<MSG>(|| format!("limit ekspozycji ({wlasne})")),
                     RejectCode::MaxOpenPositions,
                 );
             }
-            // WARSTWA 2 — pułap ŁAŃCUCHA, z całego rachunku.
             if self.pulapy.max_pozycji > 0 {
                 let razem = wlasne + self.obce.pozycje as usize;
                 if razem >= self.pulapy.max_pozycji as usize {
@@ -13128,14 +11010,12 @@ impl Engine {
                 }
             }
             let (obce_buy, obce_sell) = (self.obce.loty_buy, self.obce.loty_sell);
-            // WARSTWA 1 — kierunkowy limit PRESETU, z własnych lotów.
             if limit_kier > 0.0 && buy.max(sell) >= limit_kier {
                 return Gate::Blocked(
                     zd::<MSG>(|| "limit ekspozycji kierunkowej".into()),
                     RejectCode::MaxDirectionalLots,
                 );
             }
-            // WARSTWA 2 — kierunkowy pułap ŁAŃCUCHA, z całego rachunku.
             if self.pulapy.max_lotow_kierunkowo > 0.0
                 && (buy + obce_buy).max(sell + obce_sell) >= self.pulapy.max_lotow_kierunkowo
             {
@@ -13213,11 +11093,6 @@ impl Engine {
                 );
             }
         }
-        // PODŁOGA EQUITY CAŁEGO RACHUNKU — bezpiecznik ostatniej instancji.
-        //
-        // `equity_floor_pct` wyżej liczy procent od salda startowego TEGO
-        // silnika; przy dwóch formatach żaden z nich nie zna equity konta.
-        // Ta podłoga jest kwotowa i czyta rachunek wprost od brokera.
         if self.pulapy.podloga_equity_usd > 0.0 {
             let eq = b.account().equity;
             if eq <= self.pulapy.podloga_equity_usd {
@@ -13232,11 +11107,6 @@ impl Engine {
                 );
             }
         }
-        // CEL I LIMIT STRATY DNIA LICZONE ZE WSZYSTKICH FORMATÓW RAZEM.
-        //
-        // Cel dzienny presetu (wyżej) mówi „ten format zrobił swoje".
-        // Ten pułap mówi „rachunek zrobił swoje" — i dopiero on ma sens,
-        // gdy dwa formaty dokładają się do tego samego wyniku.
         if self.pulapy.cel_dnia_usd > 0.0 || self.pulapy.cel_dnia_pct > 0.0 {
             let dzis =
                 self.stats.equity - self.stats.day_start_equity + self.obce.zrealizowane_dzis;
@@ -13280,21 +11150,11 @@ impl Engine {
                 }
             }
         }
-        // WEZWANIE DO UZUPEŁNIENIA DEPOZYTU.
-        //
-        // Broker przy tym poziomie NIE zamyka pozycji — przestaje przyjmować
-        // nowe. Dokładnie to robi ta bramka: istniejące koszyki żyją dalej,
-        // ale nic nowego nie wchodzi. Bez tego pole `margin_call_level_pct`
-        // było w panelu, w mapowaniu i w presetach, a silnik go nie czytał —
-        // czyli kontrolka obiecywała ochronę, której nie było.
         if self.cfg.margin_call_level_pct > 0.0 {
             let acc = b.account();
             if acc.margin > 0.0 {
                 let poziom = acc.equity / acc.margin * 100.0;
                 if poziom <= self.cfg.margin_call_level_pct {
-                    // własny kod, nie `EquityFloor` — pod jednym kodem
-                    // siedziały cztery mechanizmy i rejestr ich nie
-                    // rozróżniał (precedens F2a)
                     return Gate::Blocked(
                         zd::<MSG>(|| {
                             format!(
@@ -13307,14 +11167,6 @@ impl Engine {
                 }
             }
         }
-        // BRAMKA POZIOMU MARGINESU — ta sama miara, ale WCZEŚNIEJ i szerzej.
-        //
-        // `margin_call_level_pct` wyżej stoi domyślnie na 50 %, czyli tam,
-        // gdzie broker już dzwoni, i patrzy wyłącznie na margines pozycji JUŻ
-        // OTWARTYCH. `ml_min_wejscie` pozwala zatrzymać się wcześniej, a przy
-        // `ml_licz_wiszace` liczy także to, co dopiero się wypełni — bo trzy
-        // koszyki po pięć szczebli to piętnaście zleceń, których stara bramka
-        // nie widziała wcale.
         if !self.margines_pozwala(b, self.cfg.ml_min_wejscie) {
             let (teraz, docelowy) = self.poziom_marginesu(b);
             let ml = if self.cfg.ml_licz_wiszace {
@@ -13335,7 +11187,6 @@ impl Engine {
                         }
                     )
                 }),
-                // własny kod z tego samego powodu co `MarginCall` wyżej
                 RejectCode::MarginLevel,
             );
         }
@@ -13371,12 +11222,6 @@ impl Engine {
         None
     }
 
-    /// Czy bramka zmienności właśnie ucisza filtr.
-    ///
-    /// Potrzebne osobno od `regime_ok`, bo przy `RegimeGdyRozerwany::Miekko`
-    /// wyciszenie nie ma przepuszczać sygnału w pełnym rozmiarze, tylko
-    /// wpuścić go mniejszą stawką. Bez tej informacji `handle_entry` nie
-    /// odróżnia „reżim pozwala" od „reżim nie ma zdania".
     fn rezim_wyciszony(&self) -> bool {
         if self.cfg.regime_filter == RegimeFilter::Off || self.cfg.regime_zmiennosc_max <= 0.0 {
             return false;
@@ -13384,10 +11229,6 @@ impl Engine {
         matches!(self.zakres_okna_glownego(), Some(z) if z > self.cfg.regime_zmiennosc_max)
     }
 
-    /// Zakres (max − min) OKNA GŁÓWNEGO — wspólna miara „czy rynek jest rozerwany".
-    ///
-    /// Osobna funkcja, bo bramki zmienności muszą pytać o JEDEN rynek, a nie
-    /// o każdy horyzont z osobna — patrz komentarz w `regime_prog`.
     fn zakres_okna_glownego(&self) -> Option<f64> {
         let n = (self.cfg.regime_ma_hours as usize).max(2);
         if self.price_hist.len() < n {
@@ -13402,17 +11243,6 @@ impl Engine {
         Some(hi - lo)
     }
 
-    /// PRÓG REŻIMU dla okna o zadanej długości — `None`, gdy okno milczy.
-    ///
-    /// Zwraca `None` w dwóch przypadkach: za mało historii albo zmienność okna
-    /// poza widełkami `regime_zmiennosc_min/max`. Brak zdania NIE jest zdaniem
-    /// przeciwnym — wołający ma wtedy przepuścić sygnał.
-    ///
-    /// `okno_awaryjne = true` = wołanie z przesiadki `KrotkieOkno`: bramka
-    /// `zakres > max` jest wtedy POMIJANA. To nie jest luzowanie, tylko cała
-    /// treść trybu — przesiadka następuje DOKŁADNIE dlatego, że zakres okna
-    /// głównego przekroczył `max`, więc okno awaryjne z tą bramką milczałoby
-    /// zawsze i `KrotkieOkno` było matematycznie tożsame z `Milcz`.
     fn regime_prog(&self, godzin: usize, okno_awaryjne: bool) -> Option<f64> {
         let n = godzin.max(2);
         if self.price_hist.len() < n {
@@ -13424,26 +11254,7 @@ impl Engine {
             .collect();
         let lo = okno.iter().cloned().fold(f64::INFINITY, f64::min);
         let hi = okno.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        // BRAMKI ZMIENNOŚCI — kiedy filtr ma w ogóle prawo głosu.
-        //
-        // Zakres liczymy z OKNA GŁÓWNEGO (`regime_ma_hours`), nie z okna,
-        // dla którego akurat liczymy próg. Pierwsza wersja mierzyła każde
-        // okno osobno i to było błędem: zakres 24 godzin jest z natury
-        // wielokrotnie mniejszy niż zakres 72 godzin, więc ten sam próg
-        // uciszał okno długie i nigdy nie uciszał krótkiego. Zgoda dwóch
-        // okien przestawała wtedy znaczyć to, co miała — stąd rozjazd,
-        // w którym bramka zmienności i drugie okno dawały osobno +192 %
-        // i 100 % dób dodatnich, a razem −62 %.
-        //
-        // „Czy rynek jest rozerwany" to jedno pytanie o rynek, nie osobne
-        // pytanie dla każdego horyzontu.
         if self.cfg.regime_zmiennosc_min > 0.0 || self.cfg.regime_zmiennosc_max > 0.0 {
-            // Rozgrzewka: dopóki okno główne nie ma kompletu próbek, MIARY
-            // rozerwania nie ma — zwracamy None (okno milczy), a nie zakres
-            // bieżącego okna. Zakres 6 h jest z natury wielokrotnie mniejszy
-            // niż zakres 72 h, więc podstawiony w te same widełki mierzyłby
-            // inne zjawisko i bramka na rozgrzewce znaczyłaby co innego niż
-            // po niej. Brak wiedzy nie zmienia zachowania — jak w `vol_factor`.
             let zakres = self.zakres_okna_glownego()?;
             if self.cfg.regime_zmiennosc_min > 0.0 && zakres < self.cfg.regime_zmiennosc_min {
                 return None;
@@ -13468,8 +11279,6 @@ impl Engine {
             }
             crate::settings::RegimeMiara::Kanal => (lo + hi) / 2.0,
             crate::settings::RegimeMiara::Wykladnicza => {
-                // Waga maleje wykładniczo w głąb historii; stała czasowa to
-                // połowa okna, więc ostatnia doba waży tyle, co cała reszta.
                 let tau = (n as f64 / 2.0).max(1.0);
                 let mut suma = 0.0;
                 let mut wagi = 0.0;
@@ -13494,8 +11303,6 @@ impl Engine {
         Some(prog)
     }
 
-    /// Czy JEDNO okno przepuszcza sygnał. `None` = okno nie ma zdania.
-    /// `okno_awaryjne` — patrz `regime_prog`.
     fn regime_okno_ok(
         &self,
         side: Side,
@@ -13504,8 +11311,6 @@ impl Engine {
         okno_awaryjne: bool,
     ) -> Option<bool> {
         let prog = self.regime_prog(godzin, okno_awaryjne)?;
-        // MARTWA STREFA — przy progu nie mamy wyraźnego sygnału, a brak
-        // sygnału to nie jest sygnał przeciwny.
         if self.cfg.regime_strefa_martwa > 0.0
             && (price - prog).abs() < self.cfg.regime_strefa_martwa
         {
@@ -13540,15 +11345,11 @@ impl Engine {
                     }
                 }
                 let o1 = self.regime_okno_ok(side, price, g1, awaryjne);
-                // DRUGIE OKNO — jedno okno nie odróżnia cofnięcia w trendzie
-                // od odwrócenia trendu. Przy włączonym oba muszą się zgadzać.
                 if self.cfg.regime_okno2_h > 0.0 {
                     let o2 =
                         self.regime_okno_ok(side, price, self.cfg.regime_okno2_h as usize, false);
                     return match (o1, o2) {
                         (Some(a), Some(b)) => a && b,
-                        // milczenie któregokolwiek okna nie blokuje —
-                        // brak zdania to nie jest zdanie przeciwne
                         (Some(a), None) => a,
                         (None, Some(b)) => b,
                         (None, None) => true,
@@ -13559,7 +11360,6 @@ impl Engine {
         }
     }
 
-    /// Ręczne wznowienie handlu mimo przekroczonego limitu.
     pub fn resume_trading(&mut self, ts: Ts) {
         if self.continuation_entry_blocked() {
             self.log(ts,2,"nie wznowiono: CONTINUATION REVIEW wymaga uzgodnienia stanu; strażnik ryzyka pozostaje bez zmian");
@@ -13607,30 +11407,52 @@ mod testy_price_tp_exact_performance {
                 reason: CloseReason::Tp,
                 last_attempt_ts: 123,
             });
-            bk.tickets = if n % 2 == 0 { vec![] } else { vec![n as u64 + 1] };
+            bk.tickets = if n % 2 == 0 {
+                vec![]
+            } else {
+                vec![n as u64 + 1]
+            };
             bk.tp_stage = n as usize % 5;
             bk.plan_wykonany_do = (n as usize / 3) % 5;
             bk.tps = vec![4010.125, 4020.75, 4030.03125];
             engine.baskets.push(bk);
         }
-        // Publiczne wznowienie/przycięcie może zmienić sloty, nie ID.
         engine.baskets.reverse();
         engine.baskets.rotate_left(31);
         for retry in [false, true] {
             engine.cfg.confirmed_exit_retry = retry;
-            let legacy_ids: Vec<u32> = engine.baskets.iter().filter(|bk| bk.alive())
-                .filter(|bk| !engine.basket_exit_pending(bk.id)).map(|bk| bk.id).collect();
+            let legacy_ids: Vec<u32> = engine
+                .baskets
+                .iter()
+                .filter(|bk| bk.alive())
+                .filter(|bk| !engine.basket_exit_pending(bk.id))
+                .map(|bk| bk.id)
+                .collect();
             let slots = engine.price_tp_slots();
-            assert_eq!(legacy_ids, slots.iter().map(|(_, id)| *id).collect::<Vec<_>>());
+            assert_eq!(
+                legacy_ids,
+                slots.iter().map(|(_, id)| *id).collect::<Vec<_>>()
+            );
             for (slot, id) in slots {
                 let old = engine.basket(id).unwrap();
                 let new = &engine.baskets[slot];
                 assert_eq!(new.id, old.id);
-                let old_stage = if old.ma_pozycje() { old.tp_stage } else { old.etap_obserwowany() };
-                let new_stage = if new.ma_pozycje() { new.tp_stage } else { new.etap_obserwowany() };
+                let old_stage = if old.ma_pozycje() {
+                    old.tp_stage
+                } else {
+                    old.etap_obserwowany()
+                };
+                let new_stage = if new.ma_pozycje() {
+                    new.tp_stage
+                } else {
+                    new.etap_obserwowany()
+                };
                 let cloned_targets = old.tps.clone();
                 assert_eq!(new_stage, old_stage);
-                assert_eq!(new.tps.get(new_stage).copied(), cloned_targets.get(old_stage).copied());
+                assert_eq!(
+                    new.tps.get(new_stage).copied(),
+                    cloned_targets.get(old_stage).copied()
+                );
             }
         }
     }
@@ -13641,7 +11463,6 @@ mod testy_price_tp_exact_performance {
         engine.on_message(&mut broker, &wiad(1, 1, None, WEJSCIE));
         let template = engine.baskets[0].clone();
         engine.baskets.clear();
-        // Duże ID / slot silnika nie może alokować wektora rozmiaru ID.
         for (i, id) in [3, 17, 1_000_003, u32::MAX - 1].into_iter().enumerate() {
             let mut bk = template.clone();
             bk.id = id;
@@ -13653,13 +11474,22 @@ mod testy_price_tp_exact_performance {
     }
 
     fn assert_cache_matches_linear(engine: &Engine) {
-        let ids = engine.baskets.iter().map(|bk| bk.id)
-            .chain([0, 3, 17, 1_000_003, u32::MAX - 1, u32::MAX]);
+        let ids = engine.baskets.iter().map(|bk| bk.id).chain([
+            0,
+            3,
+            17,
+            1_000_003,
+            u32::MAX - 1,
+            u32::MAX,
+        ]);
         for id in ids {
             let expected = engine.baskets.iter().find(|bk| bk.id == id);
             let actual = engine.basket(id);
-            assert_eq!(actual.map(|bk| (bk.id, bk.tp_stage, bk.sl)),
-                       expected.map(|bk| (bk.id, bk.tp_stage, bk.sl)), "ID={id}");
+            assert_eq!(
+                actual.map(|bk| (bk.id, bk.tp_stage, bk.sl)),
+                expected.map(|bk| (bk.id, bk.tp_stage, bk.sl)),
+                "ID={id}"
+            );
         }
     }
 
@@ -13671,7 +11501,10 @@ mod testy_price_tp_exact_performance {
         engine.baskets.reverse();
         assert_cache_matches_linear(&engine);
         engine.basket_mut(17).unwrap().sl = Some(1234.125);
-        assert_eq!(engine.baskets.iter().find(|bk| bk.id == 17).unwrap().sl, Some(1234.125));
+        assert_eq!(
+            engine.baskets.iter().find(|bk| bk.id == 17).unwrap().sl,
+            Some(1234.125)
+        );
         let mut replacement = engine.baskets[0].clone();
         replacement.id = 941;
         replacement.tp_stage = 9;
@@ -13720,7 +11553,6 @@ mod testy_price_tp_exact_performance {
 mod testy_rozmiar_zmiennoscia {
     use super::*;
 
-    /// Silnik z podstawionym mnożnikiem, bez ani jednego ticka.
     fn silnik(c: Settings, saldo: f64, mult: f64) -> Engine {
         let mut e = Engine::new(c, saldo);
         let mut z = e.stan_zmiennosci();
@@ -13761,7 +11593,6 @@ mod testy_rozmiar_zmiennoscia {
         }
     }
 
-    /// Włączony tryb MNOŻY lot bazowy — nie zastępuje go.
     #[test]
     fn wlaczony_tryb_mnozy_lot_bazowy() {
         let mut c = Settings::default();
@@ -13774,11 +11605,6 @@ mod testy_rozmiar_zmiennoscia {
         assert_eq!(silnik(c.clone(), 5000.0, 0.5).lot_size(5000.0), 0.50);
     }
 
-    /// SUFIT LOTA WYGRYWA Z MNOŻNIKIEM.
-    ///
-    /// Sufit jest polisą na ścianę marginesu; reguła rozmiaru jest hipotezą
-    /// badawczą. Hipoteza nie ma prawa zdjąć polisy — dlatego mnożnik siedzi
-    /// PRZED klamrami, a nie po nich.
     #[test]
     fn sufit_lota_wygrywa_z_mnoznikiem() {
         let mut c = Settings::default();
@@ -13842,8 +11668,6 @@ mod testy_rozmiar_zmiennoscia {
             "limit 1 pozycji = koszyk jednego zlecenia, nie dziesięciu"
         );
 
-        // Bez egzekwowania na wypełnieniu wiszące zlecenia wchodzą PONAD limit
-        // — plan zostaje nieprzycięty, bo taka jest prawda o tym ustawieniu.
         c.enforce_position_limit_on_fill = false;
         let ezn = Engine::new(c.clone(), 675.0);
         assert!(
@@ -13851,7 +11675,6 @@ mod testy_rozmiar_zmiennoscia {
             "bez egzekwowania limit nie jest sufitem pierwszej fali"
         );
 
-        // SUFIT LOTA obowiązuje KAŻDE ZLECENIE osobno, nie koszyk.
         c.entry_units = 5;
         c.max_open_positions = 0;
         c.lot_max = 0.01;
@@ -13862,20 +11685,15 @@ mod testy_rozmiar_zmiennoscia {
         );
     }
 
-    /// Ranga percentylowa: skrajne wartości dają 0 i 1, środek około 0,5.
     #[test]
     fn ranga_percentylowa_jest_w_przedziale() {
         let p: Vec<f64> = (0..100).map(|i| i as f64).collect();
         assert_eq!(Engine::ranga_percentylowa(&p, -1.0), 0.0);
         assert_eq!(Engine::ranga_percentylowa(&p, 1000.0), 1.0);
         assert!((Engine::ranga_percentylowa(&p, 50.0) - 0.5).abs() < 0.02);
-        // pusta próba nie ma prawa dać NaN — to poszłoby wprost w lot
         assert_eq!(Engine::ranga_percentylowa(&[], 3.0), 0.5);
     }
 
-    /// Profil sezonowy przeżywa wymianę silnika. Bez tego odsezonowanie
-    /// w trybie „dzień po dniu" jest martwe — a martwa reguła daje wynik
-    /// identyczny co do centa z wariantem wyłączonym i wygląda na parytet.
     #[test]
     fn profil_sezonowy_przenosi_sie_przez_wymiane_silnika() {
         let mut c = Settings::default();
@@ -13894,17 +11712,214 @@ mod testy_rozmiar_zmiennoscia {
         let (profil_po, ile_po) = nowy.profil_godzinowy();
         assert_eq!(profil_przed, profil_po);
         assert_eq!(ile_przed, ile_po);
-        // godzina 23 (suma 33) musi być ruchliwsza od godziny 0 (suma 10)
         assert!(profil_po[23] > profil_po[0]);
     }
 }
 
 #[cfg(test)]
+mod testy_trail_adaptive {
+    use super::*;
+
+    const T0: Ts = 1_755_000_000_000;
+
+    fn pozycja(side: Side, peak: f64, runner: bool) -> Position {
+        Position {
+            ticket: 1,
+            side,
+            volume: 0.01,
+            open_price: 4000.0,
+            open_ts: T0 - 120_000,
+            sl: Some(3990.0),
+            tp: None,
+            vsl: None,
+            basket: None,
+            level: 0,
+            frozen: false,
+            peak_pts: peak,
+            last_peak_ts: T0,
+            is_runner: runner,
+            is_toucher: false,
+            comment: String::new(),
+        }
+    }
+
+    fn silnik() -> Engine {
+        let mut c = Settings::default();
+        c.trail_adaptive_enabled = true;
+        c.trail_adaptive_runners_only = false;
+        c.trail_adaptive_window_s = 60.0;
+        c.trail_adaptive_min_samples = 4;
+        c.trail_adaptive_fast_vol_s = 15.0;
+        c.trail_adaptive_slow_vol_s = 60.0;
+        c.trail_adaptive_vol_ratio = 0.0;
+        c.trail_adaptive_trend_er = 0.6;
+        c.trail_adaptive_reversal_er = 0.6;
+        c.trail_adaptive_trend_gap_mult = 2.0;
+        c.trail_adaptive_chop_gap_mult = 0.8;
+        c.trail_adaptive_reversal_gap_mult = 0.5;
+        Engine::new(c, 600.0)
+    }
+
+    #[test]
+    fn signed_er_rozroznia_trend_i_odwrocenie_dla_strony() {
+        let mut e = silnik();
+        e.vol_hist = vec![
+            (T0 - 20_000, 4000.0),
+            (T0 - 15_000, 4001.0),
+            (T0 - 10_000, 4002.0),
+            (T0 - 5_000, 4003.0),
+        ];
+        let q = Quote {
+            ts: T0,
+            bid: 4003.9,
+            ask: 4004.1,
+        };
+        let snap = e.trail_adaptive_snapshot(&q).expect("wystarczają próbki");
+        assert!((snap.price_efficiency - 1.0).abs() < 1e-12);
+        assert_eq!(
+            e.trail_adaptive_gap(&pozycja(Side::Buy, 20.0, true), true, 10.0, Some(&snap)),
+            20.0
+        );
+        assert_eq!(
+            e.trail_adaptive_gap(&pozycja(Side::Sell, 20.0, true), true, 10.0, Some(&snap)),
+            5.0
+        );
+    }
+
+    #[test]
+    fn szum_uzywa_osobnego_mnoznika_a_klamry_sa_twarde() {
+        let mut e = silnik();
+        e.vol_hist = vec![
+            (T0 - 20_000, 4000.0),
+            (T0 - 15_000, 4002.0),
+            (T0 - 10_000, 3999.0),
+            (T0 - 5_000, 4001.0),
+        ];
+        let q = Quote {
+            ts: T0,
+            bid: 3999.9,
+            ask: 4000.1,
+        };
+        let snap = e.trail_adaptive_snapshot(&q).unwrap();
+        let p = pozycja(Side::Buy, 20.0, true);
+        assert_eq!(e.trail_adaptive_gap(&p, true, 10.0, Some(&snap)), 8.0);
+
+        e.cfg.trail_adaptive_min_gap = 9.0;
+        assert_eq!(e.trail_adaptive_gap(&p, true, 10.0, Some(&snap)), 9.0);
+        e.cfg.trail_adaptive_max_gap = 7.0; // odwrócone klamry normalizują się do 9
+        assert_eq!(e.trail_adaptive_gap(&p, true, 10.0, Some(&snap)), 9.0);
+    }
+
+    #[test]
+    fn przyszla_probka_nie_przecieka_do_decyzji() {
+        let mut e = silnik();
+        e.vol_hist = vec![
+            (T0 - 15_000, 4000.0),
+            (T0 - 10_000, 4001.0),
+            (T0 - 5_000, 4002.0),
+        ];
+        let q = Quote {
+            ts: T0,
+            bid: 4002.9,
+            ask: 4003.1,
+        };
+        let przed = e.trail_adaptive_snapshot(&q).unwrap();
+        e.vol_hist.push((T0 + 5_000, 3900.0));
+        let po = e.trail_adaptive_snapshot(&q).unwrap();
+        assert_eq!(przed, po, "punkt z przyszłości zmienił decyzję");
+    }
+
+    #[test]
+    fn brak_wiedzy_i_wylacznik_sa_scislym_noopem() {
+        let mut e = silnik();
+        e.vol_hist = vec![(T0 - 5_000, 4000.0)];
+        let q = Quote {
+            ts: T0,
+            bid: 4000.9,
+            ask: 4001.1,
+        };
+        assert!(e.trail_adaptive_snapshot(&q).is_none());
+
+        e.cfg.trail_adaptive_enabled = false;
+        e.cfg.trail_adaptive_trend_gap_mult = 99.0;
+        e.vol_hist = vec![
+            (T0 - 15_000, 4000.0),
+            (T0 - 10_000, 4001.0),
+            (T0 - 5_000, 4002.0),
+        ];
+        assert!(e.trail_adaptive_snapshot(&q).is_none());
+        assert_eq!(
+            e.trail_adaptive_gap(&pozycja(Side::Buy, 20.0, true), true, 10.0, None),
+            10.0
+        );
+    }
+
+    #[test]
+    fn zakres_runner_only_nie_dotyka_zwyklej_pozycji() {
+        let mut e = silnik();
+        e.cfg.trail_adaptive_runners_only = true;
+        let snap = TrailAdaptiveSnapshot {
+            price_efficiency: 1.0,
+            vol_ratio: None,
+        };
+        let p = pozycja(Side::Buy, 20.0, false);
+        assert_eq!(e.trail_adaptive_gap(&p, false, 10.0, Some(&snap)), 10.0);
+        assert_eq!(e.trail_adaptive_gap(&p, true, 10.0, Some(&snap)), 20.0);
+    }
+
+    #[test]
+    fn ekspansja_ma_inny_mnoznik_zgodnie_i_przeciw() {
+        let mut e = silnik();
+        e.cfg.trail_adaptive_vol_ratio = 1.5;
+        e.cfg.trail_adaptive_vol_favorable_mult = 1.25;
+        e.cfg.trail_adaptive_vol_adverse_mult = 0.4;
+        let favorable = TrailAdaptiveSnapshot {
+            price_efficiency: 0.8,
+            vol_ratio: Some(2.0),
+        };
+        let adverse = TrailAdaptiveSnapshot {
+            price_efficiency: -0.8,
+            vol_ratio: Some(2.0),
+        };
+        let p = pozycja(Side::Buy, 20.0, true);
+        assert_eq!(e.trail_adaptive_gap(&p, true, 10.0, Some(&favorable)), 25.0);
+        assert_eq!(e.trail_adaptive_gap(&p, true, 10.0, Some(&adverse)), 2.0);
+    }
+
+    #[test]
+    fn adaptacja_jest_wpięta_w_rzeczywisty_kandydat_gap() {
+        let mut e = silnik();
+        e.cfg.trail_mode = TrailMode::Gap;
+        e.cfg.trail_start = 0.0;
+        e.cfg.trail_gap = 10.0;
+        e.cfg.trail_adaptive_trend_gap_mult = 2.0;
+        let p = pozycja(Side::Buy, 30.0, false);
+        let q = Quote {
+            ts: T0,
+            bid: 4030.0,
+            ask: 4030.2,
+        };
+        let favorable = TrailAdaptiveSnapshot {
+            price_efficiency: 1.0,
+            vol_ratio: None,
+        };
+
+        assert_eq!(
+            e.trail_candidate(&p, &q, false, Some(&favorable)),
+            Some(4010.0),
+            "favorable trend must widen the live Gap candidate from 10 to 20"
+        );
+        e.cfg.trail_adaptive_enabled = false;
+        assert_eq!(
+            e.trail_candidate(&p, &q, false, Some(&favorable)),
+            Some(4020.0),
+            "OFF must restore the exact legacy Gap candidate"
+        );
+    }
+}
+
+#[cfg(test)]
 mod testy_pakiet_a {
-    //! Testy Pakietu A — naprawy dedupu i edycji (patrz `SPEC_PAKIET_A.md`).
-    //!
-    //! Atrapa brokera jest MINIMALNA i celowo niczego nie odrzuca: testujemy
-    //! księgowość wiadomości w silniku, nie model wykonania.
     use super::*;
 
     pub(super) const TS0: Ts = 1_755_000_000_000; // stały punkt czasu — determinizm
@@ -13915,7 +11930,6 @@ mod testy_pakiet_a {
         pendings: Vec<PendingOrder>,
         closed: Vec<ClosedTrade>,
         next: Ticket,
-        /// `stops_level` do testów widełek brokera — domyślnie 0 (bez ograniczeń)
         pub(super) stops: f64,
     }
 
@@ -13935,8 +11949,6 @@ mod testy_pakiet_a {
             }
         }
 
-        /// Ustawia kwotowanie — testy tickowe (trailing S/R) karmią silnik
-        /// zmieniającą się ceną, a atrapa domyślnie stoi w miejscu.
         pub(super) fn ustaw_cene(&mut self, ts: Ts, bid: Px, ask: Px) {
             self.q = Quote { ts, bid, ask };
         }
@@ -14096,9 +12108,6 @@ mod testy_pakiet_a {
         Engine::new(c, 400.0)
     }
 
-    /// t1: akcja ZIGNOROWANA (`jignore`) nie ma prawa zapisać się jako
-    /// wykonana przy `dedup_pelny_status = true` — a przy `false` stare
-    /// zachowanie zostaje: zapisuje się mimo zignorowania.
     #[test]
     fn t1_akcja_zignorowana_nie_trafia_do_done_actions() {
         let mut b = Atrapa::nowa();
@@ -14121,29 +12130,17 @@ mod testy_pakiet_a {
         );
     }
 
-    /// t2: kolizja `msg_id` DWÓCH źródeł nie deduplikuje się nawzajem —
-    /// pamięć akcji jest kluczowana parą (źródło, id), jak `msg_to_basket`.
-    ///
-    /// ⚠ UCZCIWIE o pokryciu: wiadomość kanału 2 idzie z `edit_of = Some(5)`,
-    /// czyli ścieżką EDYCJI wiadomości nieznanej temu kanałowi — nie „świeżą"
-    /// kolizją dwóch nowych wiadomości. Własność pary (źródło, id) jest
-    /// sprawdzana PRZEZ tę ścieżkę (przy gołym `i64` dedup zjadłby edycję),
-    /// świeża kolizja bez edycji osobnego testu nie ma.
     #[test]
     fn t2_kolizja_msg_id_dwoch_zrodel() {
         let mut b = Atrapa::nowa();
         let mut e = silnik(|_| {});
-        // dwa koszyki, po jednym na kanał
         e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
         e.on_message(&mut b, &wiad(2, 2, None, WEJSCIE));
         assert_eq!(e.baskets.len(), 2, "dwa źródła → dwa koszyki");
 
-        // kanał 1 wykonuje „tp1" w wiadomości 5
         e.on_message(&mut b, &wiad(1, 5, None, "✅ TP1 HIT +48 PIPS"));
         assert!(e.done_actions.contains_key(&(zrodlo(1), 5)));
 
-        // EDYCJA wiadomości 5 kanału 2 — id koliduje, źródło NIE.
-        // Przy gołym `i64` dedup zjadłby ją jako „już wykonaną" u kanału 1.
         e.on_message(&mut b, &wiad(2, 5, Some(5), "✅ TP1 HIT +48 PIPS"));
         let koszyk2 = e.baskets.iter().find(|x| x.source == zrodlo(2)).unwrap();
         assert!(
@@ -14154,12 +12151,6 @@ mod testy_pakiet_a {
         assert!(e.done_actions.contains_key(&(zrodlo(2), 5)));
     }
 
-    /// t3: edycja [Entry + akcja zarządzająca] przy osi A3 = true wykonuje
-    /// resztę akcji, przy false — kończy na przezbrojeniu koszyka.
-    ///
-    /// Parser NIGDY nie daje Entry razem z TpHit (bramka `has_hit`), więc
-    /// „resztą akcji" w tym teście jest `SetSl` — ta sama ścieżka dispatchu,
-    /// którą szłoby doklejone SPP.
     #[test]
     fn t3_edycja_z_wejsciem_nie_polyka_reszty_akcji() {
         let edycja = "BUY LIMITS GOLD @ 4000/3995\nTP 4010\nTP 4020\nSL 3988\nMOVE SL TO 3993";
@@ -14182,7 +12173,6 @@ mod testy_pakiet_a {
                 }
             );
             if os {
-                // edycja strefy = wykonana akcja `entry` w pamięci wiadomości
                 assert!(e
                     .done_actions
                     .get(&(zrodlo(1), 1))
@@ -14239,8 +12229,6 @@ mod testy_pakiet_a {
         );
     }
 
-    /// t4: `setsl@wartość` przechodzi po zmianie poziomu przy A4 = true;
-    /// przy false klucz bez wartości zjada każdą kolejną zmianę stopu.
     #[test]
     fn t4_klucz_z_wartoscia_przepuszcza_nowy_poziom() {
         for (os, oczekiwany_sl) in [(true, 3993.0), (false, 3992.0)] {
@@ -14249,7 +12237,6 @@ mod testy_pakiet_a {
             e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
             e.on_message(&mut b, &wiad(1, 2, None, "MOVE SL TO 3992"));
             assert_eq!(e.baskets[0].sl, Some(3992.0));
-            // edycja tej samej wiadomości zmienia POZIOM stopu
             e.on_message(&mut b, &wiad(1, 2, Some(2), "MOVE SL TO 3993"));
             assert_eq!(
                 e.baskets[0].sl,
@@ -14264,8 +12251,6 @@ mod testy_pakiet_a {
         }
     }
 
-    /// t5: edycja-SIEROTA (nieznany `edit_of`) z wejściem przy A5 = true
-    /// nie tworzy koszyka; przy false tworzy — jak dziś.
     #[test]
     fn t5_edycja_sierota_nie_otwiera_koszyka() {
         for (os, koszykow) in [(true, 0), (false, 1)] {
@@ -14283,8 +12268,6 @@ mod testy_pakiet_a {
         }
     }
 
-    /// t6: powtórna NOWA wiadomość z tym samym `msg_id` (re-delivery po
-    /// rekonekcie) przy A6 = true nie tworzy drugiego koszyka.
     #[test]
     fn t6_powtorna_wiadomosc_nie_tworzy_drugiego_koszyka() {
         for (os, koszykow) in [(true, 1), (false, 2)] {
@@ -14303,18 +12286,11 @@ mod testy_pakiet_a {
 
 #[cfg(test)]
 mod testy_pakiet_b {
-    //! Testy Pakietu B — osie z audytu TYLER (patrz `SPEC_PAKIET_B.md`).
-    //! Atrapa brokera i pomocnicy współdzieleni z `testy_pakiet_a`.
     use super::testy_pakiet_a::{silnik, wiad, Atrapa, TS0, WEJSCIE};
     use super::*;
 
-    /// Wejście RYNKOWE (bez „LIMITS") — strefa obejmuje bieżącą cenę atrapy
-    /// (bid 3998,0 / ask 3998,3), więc przy `auto_limit = false` wszystkie
-    /// jednostki idą po rynku w chwili sygnału.
     const WEJSCIE_MARKET: &str = "BUY GOLD @ 4000/3995\nTP 4010\nTP 4020\nSL 3990";
 
-    /// B2: sygnał rynkowy przy `market_entry_units = 1` dostaje JEDNĄ
-    /// jednostkę zamiast pełnej siatki; przy 0 — pełną siatkę jak dotąd.
     #[test]
     fn b2_market_entry_units_scina_plan() {
         for (os, jednostek) in [(1u32, 1usize), (0u32, 5usize)] {
@@ -14332,7 +12308,6 @@ mod testy_pakiet_b {
                 "oś B2 = {os}: liczba jednostek wejścia rynkowego"
             );
         }
-        // ścieżka LIMITOWA nietknięta: ta sama oś nie ma prawa ściąć siatki
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             c.auto_limit = false;
@@ -14364,8 +12339,6 @@ mod testy_pakiet_b {
                 "oś B2 przy auto_limit = true, market_entry_units = {os}"
             );
         }
-        // Sygnał LIMITS zostaje nietknięty także tutaj — oś dotyczy WYŁĄCZNIE
-        // komunikatów bez „LIMITS".
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             c.auto_limit = true;
@@ -14383,8 +12356,6 @@ mod testy_pakiet_b {
     #[test]
     fn b2h_market_hybrid_otwiera_teraz_i_zostawia_dolne_limity() {
         let mut b = Atrapa::nowa();
-        // Cała strefa leży poniżej bieżącej ceny, więc każdy pozostały
-        // szczebel jest prawidłowym BUY LIMIT, a tylko nowa oś wybiera rynek.
         b.ustaw_cene(TS0, 4000.40, 4000.60);
         let mut e = silnik(|c| {
             c.auto_limit = true;
@@ -14393,16 +12364,28 @@ mod testy_pakiet_b {
             c.market_hybrid_now_units = 1;
         });
         e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE_MARKET));
-        assert_eq!(b.positions().len(), 1, "hybryda ma wejść jedną nogą natychmiast");
-        assert_eq!(b.pendings().len(), 4, "pozostałe cztery nogi mają czekać niżej");
-        assert_eq!(b.positions()[0].level, 4, "rynek ma dostać pierwsze/płytkie wejście");
+        assert_eq!(
+            b.positions().len(),
+            1,
+            "hybryda ma wejść jedną nogą natychmiast"
+        );
+        assert_eq!(
+            b.pendings().len(),
+            4,
+            "pozostałe cztery nogi mają czekać niżej"
+        );
+        assert_eq!(
+            b.positions()[0].level,
+            4,
+            "rynek ma dostać pierwsze/płytkie wejście"
+        );
         assert!(
-            b.pendings().iter().all(|o| o.price < b.positions()[0].open_price),
+            b.pendings()
+                .iter()
+                .all(|o| o.price < b.positions()[0].open_price),
             "po BUY natychmiastowym mają zostać wyłącznie niższe limity"
         );
 
-        // Kontrakt OFF: dokładnie dotychczasowa B2 — jedna głęboka oczekująca,
-        // żadnego wejścia po rynku.
         let mut b0 = Atrapa::nowa();
         b0.ustaw_cene(TS0, 4000.40, 4000.60);
         let mut e0 = silnik(|c| {
@@ -14415,7 +12398,6 @@ mod testy_pakiet_b {
         assert_eq!(b0.positions().len(), 0);
         assert_eq!(b0.pendings().len(), 1);
 
-        // Jawne LIMITS nie są sygnałem market i pozostają w 100% oczekujące.
         let mut bl = Atrapa::nowa();
         bl.ustaw_cene(TS0, 4000.40, 4000.60);
         let mut el = silnik(|c| {
@@ -14425,13 +12407,14 @@ mod testy_pakiet_b {
             c.market_hybrid_now_units = 1;
         });
         el.on_message(&mut bl, &wiad(1, 1, None, WEJSCIE));
-        assert_eq!(bl.positions().len(), 0, "jawne LIMITS nie mogą wejść hybrydą");
+        assert_eq!(
+            bl.positions().len(),
+            0,
+            "jawne LIMITS nie mogą wejść hybrydą"
+        );
         assert_eq!(bl.pendings().len(), 5);
     }
 
-    /// B2C: jeśli sygnał market doszedł do TP1 bez naszej pozycji, późny fill
-    /// jest już gonieniem zakończonego ruchu. Nowa oś sprząta go na TP1 nawet
-    /// przy wspólnym `UntilTp2`; OFF zachowuje dawny, ryzykowny pending.
     #[test]
     fn b2c_tp1_bez_fillu_kasuje_tylko_pending_sygnalu_market() {
         for (os, zostaje) in [(true, false), (false, true)] {
@@ -14456,7 +12439,6 @@ mod testy_pakiet_b {
             );
         }
 
-        // Ta sama oś nie skraca życia prawdziwego sygnału LIMITS.
         let mut b = Atrapa::nowa();
         b.ustaw_cene(TS0, 4000.40, 4000.60);
         let mut e = silnik(|c| {
@@ -14471,8 +12453,6 @@ mod testy_pakiet_b {
         assert!(!b.pendings().is_empty(), "jawne LIMITS nadal żyją do TP2");
     }
 
-    /// Parametry rodziny hybrydowej muszą sterować różnymi wymiarami, a nie
-    /// być martwymi aliasami jednego przełącznika.
     #[test]
     fn b2h_parametry_stroja_liczbe_lot_chase_i_cel() {
         let mut b = Atrapa::nowa();
@@ -14493,8 +12473,6 @@ mod testy_pakiet_b {
         assert!(b.positions().iter().all(|p| (p.volume - 0.05).abs() < 1e-9));
         assert!(b.positions().iter().all(|p| p.tp == Some(4020.0)));
 
-        // Próg chase 0,50 blokuje tylko natychmiastową część; sygnał nie jest
-        // filtrowany i jego pełna siatka nadal czeka na cofnięcie.
         let mut b2 = Atrapa::nowa();
         b2.ustaw_cene(TS0, 4000.40, 4000.60);
         let mut e2 = silnik(|c| {
@@ -14509,8 +12487,6 @@ mod testy_pakiet_b {
         assert_eq!(b2.pendings().len(), 5);
     }
 
-    /// B3: RISK FREE na koszyku z pendingami — przy osi pendingi znikają
-    /// (ze znacznikiem `cancelled` na szczeblach), przy false żyją jak dotąd.
     #[test]
     fn b3_risk_free_kasuje_pendingi() {
         for os in [true, false] {
@@ -14518,13 +12494,10 @@ mod testy_pakiet_b {
             let mut e = silnik(|c| {
                 c.auto_limit = true; // wszystkie szczeble jako limity
                 c.entry_units = 4;
-                // bez sprzątaczy tła: pendingi mają umrzeć WYŁĄCZNIE od osi B3
                 c.pending_lifetime = PendingLifetime::Never;
                 c.pending_cancel_on_riskfree = os;
             });
             e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
-            // część szczebli leży nad ceną (BUY LIMIT niewykonalny) i idzie
-            // po rynku — pozycje są potrzebne, żeby RF miał co zabezpieczać
             assert!(!b.pendings().is_empty(), "test wymaga wiszących limitów");
             assert!(!b.positions().is_empty(), "test wymaga otwartych pozycji");
             e.on_message(&mut b, &wiad(1, 2, None, "RISK FREE 3999"));
@@ -14546,7 +12519,6 @@ mod testy_pakiet_b {
         }
     }
 
-    /// B4: na etapie >= N cały koszyk jest zamykany; przy 0 pozycje żyją.
     #[test]
     fn b4_bank_all_at_stage_zamyka_calosc() {
         for (os, pusto) in [(2u8, true), (0u8, false)] {
@@ -14581,17 +12553,14 @@ mod testy_pakiet_b {
         }
     }
 
-    /// Causal fixture, not a profit backtest. Missing realized loss permits an
-    /// accidental rearm; an explicit negative threshold can permit the same
-    /// class of decision on a truthful ledger, without reading future ticks.
     #[test]
     fn rearm_decision_records_truthful_components_and_explicit_loss_threshold() {
         for (realized, threshold, block_secured, expected) in [
-            (0.0, 0.0, false, true),       // incomplete legacy ledger
-            (-16.08, 0.0, false, false),   // correct ledger, original threshold
-            (-16.08, -13.0, false, true),  // deliberate, bounded-by-threshold choice
+            (0.0, 0.0, false, true),      // incomplete legacy ledger
+            (-16.08, 0.0, false, false),  // correct ledger, original threshold
+            (-16.08, -13.0, false, true), // deliberate, bounded-by-threshold choice
             (-16.08, -12.0, false, false),
-            (-16.08, -13.0, true, false),  // explicit RF veto still wins
+            (-16.08, -13.0, true, false), // explicit RF veto still wins
         ] {
             let mut b = Atrapa::nowa();
             let mut e = silnik(|c| {
@@ -14609,22 +12578,39 @@ mod testy_pakiet_b {
             b.pendings_mut().clear();
             b.ustaw_cene(TS0 + 60_000, 3997.25, 3997.45);
             let id = e.baskets[0].id;
-            let ticket = b.open_market(OrderReq {
-                side: Side::Buy, volume: 0.04, sl: Some(3996.30), tp: None,
-                basket: Some(id), level: 0, is_toucher: false, comment: "causal fixture".into(),
-            }).unwrap();
+            let ticket = b
+                .open_market(OrderReq {
+                    side: Side::Buy,
+                    volume: 0.04,
+                    sl: Some(3996.30),
+                    tp: None,
+                    basket: Some(id),
+                    level: 0,
+                    is_toucher: false,
+                    comment: "causal fixture".into(),
+                })
+                .unwrap();
             b.positions_mut()[0].open_price = 3996.30;
             let bk = &mut e.baskets[0];
-            bk.tickets = vec![ticket]; bk.pendings.clear();
-            bk.had_positions = true; bk.realized = realized;
-            bk.secured = true; bk.state = BasketState::RiskFree;
+            bk.tickets = vec![ticket];
+            bk.pendings.clear();
+            bk.had_positions = true;
+            bk.realized = realized;
+            bk.secured = true;
+            bk.state = BasketState::RiskFree;
             e.drain_journal();
             let q = b.quote();
             e.rearm_pass(&mut b, &q);
-            assert_eq!(e.baskets[0].rearms, u32::from(expected),
-                "realized={realized}, threshold={threshold}, secured_veto={block_secured}");
-            let events: Vec<_> = e.drain_journal().into_iter()
-                .filter(|ev| ev.reason == Some(RejectCode::GridRearmed)).collect();
+            assert_eq!(
+                e.baskets[0].rearms,
+                u32::from(expected),
+                "realized={realized}, threshold={threshold}, secured_veto={block_secured}"
+            );
+            let events: Vec<_> = e
+                .drain_journal()
+                .into_iter()
+                .filter(|ev| ev.reason == Some(RejectCode::GridRearmed))
+                .collect();
             assert_eq!(events.len(), usize::from(expected));
             if let Some(ev) = events.first() {
                 let number = |key: &str| ev.data[key].as_f64().unwrap();
@@ -14663,8 +12649,6 @@ mod testy_pakiet_b {
             e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
             assert!(!e.baskets[0].levels.is_empty(), "test wymaga planu siatki");
 
-            // Stan dokładnie po RF: poprzednia fala już wyszła, ryzyko zostało
-            // zdjęte, wynik koszyka jest dodatni, a cena wraca do strefy.
             b.positions_mut().clear();
             b.pendings_mut().clear();
             let (lo, hi) = (e.baskets[0].zone_lo, e.baskets[0].zone_hi);
@@ -14709,8 +12693,6 @@ mod testy_pakiet_b {
             e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE));
             assert!(!e.baskets[0].levels.is_empty(), "test wymaga planu siatki");
 
-            // Pierwsza fala zakończona; cena jest jeszcze poza strefą, więc
-            // przezbrojenie na tym ticku nie może się wydarzyć.
             b.positions_mut().clear();
             b.pendings_mut().clear();
             {
@@ -14730,8 +12712,6 @@ mod testy_pakiet_b {
                 "rearm={rearm}, rearm_keep_empty_alive={zachowaj}: życie po pustym ticku"
             );
 
-            // Dopiero kolejny tick wraca do strefy. Koszyk zachowany przez oś
-            // ma odbudować siatkę; historycznie zakończony nie może ożyć.
             b.ustaw_cene(TS0 + 62_000, 3997.8, 3998.1);
             let q_powrot = b.quote();
             e.on_tick(&mut b, &q_powrot);
@@ -14746,8 +12726,8 @@ mod testy_pakiet_b {
 
     #[test]
     fn spp_na_plaskim_koszyku_moze_jawnie_zablokowac_rearm() {
-        const SPP: &str = "TP3 HIT +90 PIPS\nSECURING PARTIAL PROFITS\n\
-                              SL IS SET TO BE AT 3998\nI WILL TARGET 4010 4020\n\
+        const SPP: &str = "TP3 HIT +90 PIPS\n\nIM SECURING PARTIAL PROFITS HERE. \
+                              SL IS SET TO BE AT 3998 AND I WILL TARGET;\n\n4010\n4020\n4030\n4040\n\n\
                               DO NOT UNDER ANY CIRCUMSTANCES ENTER THE MARKET AGAIN";
         for (blokada, ma_przezbroic) in [(false, true), (true, false)] {
             let mut b = Atrapa::nowa();
@@ -14796,7 +12776,6 @@ mod testy_pakiet_f {
     use super::testy_pakiet_a::{silnik, wiad, zrodlo, Atrapa, TS0, WEJSCIE};
     use super::*;
 
-    /// Wiadomość będąca ODPOWIEDZIĄ na `reply_to`.
     fn odpowiedz(chat: i64, msg_id: i64, reply_to: i64, text: &str) -> IncomingMessage {
         IncomingMessage {
             ts: TS0,
@@ -14818,7 +12797,6 @@ mod testy_pakiet_f {
             assert_eq!(e.baskets.len(), 1, "test wymaga jednego żywego koszyka");
             assert_eq!(e.baskets[0].sl, Some(3990.0), "SL z sygnału");
 
-            // 6160 nigdy nie przeszło przez silnik — mapa go nie zna
             assert!(
                 !e.msg_to_basket.contains_key(&(zrodlo(1), 6160)),
                 "test wymaga, żeby adresat był NIEZNANY"
@@ -14831,10 +12809,6 @@ mod testy_pakiet_f {
                 "oś reply_veto = {os}: SL koszyka po cudzej odpowiedzi"
             );
             if os {
-                // Assert UTRWALA kontrakt (świadomie): weto odpowiedzi jest
-                // dziś CICHE — nie zostawia wpisu w `odrzuty`. Gdy kiedyś
-                // dostanie jreject (plan #22 audytu: ciche ścieżki), ta
-                // liczba urośnie i test wskaże dokładnie tę zmianę.
                 assert_eq!(
                     e.odrzuty.get("NoTargetBasket").copied().unwrap_or(0)
                         + *e.odrzuty.get("no_target_basket").unwrap_or(&0),
@@ -14846,8 +12820,6 @@ mod testy_pakiet_f {
         }
     }
 
-    /// F1(a'): weto NIE działa, gdy adresat jest ZNANY — odpowiedź na własny
-    /// sygnał musi trafiać do swojego koszyka także przy włączonej osi.
     #[test]
     fn f1_odpowiedz_do_znanego_id_dziala_normalnie() {
         let mut b = Atrapa::nowa();
@@ -14865,9 +12837,6 @@ mod testy_pakiet_f {
         );
     }
 
-    /// F5 / eksport Synergy: większość dalszego zarządzania odpowiada na SPP,
-    /// a nie bezpośrednio na entry. Alias musi działać w tym samym procesie
-    /// i po odtworzeniu koszyka z migawki.
     #[test]
     fn f5_reply_graph_jest_przechodni_i_trwaly() {
         for os in [false, true] {
@@ -14902,9 +12871,6 @@ mod testy_pakiet_f {
         }
     }
 
-    /// F2a: hamulec SL-HIT ma WŁASNY kod odrzutu, inny niż pauza po serii
-    /// strat. Dopóki był wspólny, panel pisał „pauza po serii strat" botowi,
-    /// który nie miał ani jednej straty.
     #[test]
     fn f2a_hamulec_ma_wlasny_kod_odrzutu() {
         let mut b = Atrapa::nowa();
@@ -14912,7 +12878,6 @@ mod testy_pakiet_f {
             c.slhit_pause_n = 1;
             c.slhit_pause_min = 60.0;
         });
-        // komunikat „SL HIT" kanału — liczy się nawet bez naszego koszyka
         e.on_message(&mut b, &wiad(1, 1, None, "❌ SL HIT -30 PIPS"));
 
         let gate = e.entry_gate(&b, TS0 + 60_000);
@@ -14930,11 +12895,8 @@ mod testy_pakiet_f {
         assert_eq!(kod.as_str(), "sl_hit_brake");
     }
 
-    /// F2b: przy mnożniku 0,5 wejście PRZECHODZI z połową lota; przy 0
-    /// (domyślnie) hamulec blokuje je tak jak dotąd.
     #[test]
     fn f2b_miekki_hamulec_wpuszcza_z_polowa_lota() {
-        // lot stały, żeby porównanie było o mnożnik, a nie o rachunek ryzyka
         let bazowy = |c: &mut Settings| {
             c.lot_mode_percent = false;
             c.lot_fixed = 0.10;
@@ -14946,14 +12908,12 @@ mod testy_pakiet_f {
             c.slhit_pause_min = 60.0;
         };
 
-        // ---- odniesienie: bez hamulca ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| bazowy(c));
         e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE_MKT));
         let pelny: f64 = b.positions().iter().map(|p| p.volume).sum();
         assert!(pelny > 0.0, "test wymaga otwartej pozycji odniesienia");
 
-        // ---- hamulec TWARDY (mnożnik 0 = domyślnie) ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| bazowy(c));
         e.on_message(&mut b, &wiad(1, 1, None, "❌ SL HIT -30 PIPS"));
@@ -14963,7 +12923,6 @@ mod testy_pakiet_f {
             "przy mnożniku 0 hamulec ma BLOKOWAĆ, jak przed 18.08"
         );
 
-        // ---- hamulec MIĘKKI (mnożnik 0,5) ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             bazowy(c);
@@ -14981,20 +12940,14 @@ mod testy_pakiet_f {
             "miękki hamulec: {miekki} zamiast połowy z {pelny}"
         );
 
-        // flaga nie ma prawa przeciec na kolejne wejście po ustaniu pauzy
         assert!(
             !e.slhit_miekki,
             "flaga miękkiego hamulca musi zgasnąć po wejściu"
         );
     }
 
-    /// Wejście RYNKOWE bez „LIMITS" — strefa obejmuje cenę atrapy, więc
-    /// jednostka idzie po rynku w chwili sygnału i widać jej wolumen.
     const WEJSCIE_MKT: &str = "BUY GOLD @ 4000/3995\nTP 4010\nTP 4020\nSL 3990";
 
-    /// F1(b): komunikat BEZ `reply_to` nadal trafia do najświeższego koszyka
-    /// przy osi = true. Reguła właściciela ma dwie połowy i weto rusza tylko
-    /// jedną z nich.
     #[test]
     fn f1_komunikat_bez_odpowiedzi_trafia_do_najnowszego() {
         let mut b = Atrapa::nowa();
@@ -15014,12 +12967,8 @@ mod testy_pakiet_g {
     use super::testy_pakiet_a::{silnik, wiad, Atrapa, TS0};
     use super::*;
 
-    /// Strefa GŁĘBOKO pod rynkiem atrapy (bid 3998), żeby wszystkie szczeble
-    /// kraty legły jako zlecenia oczekujące, a nie weszły po rynku przez
-    /// `pending_cross_policy = Market`.
     const WEJSCIE_NISKO: &str = "BUY LIMITS GOLD @ 3990/3985\nTP 4010\nTP 4020\nSL 3980";
 
-    /// Krata bezwzględna z krokiem 1 $ i trzema jednostkami wejścia.
     fn krata(c: &mut Settings) {
         c.lot_mode_percent = false;
         c.lot_fixed = 0.01;
@@ -15037,7 +12986,6 @@ mod testy_pakiet_g {
 
     #[test]
     fn g1_units_per_level_rozdziela_kotwice_od_mnoznika() {
-        // ---- domyślnie: jak dotąd, `entry_units` zleceń NA POZIOM ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(krata);
         assert!(
@@ -15057,7 +13005,6 @@ mod testy_pakiet_g {
             "przy domyślnym `units_per_level` na poziomie ma leżeć komplet jednostek"
         );
 
-        // ---- oś wyłączona: jedno zlecenie na poziom, kotwica bez zmian ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             krata(c);
@@ -15076,8 +13023,6 @@ mod testy_pakiet_g {
         );
     }
 
-    /// G1(b): oś nie rusza siatki BEZ kotwicy — tam i tak było jedno zlecenie
-    /// na poziom, więc obie wartości muszą dać ten sam wynik.
     #[test]
     fn g1_bez_kotwicy_os_nic_nie_zmienia() {
         let bez_kotwicy = |c: &mut Settings| {
@@ -15102,13 +13047,10 @@ mod testy_pakiet_g {
         );
     }
 
-    /// Ta sama strefa co `WEJSCIE_NISKO`, ale BEZ słowa „LIMITS" — parser
-    /// daje rodzaj pusty i o zleceniach oczekujących decyduje `auto_limit`.
     const WEJSCIE_NISKO_STREFA: &str = "BUY GOLD @ 3990/3985\nTP 4010\nTP 4020\nSL 3980";
 
     #[test]
     fn bug38r_strefa_bez_limit_nie_dostaje_kraty() {
-        // ---- (a) jawny LIMIT z kotwicą: krata jak dawniej, NIEZALEŻNIE od osi ----
         for os in [true, false] {
             let mut b = Atrapa::nowa();
             let mut e = silnik(|c| {
@@ -15129,8 +13071,6 @@ mod testy_pakiet_g {
             );
         }
 
-        // ---- (b) STREFA przez `auto_limit`: default = mnożnik (kontrakt zera),
-        //      oś włączona = jedno zlecenie na poziom ----
         for (os, mnoznik) in [(true, 3), (false, 1)] {
             let mut b = Atrapa::nowa();
             let mut e = silnik(|c| {
@@ -15164,7 +13104,6 @@ mod testy_pakiet_g {
             );
         }
 
-        // ---- (c) strefa BEZ kotwicy: jedno zlecenie na poziom, oś obojętna ----
         for os in [true, false] {
             let mut b = Atrapa::nowa();
             let mut e = silnik(|c| {
@@ -15190,12 +13129,8 @@ mod testy_sekcja_m_1808 {
     use super::testy_pakiet_a::{silnik, wiad, Atrapa, TS0};
     use super::*;
 
-    /// Sygnał w kształcie, który daje bug M3: stop leży TUŻ pod strefą
-    /// (ATFX podaje stopy 1 punkt pod krawędzią), więc stała głębokość 3 $
-    /// spycha dno siatki poniżej stopu.
     const WEJSCIE_M3: &str = "BUY LIMITS GOLD @ 4000/3995\nTP 4010\nTP 4020\nSL 3994";
 
-    /// Ustawienia geometrii wspólne dla obu połówek testu M3.
     fn geometria(c: &mut Settings) {
         c.zone_offset_mode = ZoneOffsetMode::Directional;
         c.entry_deep_offset = 3.0;
@@ -15205,10 +13140,8 @@ mod testy_sekcja_m_1808 {
         c.adaptive_params = false;
     }
 
-    /// M3: dno siatki pod stopem — stała kwota kontra ułamek dystansu do SL.
     #[test]
     fn m3_glebokosc_jako_ulamek_wyprowadza_dno_siatki_znad_stopu() {
-        // ---- PRZED: stała 3,0 $ stawia najgłębszy szczebel POD stopem ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(geometria);
         assert_eq!(
@@ -15223,10 +13156,6 @@ mod testy_sekcja_m_1808 {
             "test ma odtwarzać BŁĄD M3: dno {dno_przed:.2} powinno leżeć pod stopem {sl_przed:.2}"
         );
 
-        // ---- PO: ułamek dystansu krawędź→SL trzyma dno NAD stopem ----
-        //
-        // Dystans z sygnału: lepsza krawędź 3995 − stop 3994 = 1,00 $.
-        // Przy ułamku 0,667 głębokość to 0,667 $, czyli dno 3994,33.
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             geometria(c);
@@ -15244,7 +13173,6 @@ mod testy_sekcja_m_1808 {
             "głębokość ma być ułamkiem dystansu do stopu, mam dno {dno_po:.4}"
         );
 
-        // ---- SYGNAŁ BEZ STOPU wraca do stałej: brak wiedzy nie zmienia geometrii ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             geometria(c);
@@ -15261,11 +13189,6 @@ mod testy_sekcja_m_1808 {
         );
     }
 
-    /// Koszyk z JEDNĄ otwartą pozycją, wstawioną wprost do atrapy.
-    ///
-    /// Atrapa nie symuluje wypełnień, a wszystkie trzy mechanizmy sekcji M
-    /// dotyczą pozycji OTWARTEJ — więc pozycję zakładamy ręcznie i wiążemy
-    /// z koszykiem tak, jak zrobiłoby to wypełnienie limitu.
     fn koszyk_z_pozycja(b: &mut Atrapa, e: &mut Engine, open: Px) -> Ticket {
         e.on_message(
             b,
@@ -15296,14 +13219,8 @@ mod testy_sekcja_m_1808 {
         t
     }
 
-    /// M4: RISK FREE rusza stopem tylko wtedy, gdy `sl_is_valid` przejdzie —
-    /// a `be_offset = 21` sprawia, że nie przechodzi praktycznie nigdy.
-    ///
-    /// Atrapa kwotuje 3998/3998,30 przy `stops_level = 0`, pozycja jest
-    /// otwarta na 3990, czyli ma 8,00 $ zysku.
     #[test]
     fn m4_prog_zysku_oddziela_miejsce_stopu_od_posluszenstwa() {
-        // ---- PRZED, tak jak w produkcji: be_offset 21 → stop nie rusza się ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             c.be_offset = 21.0;
@@ -15322,7 +13239,6 @@ mod testy_sekcja_m_1808 {
              czyli nad rynkiem 3998 — `sl_is_valid` odrzuca i stop zostaje pusty"
         );
 
-        // ---- KONTROLA: sam mniejszy `be_offset` już rusza stopem ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             c.be_offset = 0.3;
@@ -15336,12 +13252,6 @@ mod testy_sekcja_m_1808 {
             "przy be_offset 0,3 stop ma wylądować 0,30 $ nad wejściem"
         );
 
-        // ---- PO: próg zysku 21 $ wstrzymuje ruch przy 8 $ zysku ----
-        //
-        // To jest ta sama INTENCJA co dzisiejsze `be_offset = 21` („nie ruszaj
-        // stopu, póki nie jesteś głęboko w zysku"), ale wyrażona osobnym
-        // polem — więc gdy próg wreszcie przejdzie, stop ląduje 0,30 $ NAD
-        // wejściem, a nie 0,20 $ pod rynkiem.
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             c.be_offset = 0.3;
@@ -15356,7 +13266,6 @@ mod testy_sekcja_m_1808 {
             "przy zysku 8 $ i progu 21 $ stop nie ma prawa drgnąć"
         );
 
-        // ---- PO, próg spełniony: 30 $ zysku (wejście 3968) → stop rusza ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             c.be_offset = 0.3;
@@ -15372,12 +13281,8 @@ mod testy_sekcja_m_1808 {
         );
     }
 
-    /// M15: runner uwolniony KOMUNIKATEM kanału nie miał terminu ważności,
-    /// bo limit trzymania siedział za bramką `riskfree_enabled`.
     #[test]
     fn m15_limit_trzymania_runnera_dziala_takze_bez_reguly() {
-        // Syntetyczna konfiguracja pułapki: reguła RISK FREE jest WYŁĄCZONA,
-        // ale limit trzymania pozostaje wpisany na 90 minut.
         let jak_produkcja = |c: &mut Settings| {
             c.riskfree_enabled = false;
             c.riskfree_runner_max_hold_min = 90.0;
@@ -15386,7 +13291,6 @@ mod testy_sekcja_m_1808 {
             c.be_offset = 21.0;
             c.trail_mode = TrailMode::Off;
             c.trail_runner_mode = TrailMode::Off;
-            // wszystko, co mogłoby zamknąć pozycję z INNEGO powodu
             c.basket_max_age_min = 0.0;
             c.oae_timeout_min = 0.0;
             c.stale_take_min = 0.0;
@@ -15394,14 +13298,12 @@ mod testy_sekcja_m_1808 {
             c.harvest_retrace_pct = 0.0;
             c.smart_exit = false;
         };
-        // 100 minut po komunikacie — dziesięć minut ZA limitem 90 min
         let pozniej = Quote {
             ts: TS0 + 100 * 60_000,
             bid: 3998.0,
             ask: 3998.3,
         };
 
-        // ---- PRZED: pole wpisane, limit nie działa, pozycja żyje ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(jak_produkcja);
         assert!(
@@ -15426,7 +13328,6 @@ mod testy_sekcja_m_1808 {
              pozycja zostaje otwarta 100 minut po RISK FREE"
         );
 
-        // ---- PO: ten sam preset plus jedno pole — runner domknięty ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             jak_produkcja(c);
@@ -15440,7 +13341,6 @@ mod testy_sekcja_m_1808 {
             "po włączeniu `runner_max_hold_bez_reguly` runner ma zniknąć po 90 minutach"
         );
 
-        // ---- KONTRAKT ZERA W DRUGĄ STRONĘ: 80 minut to jeszcze nie limit ----
         let wczesniej = Quote {
             ts: TS0 + 80 * 60_000,
             bid: 3998.0,
@@ -15460,8 +13360,6 @@ mod testy_sekcja_m_1808 {
         );
     }
 
-    /// Bramka spójności: konfiguracja bez ŻADNEGO wyjścia dla runnera musi
-    /// być głośna. To jest cała treść M15 sprowadzona do jednego zdania.
     #[test]
     fn m15_konfiguracja_bez_wyjscia_jest_zglaszana() {
         let mut c = Settings::default();
@@ -15475,7 +13373,7 @@ mod testy_sekcja_m_1808 {
             c.pulapki_konfiguracji()
                 .iter()
                 .any(|s| s.contains("RUNNER NIE MA WYJŚCIA")),
-            "sprzeczna konfiguracja musi być zgłoszona jako pułapka"
+            "preset produkcyjny z 18.08 musi być zgłoszony jako pułapka"
         );
         assert!(
             c.martwe_ustawienia()
@@ -15484,7 +13382,6 @@ mod testy_sekcja_m_1808 {
             "limit trzymania zbramkowany regułą musi być zgłoszony jako martwy"
         );
 
-        // Jedno pole gasi OBA ostrzeżenia — bo naprawia obie rzeczy naraz.
         c.runner_max_hold_bez_reguly = true;
         assert!(
             !c.pulapki_konfiguracji()
@@ -15520,13 +13417,8 @@ mod testy_fala_audyt_2408 {
     use super::testy_pakiet_a::{silnik, wiad, Atrapa, TS0};
     use super::*;
 
-    /// Strefa CAŁA pod rynkiem (kwotowanie atrapy 3998/3998,3) — komplet
-    /// szczebli wchodzi limitami, żaden nie ucieka w wariant rynkowy.
     const WEJSCIE_POD: &str = "BUY LIMITS GOLD @ 3990/3985\nTP 4010\nTP 4020\nSL 3980";
 
-    /// Broker-kapryśnik: deleguje do `Atrapy`, ale odmawia wybranych operacji
-    /// wg licznika wywołań. Tryby: 0 = nigdy, 1 = każda, 2 = co druga
-    /// (pierwsza, trzecia… odrzucone — dokładnie „co drugi modify" z planu).
     struct Kaprys {
         w: Atrapa,
         mody: u32,
@@ -15624,8 +13516,6 @@ mod testy_fala_audyt_2408 {
         }
     }
 
-    /// Wyłącza wszystkie reguły, które mogłyby zamknąć pozycję z INNEGO
-    /// powodu niż testowany — ta sama lista co `jak_produkcja` w sekcji M.
     fn bez_zamykaczy(c: &mut Settings) {
         c.basket_max_age_min = 0.0;
         c.oae_timeout_min = 0.0;
@@ -15637,10 +13527,6 @@ mod testy_fala_audyt_2408 {
         c.trail_runner_mode = TrailMode::Off;
     }
 
-    /// Koszyk z ręcznie dostawioną pozycją — wzorzec z sekcji M, ale na
-    /// strefie CAŁEJ pod rynkiem: strefa obejmująca kwotowanie oddałaby
-    /// część szczebli wariantowi rynkowemu (`pending_cross_policy = Market`)
-    /// i test liczyłby modyfikacje pozycji, której nie zakładał.
     fn koszyk_z_pozycja<B: Broker>(b: &mut B, e: &mut Engine, open: Px) -> Ticket {
         if e.baskets.is_empty() {
             e.on_message(b, &wiad(1, 1, None, WEJSCIE_POD));
@@ -15665,13 +13551,7 @@ mod testy_fala_audyt_2408 {
         t
     }
 
-    // ============================================================
-    //  #11 — RF/OAE przez try_modify + retry
-    // ============================================================
 
-    /// Broker odrzuca CO DRUGĄ modyfikację (pierwszą odrzuci). Stary kod:
-    /// surowe `modify_position`, BE ginęło bez śladu. Nowy: `try_modify`
-    /// zapamiętuje zamiar i `retry_stops` dowozi go przy następnym ticku.
     #[test]
     fn rf_z_kanalu_ponawia_be_po_odmowie_brokera() {
         let mut b = Kaprys::nowy(2, 0);
@@ -15692,7 +13572,6 @@ mod testy_fala_audyt_2408 {
             "odrzucone BE musi zostać ZAMIAREM (desired), nie zniknąć bez śladu"
         );
 
-        // retry po `sltp_retry_s` (domyślnie 3 s) — druga modyfikacja przechodzi
         e.on_tick(
             &mut b,
             &Quote {
@@ -15712,12 +13591,8 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    /// `no_tp_after_stage`: `is_runner` dopiero po POTWIERDZONYM zdjęciu
-    /// celu. Broker odrzucający każdą modyfikację → pozycja NIE jest
-    /// runnerem (u brokera wciąż wisi TP); broker zgodny → jest.
     #[test]
     fn is_runner_dopiero_po_ok_brokera() {
-        // ---- odmowa: znacznik nie ma prawa stanąć ----
         let mut b = Kaprys::nowy(1, 0);
         let mut e = silnik(|c| {
             bez_zamykaczy(c);
@@ -15736,7 +13611,6 @@ mod testy_fala_audyt_2408 {
              runnera, którego broker zamknie na pierwszym dotknięciu celu"
         );
 
-        // ---- zgoda: znacznik staje razem ze zdjętym celem ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             bez_zamykaczy(c);
@@ -15751,8 +13625,6 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    /// `CloseProfitableOnly` nie ma prawa oznaczyć koszyka `secured`:
-    /// przegrane pozycje nie dostały ani BE, ani celu — pełne ryzyko żyje.
     #[test]
     fn close_profitable_only_bez_falszywego_secured() {
         let mut b = Atrapa::nowa();
@@ -15779,9 +13651,6 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    /// `riskfree_pass` na REALNYCH zamknięciach: broker odrzuca co drugie
-    /// zamknięcie → koszyk nie dostaje `secured`, reguła ponawia i sekuruje
-    /// dopiero po domknięciu wszystkich pozycji z banku.
     #[test]
     fn riskfree_pass_sekuruje_dopiero_po_realnych_zamknieciach() {
         let mut b = Kaprys::nowy(0, 2);
@@ -15800,7 +13669,6 @@ mod testy_fala_audyt_2408 {
             ask: 3998.3,
         };
 
-        // przebieg 1: bank = 2 pozycje; zamknięcie #1 odrzucone, #2 przyjęte
         e.on_tick(&mut b, &tik(TS0 + 1_000));
         assert_eq!(
             b.positions().len(),
@@ -15812,11 +13680,9 @@ mod testy_fala_audyt_2408 {
             "bank niepełny (broker odmówił) — koszyk NIE jest wolny od ryzyka"
         );
 
-        // przebieg 2: zamknięcie #3 odrzucone — dalej bez secured
         e.on_tick(&mut b, &tik(TS0 + 2_000));
         assert!(!e.baskets[0].secured, "kolejna odmowa = dalej bez secured");
 
-        // przebieg 3: zamknięcie #4 przechodzi — bank pełny, runner zostaje
         e.on_tick(&mut b, &tik(TS0 + 3_000));
         assert_eq!(b.positions().len(), 1, "został sam runner");
         assert!(
@@ -15825,13 +13691,7 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    // ============================================================
-    //  #12 — Done tylko po potwierdzonych zamknięciach (sieroty)
-    // ============================================================
 
-    /// P0 release audit: a rejected final TP bank must survive reconciliation
-    /// and be retried once the broker accepts requests again. This test is
-    /// intentionally red on the legacy unconditional-Done implementation.
     #[test]
     fn bank_all_rejected_exit_is_not_lost_after_reconciliation() {
         let mut b = Kaprys::nowy(0, 1);
@@ -15849,24 +13709,48 @@ mod testy_fala_audyt_2408 {
         e.baskets[0].tps = vec![4010.0, 4020.0, 4030.0];
         e.baskets[0].state = BasketState::Working;
         e.baskets[0].had_positions = true;
-        // A production runner may already have no broker TP after TP2.
-        b.positions_mut().iter_mut().find(|p| p.ticket == t).unwrap().tp = None;
+        b.positions_mut()
+            .iter_mut()
+            .find(|p| p.ticket == t)
+            .unwrap()
+            .tp = None;
         b.w.ustaw_cene(TS0 + 1_000, 4030.0, 4030.3);
         e.handle_tp_hit(&mut b, id, Some(3), TS0 + 1_000, "price");
-        assert!(b.find_position(t).is_some(), "rejected close leaves a live position");
+        assert!(
+            b.find_position(t).is_some(),
+            "rejected close leaves a live position"
+        );
 
-        let q = Quote { ts: TS0 + 2_000, bid: 4031.0, ask: 4031.3 };
+        let q = Quote {
+            ts: TS0 + 2_000,
+            bid: 4031.0,
+            ask: 4031.3,
+        };
         b.w.ustaw_cene(q.ts, q.bid, q.ask);
         e.on_tick(&mut b, &q);
-        eprintln!("P0 bank rejection: after reconciliation state={:?}, close_attempts={}, live={}",
-                  e.baskets[0].state, b.zamk, b.find_position(t).is_some());
-        assert!(e.baskets[0].alive(), "rejected final TP must not leave a Done basket with live exposure");
+        eprintln!(
+            "P0 bank rejection: after reconciliation state={:?}, close_attempts={}, live={}",
+            e.baskets[0].state,
+            b.zamk,
+            b.find_position(t).is_some()
+        );
+        assert!(
+            e.baskets[0].alive(),
+            "rejected final TP must not leave a Done basket with live exposure"
+        );
 
         b.tryb_close = 0;
-        let q = Quote { ts: TS0 + 4_000, bid: 4028.0, ask: 4028.3 };
+        let q = Quote {
+            ts: TS0 + 4_000,
+            bid: 4028.0,
+            ask: 4028.3,
+        };
         b.w.ustaw_cene(q.ts, q.bid, q.ask);
         e.on_tick(&mut b, &q);
-        assert!(b.find_position(t).is_none(), "accepted retry must honor the already committed exit even after pullback");
+        assert!(
+            b.find_position(t).is_none(),
+            "accepted retry must honor the already committed exit even after pullback"
+        );
         assert_eq!(e.baskets[0].state, BasketState::Done);
         assert!(e.baskets[0].pending_exit.is_none());
     }
@@ -15899,22 +13783,37 @@ mod testy_fala_audyt_2408 {
         e.close_basket(&mut b, id, TS0, CloseReason::Tp);
         assert!(e.baskets[0].pending_exit.is_some());
         for n in 1..=20 {
-            let q = Quote { ts: TS0 + n * 100, bid: 3989.0, ask: 3989.3 };
+            let q = Quote {
+                ts: TS0 + n * 100,
+                bid: 3989.0,
+                ask: 3989.3,
+            };
             b.w.ustaw_cene(q.ts, q.bid, q.ask);
             e.on_tick(&mut b, &q);
             assert_eq!(e.sync_grid(&mut b, id, q.ts, false), 0);
             e.place_grid(&mut b, id, q.ts);
             assert!(!e.ea_dokladki_wolno(&b, &q, id));
-            assert_eq!(b.positions().iter().map(|p| p.ticket).collect::<Vec<_>>(), vec![t]);
+            assert_eq!(
+                b.positions().iter().map(|p| p.ticket).collect::<Vec<_>>(),
+                vec![t]
+            );
             assert!(b.pendings().is_empty());
             assert!(e.baskets[0].alive());
         }
         assert_eq!(b.zamk, 3, "one initial attempt plus one per elapsed second");
         let before = e.baskets[0].tps.clone();
-        let mut edit = wiad(1, 1, Some(1), "BUY LIMITS GOLD @ 3991/3980\nTP 4100\nTP 4200\nSL 3970");
+        let mut edit = wiad(
+            1,
+            1,
+            Some(1),
+            "BUY LIMITS GOLD @ 3991/3980\nTP 4100\nTP 4200\nSL 3970",
+        );
         edit.ts = TS0 + 2100;
         e.on_message(&mut b, &edit);
-        assert_eq!(e.baskets[0].tps, before, "entry edits cannot replace the committed exit");
+        assert_eq!(
+            e.baskets[0].tps, before,
+            "entry edits cannot replace the committed exit"
+        );
         e.handle_tp_hit(&mut b, id, Some(4), TS0 + 2200, "late TP");
         assert!(b.pendings().is_empty(), "no pyramiding from late TP");
     }
@@ -15923,7 +13822,9 @@ mod testy_fala_audyt_2408 {
     fn confirmed_exit_partial_success_only_done_after_remaining_close() {
         let mut b = Kaprys::nowy(0, 2);
         let mut e = exit_retry_engine();
-        for _ in 0..3 { koszyk_z_pozycja(&mut b, &mut e, 3990.0); }
+        for _ in 0..3 {
+            koszyk_z_pozycja(&mut b, &mut e, 3990.0);
+        }
         let id = e.baskets[0].id;
         let (closed, _, _) = e.close_basket(&mut b, id, TS0, CloseReason::BasketClose);
         assert_eq!(closed, 1);
@@ -15943,23 +13844,36 @@ mod testy_fala_audyt_2408 {
         let mut e = exit_retry_engine();
         koszyk_z_pozycja(&mut b, &mut e, 3990.0);
         let id = e.baskets[0].id;
-        assert!(!b.pendings().is_empty(), "fixture must contain entry exposure");
+        assert!(
+            !b.pendings().is_empty(),
+            "fixture must contain entry exposure"
+        );
         b.tryb_cancel = 1;
         e.close_basket(&mut b, id, TS0, CloseReason::Tp);
         assert!(b.positions().is_empty());
         assert!(!e.baskets[0].pendings.is_empty());
         assert!(e.baskets[0].alive(), "pending-only exposure is not Done");
-        // A rejected cancellation fills while disconnected, with a NEW ticket.
         b.pendings_mut().clear();
-        let fill = b.open_market(OrderReq {
-            side: Side::Buy, volume: 0.01, sl: None, tp: None,
-            basket: Some(id), level: 99, is_toucher: false, comment: format!("B{id}"),
-        }).unwrap();
+        let fill = b
+            .open_market(OrderReq {
+                side: Side::Buy,
+                volume: 0.01,
+                sl: None,
+                tp: None,
+                basket: Some(id),
+                level: 99,
+                is_toucher: false,
+                comment: format!("B{id}"),
+            })
+            .unwrap();
         e.baskets[0].tickets.clear();
         e.baskets[0].pendings.clear();
         b.tryb_cancel = 0;
         e.retry_confirmed_exits(&mut b, TS0 + 1000);
-        assert!(b.find_position(fill).is_none(), "retry discovers late fill absent from cached tickets");
+        assert!(
+            b.find_position(fill).is_none(),
+            "retry discovers late fill absent from cached tickets"
+        );
         assert_eq!(e.baskets[0].state, BasketState::Done);
     }
 
@@ -15976,17 +13890,26 @@ mod testy_fala_audyt_2408 {
         e.cfg.pending_drop_arm = false;
         e.cfg.pending_drop_require_zone_touch = false;
         e.cfg.expo_cap_pct = 0.01;
-        for p in b.pendings_mut() { p.placed_ts = TS0 - 2 * 3_600_000; }
+        for p in b.pendings_mut() {
+            p.placed_ts = TS0 - 2 * 3_600_000;
+        }
         b.tryb_cancel = 1;
         e.close_basket(&mut b, id, TS0, CloseReason::Tp);
         let pending_count = b.pendings().len();
         let attempts = b.anul;
         assert!(pending_count > 0 && b.positions().is_empty());
         for n in 1..=9 {
-            let q = Quote { ts: TS0 + n * 100, bid: 4050.0, ask: 4050.3 };
+            let q = Quote {
+                ts: TS0 + n * 100,
+                bid: 4050.0,
+                ask: 4050.3,
+            };
             b.w.ustaw_cene(q.ts, q.bid, q.ask);
             e.on_tick(&mut b, &q);
-            assert_eq!(b.anul, attempts, "TP/TTL/exposure cannot issue an extra cancellation before retry");
+            assert_eq!(
+                b.anul, attempts,
+                "TP/TTL/exposure cannot issue an extra cancellation before retry"
+            );
             assert_eq!(b.pendings().len(), pending_count);
             assert_eq!(e.baskets[0].pendings.len(), pending_count);
             assert!(e.baskets[0].alive() && e.baskets[0].pending_exit.is_some());
@@ -16006,7 +13929,11 @@ mod testy_fala_audyt_2408 {
         let mut restored = Engine::new(e.cfg.clone(), 400.0);
         restored.baskets = serde_json::from_slice(&saved).unwrap();
         b.tryb_close = 0;
-        let q = Quote { ts: TS0 + 3000, bid: 3975.0, ask: 3975.3 };
+        let q = Quote {
+            ts: TS0 + 3000,
+            bid: 3975.0,
+            ask: 3975.3,
+        };
         b.w.ustaw_cene(q.ts, q.bid, q.ask);
         restored.on_tick(&mut b, &q);
         assert!(b.positions().is_empty());
@@ -16022,26 +13949,67 @@ mod testy_fala_audyt_2408 {
         let mut b = Kaprys::nowy(0, 0);
         let mut e = exit_retry_engine();
         let own = koszyk_z_pozycja(&mut b, &mut e, 3990.0);
-        let other = b.open_market(OrderReq {
-            side: Side::Sell, volume: 0.01, sl: None, tp: None,
-            basket: Some(999_999), level: 0, is_toucher: false, comment: "foreign".into(),
-        }).unwrap();
-        let manual = b.open_market(OrderReq {
-            side: Side::Buy, volume: 0.01, sl: None, tp: None,
-            basket: None, level: 0, is_toucher: false, comment: "manual".into(),
-        }).unwrap();
-        e.queued_exits.insert(own, QueuedExit { target: 3980.0, deadline: TS0,
-            reason: CloseReason::Harvest, market_at_decision: 3990.0 });
-        b.positions_mut().iter_mut().find(|p| p.ticket == own).unwrap().frozen = true;
+        let other = b
+            .open_market(OrderReq {
+                side: Side::Sell,
+                volume: 0.01,
+                sl: None,
+                tp: None,
+                basket: Some(999_999),
+                level: 0,
+                is_toucher: false,
+                comment: "foreign".into(),
+            })
+            .unwrap();
+        let manual = b
+            .open_market(OrderReq {
+                side: Side::Buy,
+                volume: 0.01,
+                sl: None,
+                tp: None,
+                basket: None,
+                level: 0,
+                is_toucher: false,
+                comment: "manual".into(),
+            })
+            .unwrap();
+        e.queued_exits.insert(
+            own,
+            QueuedExit {
+                target: 3980.0,
+                deadline: TS0,
+                reason: CloseReason::Harvest,
+                market_at_decision: 3990.0,
+            },
+        );
+        b.positions_mut()
+            .iter_mut()
+            .find(|p| p.ticket == own)
+            .unwrap()
+            .frozen = true;
         e.close_everything(&mut b, TS0, CloseReason::Manual);
         assert!(e.baskets[0].alive());
         assert!(e.baskets[0].pending_exit.is_some());
-        assert!(!e.queued_exits.contains_key(&own), "old discretionary exit loses authority even for frozen tickets");
+        assert!(
+            !e.queued_exits.contains_key(&own),
+            "old discretionary exit loses authority even for frozen tickets"
+        );
         assert_eq!(b.positions().len(), 3);
-        b.positions_mut().iter_mut().find(|p| p.ticket == own).unwrap().frozen = false;
-        let q = Quote { ts: TS0 + 100, bid: 3998.0, ask: 3998.3 };
+        b.positions_mut()
+            .iter_mut()
+            .find(|p| p.ticket == own)
+            .unwrap()
+            .frozen = false;
+        let q = Quote {
+            ts: TS0 + 100,
+            bid: 3998.0,
+            ask: 3998.3,
+        };
         e.close_or_queue(&mut b, own, CloseReason::Harvest, &q);
-        assert!(b.find_position(own).is_some(), "other exits cannot bypass pending retry cadence");
+        assert!(
+            b.find_position(own).is_some(),
+            "other exits cannot bypass pending retry cadence"
+        );
         e.retry_confirmed_exits(&mut b, TS0 + 1000);
         assert!(b.find_position(own).is_none());
         assert!(b.find_position(other).is_some());
@@ -16066,8 +14034,6 @@ mod testy_fala_audyt_2408 {
         assert_eq!(before, b.zamk);
     }
 
-    /// Filtr tempa (tryb twardy): broker odrzuca każde zamknięcie →
-    /// koszyk NIE przechodzi w Done, pozycje nie zostają sierotami.
     #[test]
     fn odrzut_tempa_nie_robi_sierot() {
         let zbuduj = |c: &mut Settings| {
@@ -16078,7 +14044,6 @@ mod testy_fala_audyt_2408 {
             c.fast_fill_soft_age_min = 0.0;
         };
 
-        // ---- odmowa: koszyk zostaje żywy ----
         let mut b = Kaprys::nowy(0, 1);
         let mut e = silnik(zbuduj);
         e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE_POD));
@@ -16094,7 +14059,6 @@ mod testy_fala_audyt_2408 {
             "Done przy odrzuconych zamknięciach robi SIEROTY — koszyk ma zostać żywy"
         );
 
-        // ---- zgoda: stare zachowanie, koszyk domknięty ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(zbuduj);
         e.on_message(&mut b, &wiad(1, 1, None, WEJSCIE_POD));
@@ -16111,7 +14075,6 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    /// Wyjście ze strefy (`zone_exit_adverse_close`): ta sama klasa sieroty.
     #[test]
     fn wyjscie_ze_strefy_nie_robi_sierot() {
         let zbuduj = |c: &mut Settings| {
@@ -16125,7 +14088,6 @@ mod testy_fala_audyt_2408 {
             ask: 3980.3,
         };
 
-        // ---- odmowa: koszyk żywy, ponowienie po pełnym progu ----
         let mut b = Kaprys::nowy(0, 1);
         let mut e = silnik(zbuduj);
         let t = koszyk_z_pozycja(&mut b, &mut e, 3990.0);
@@ -16141,7 +14103,6 @@ mod testy_fala_audyt_2408 {
             "znacznik zerowany = kadencja ponowienia"
         );
 
-        // ---- zgoda: stare zachowanie ----
         let mut b = Atrapa::nowa();
         let mut e = silnik(zbuduj);
         let t = koszyk_z_pozycja(&mut b, &mut e, 3990.0);
@@ -16154,9 +14115,6 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    // ============================================================
-    //  #13 — redukuj_ekspozycje: kontrakt zamrożenia + wspólna dźwignia
-    // ============================================================
 
     fn otworz_lot<B: Broker>(b: &mut B, vol: f64, lvl: i32) -> Ticket {
         b.open_market(OrderReq {
@@ -16172,8 +14130,6 @@ mod testy_fala_audyt_2408 {
         .expect("atrapa nie odmawia otwarcia")
     }
 
-    /// Własny stop-out po poziomie marginesu NIE zamyka pozycji `frozen` —
-    /// ręczne zamrożenie to kontrakt „silnik tego nie dotyka".
     #[test]
     fn redukcja_ekspozycji_omija_zamrozone() {
         let mut b = Atrapa::nowa();
@@ -16186,7 +14142,6 @@ mod testy_fala_audyt_2408 {
         if let Some(p) = b.positions_mut().iter_mut().find(|p| p.ticket == mrozona) {
             p.frozen = true;
         }
-        // equity 400 przy ~1600 $ marginesu → poziom ~25 % < progu 200 %
         e.redukuj_ekspozycje(&mut b, TS0 + 1_000);
         assert!(
             b.find_position(zwykla).is_none(),
@@ -16198,15 +14153,12 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    /// Wspólny helper dźwigni: `konto_dzwignia` obowiązuje TAKŻE w
-    /// `redukuj_ekspozycje` (dotąd tylko w `poziom_marginesu`).
     #[test]
     fn redukcja_ekspozycji_honoruje_konto_dzwignia() {
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             bez_zamykaczy(c);
             c.expo_cap_ml_pct = 200.0;
-            // dźwignia z presetu tak wysoka, że margines znika → poziom nad progiem
             c.konto_dzwignia = 1_000_000.0;
         });
         otworz_lot(&mut b, 1.0, 0);
@@ -16219,8 +14171,6 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    /// Każdy szczebel skasowany przez rachunkowy limit ekspozycji musi być
-    /// odtwarzalny z kroniki; dziennik nie może pomijać przyczyny redukcji.
     #[test]
     fn redukcja_ekspozycji_spisuje_kazda_ofiare_do_kroniki() {
         let mut b = Atrapa::nowa();
@@ -16253,9 +14203,6 @@ mod testy_fala_audyt_2408 {
         }));
     }
 
-    // ============================================================
-    //  #7 — limit pozycji: tylko nadmiar + odznaczanie (oś, kontrakt zera)
-    // ============================================================
 
     #[test]
     fn limit_kasuje_tylko_nadmiar_i_odznacza_po_luzie() {
@@ -16274,10 +14221,8 @@ mod testy_fala_audyt_2408 {
             "test wymaga czterech wiszących szczebli"
         );
 
-        // dwie pozycje (spoza koszyka — licznik liczy CAŁY rachunek)
         otworz_lot(&mut b, 0.10, 10);
         otworz_lot(&mut b, 0.10, 11);
-        // 2 pozycje + 4 wiszące > limit 3 → luz 1, nadmiar 3 (najdalsze od ceny)
         e.enforce_position_limit(&mut b, TS0 + 1_000);
         assert_eq!(
             b.pendings().len(),
@@ -16295,7 +14240,6 @@ mod testy_fala_audyt_2408 {
             "ofiary nadmiaru dostają znacznik `cancelled`"
         );
 
-        // pozycje domknięte → luz wraca → odznaczanie (tyle, ile luzu: 2)
         b.positions_mut().clear();
         e.enforce_position_limit(&mut b, TS0 + 2_000);
         assert_eq!(
@@ -16305,8 +14249,6 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    /// KONTRAKT ZERA osi #7: bez `limit_kasuje_tylko_nadmiar` ścieżka
-    /// zachowuje się jak dotąd — nic poniżej limitu, WSZYSTKO przy limicie.
     #[test]
     fn limit_bez_osi_kasuje_wszystko_jak_dotad() {
         let mut b = Atrapa::nowa();
@@ -16340,14 +14282,7 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    // ============================================================
-    //  #28 — KrotkieOkno przestaje być tożsame z Milcz
-    // ============================================================
 
-    /// Historia: okno główne (72 h) ROZERWANE (zakres 100 $ > max 10 $),
-    /// ostatnie 6 h stoi na 4100. `Milcz`: oba okna milkną → sygnał
-    /// przechodzi. `KrotkieOkno`: przesiadka na 6 h, próg 4100, kupno po
-    /// 4050 idzie POD prąd → blokada. A/B musi dać RÓŻNE odpowiedzi.
     #[test]
     fn krotkie_okno_daje_inna_odpowiedz_niz_milcz() {
         let zbuduj = |tryb: crate::settings::RegimeGdyRozerwany| {
@@ -16359,7 +14294,6 @@ mod testy_fala_audyt_2408 {
                 c.regime_zmiennosc_max = 10.0;
             });
             e.cfg.regime_gdy_rozerwany = tryb;
-            // 66 próbek huśtawki 4000/4100 (zakres 100 > max 10), potem 6 × 4100
             for i in 0..66 {
                 let px = if i % 2 == 0 { 4000.0 } else { 4100.0 };
                 e.price_hist.push((TS0 + i as i64 * 3_600_000, px));
@@ -16384,9 +14318,6 @@ mod testy_fala_audyt_2408 {
         );
     }
 
-    /// Rozgrzewka z bramkami zmienności: dopóki okno główne nie ma kompletu
-    /// próbek, próg MILCZY — zamiast podstawiać zakres krótkiego okna w
-    /// widełki mierzone na oknie głównym.
     #[test]
     fn rozgrzewka_milczy_zamiast_liczyc_krotki_zakres() {
         let mut e = silnik(|c| {
@@ -16394,7 +14325,6 @@ mod testy_fala_audyt_2408 {
             c.regime_ma_hours = 72.0;
             c.regime_zmiennosc_min = 5.0;
         });
-        // tylko 10 próbek — okno główne (72) nierozgrzane, lokalny zakres 8 > min 5
         for i in 0..10 {
             let px = if i % 2 == 0 { 4000.0 } else { 4008.0 };
             e.price_hist.push((TS0 + i as i64 * 3_600_000, px));
@@ -16409,15 +14339,9 @@ mod testy_fala_audyt_2408 {
 
 #[cfg(test)]
 mod testy_trail_sr {
-    //! Testy osi `trail_sr_*` — trailing SL po strukturze S/R z 1M
-    //! (OS_SR_SPEC.md pkt 6). Świece syntetyczne: znany swing → znany poziom.
-    //! Bramka parytetu (kontrakt zera co do centa) jedzie OSOBNO — bramka.sh.
     use super::testy_pakiet_a::{silnik, wiad, Atrapa, TS0};
     use super::*;
 
-    /// Karmi silnik świecami 1M: dla każdej pary (high, low) dwa ticki
-    /// w obrębie minuty. Spread zerowy — mid = bid, bez rozjazdów w asercjach.
-    /// Zwraca ts PIERWSZEGO ticka po ostatniej świecy (ten ją zamyka).
     fn karm_swiece(e: &mut Engine, b: &mut Atrapa, t0: Ts, swiece: &[(f64, f64)]) -> Ts {
         for (i, &(hi, lo)) in swiece.iter().enumerate() {
             let baza = t0 + i as i64 * 60_000;
@@ -16430,15 +14354,12 @@ mod testy_trail_sr {
         t0 + swiece.len() as i64 * 60_000 + 1_000
     }
 
-    /// Jeden tick — pierwszy tick nowej minuty ZAMYKA poprzednią świecę.
     fn tick(e: &mut Engine, b: &mut Atrapa, ts: Ts, px: f64) {
         b.ustaw_cene(ts, px, px);
         let q = b.quote();
         e.on_tick(b, &q);
     }
 
-    /// Pozycja wstrzyknięta wprost do atrapy (bez wypełniania limitów —
-    /// atrapa nie symuluje fillów, wzorzec `koszyk_z_pozycja` z sekcji M).
     fn pozycja(
         b: &mut Atrapa,
         side: Side,
@@ -16480,14 +14401,11 @@ mod testy_trail_sr {
         (4002.0, 4000.0),
     ];
 
-    /// Geometria: znany swing → znany poziom i znany czas potwierdzenia;
-    /// płaski szczyt odrzucony; anty-lookahead na filtrze `t_potw`.
     #[test]
     fn geometria_swingow_i_anty_lookahead() {
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             c.trail_sr_enabled = true;
-            // test mierzy GEOMETRIĘ, nie filtr oddechu (ten ma własny test)
             c.trail_sr_min_dist_price = 0.0;
         });
         let po = karm_swiece(&mut e, &mut b, TS0, &SWIECE_3995);
@@ -16506,7 +14424,6 @@ mod testy_trail_sr {
             t_potw, po,
             "potwierdzenie = zamknięcie 3. świecy PO szczytowej"
         );
-        // zero lookahead: o T−1 ms poziom jeszcze nie istnieje
         assert_eq!(
             e.sr_kandydat(Side::Buy, 4000.0, None, t_potw - 1),
             None,
@@ -16515,7 +14432,6 @@ mod testy_trail_sr {
         assert_eq!(e.sr_kandydat(Side::Buy, 4000.0, None, t_potw), Some(3995.0));
     }
 
-    /// Płaskie DNO (dwa równe minima) nie jest swingiem — w żadnym oknie.
     #[test]
     fn plaskie_dno_odrzucone() {
         let mut b = Atrapa::nowa();
@@ -16540,8 +14456,6 @@ mod testy_trail_sr {
         );
     }
 
-    /// Zapadka bezwzględna: pozycja bez SL dostaje pierwszy poziom, a
-    /// sekwencja swingów coraz NIŻSZYCH (BUY) ani razu nie cofa stopu.
     #[test]
     fn zapadka_sl_nigdy_sie_nie_cofa() {
         let mut b = Atrapa::nowa();
@@ -16559,8 +14473,6 @@ mod testy_trail_sr {
             "pozycja bez SL dostaje pierwszy poziom − offset"
         );
 
-        // rynek schodzi, powstaje NIŻSZY swing 3985 → propozycja 3984.5 jest
-        // gorsza od 3994.5 i zapadka ją ignoruje
         let nizsze = [
             (3993.0, 3992.0),
             (3991.0, 3990.0),
@@ -16579,8 +14491,6 @@ mod testy_trail_sr {
         assert_eq!(sl(&b, t), Some(3994.5), "SL ani razu nie spada");
     }
 
-    /// Kontrakt zera: przy `trail_sr_enabled = false` agregator nie jest
-    /// nawet karmiony, a SL pozycji zostaje nietknięty.
     #[test]
     fn kontrakt_zera_wylaczona_os_nie_dotyka_niczego() {
         let mut b = Atrapa::nowa();
@@ -16599,39 +14509,37 @@ mod testy_trail_sr {
     }
 
     #[test]
-    fn syntetyczny_swing_ustawia_sl_z_offsetem() {
+    fn przypadek_wlasciciela_4644() {
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             c.trail_sr_enabled = true;
             c.trail_sr_activation = TrailSrActivation::Entry;
             c.trail_sr_min_dist_price = 0.0;
         });
-        let t = pozycja(&mut b, Side::Buy, 4000.0, None, Some(4012.0), true);
+        let t = pozycja(&mut b, Side::Buy, 4640.0, None, Some(4652.0), true);
         let swiece = [
-            (4007.0, 4006.0),
-            (4006.5, 4005.5),
-            (4006.0, 4005.0),
-            (4005.5, 4004.5),
-            (4006.0, 4005.0),
-            (4006.5, 4005.5),
-            (4007.0, 4006.0),
+            (4647.0, 4646.0),
+            (4646.5, 4645.5),
+            (4646.0, 4645.0),
+            (4645.5, 4644.5),
+            (4646.0, 4645.0),
+            (4646.5, 4645.5),
+            (4647.0, 4646.0),
         ];
         let po = karm_swiece(&mut e, &mut b, TS0, &swiece);
-        tick(&mut e, &mut b, po, 4007.0);
+        tick(&mut e, &mut b, po, 4647.0);
         assert_eq!(
             sl(&b, t),
-            Some(4004.0),
-            "SL = syntetyczny swing low 4004.5 minus offset 0.5"
+            Some(4644.0),
+            "SL = swing low 4644.5 − offset 0.5 = 4644 — idealne miejsce właściciela"
         );
         assert_eq!(
             b.find_position(t).and_then(|p| p.tp),
-            Some(4012.0),
-            "syntetyczny TP pozostaje nietknięty"
+            Some(4652.0),
+            "TP 4652 nietknięty"
         );
     }
 
-    /// Filtry kandydata: oddech od ceny odrzuca bliski swing, oddech przed
-    /// celem odrzuca poziom pod celem, a k = 1 wybiera najbliższy z reszty.
     #[test]
     fn filtry_oddechu_i_wybor_najblizszego() {
         let mut b = Atrapa::nowa();
@@ -16639,7 +14547,6 @@ mod testy_trail_sr {
             c.trail_sr_enabled = true;
             c.trail_sr_min_dist_price = 0.0;
         });
-        // dwa potwierdzone swingi: 3995 i 3985
         let po = karm_swiece(&mut e, &mut b, TS0, &SWIECE_3995);
         let nizsze = [
             (3993.0, 3992.0),
@@ -16655,29 +14562,20 @@ mod testy_trail_sr {
         assert_eq!(
             e.sr.swingi_low.len(),
             2,
-            "syntetyczny test zawiera dokładnie dwa swingi"
+            "korpus testu: dwa swingi 3995 i 3985"
         );
         let ts = po2 + 1;
-        // k = 1: najbliższy od ceny
         assert_eq!(e.sr_kandydat(Side::Buy, 4000.0, None, ts), Some(3995.0));
-        // oddech od ceny 6 $: |4000−3995| = 5 < 6 odpada, zostaje 3985
         e.cfg.trail_sr_min_dist_price = 6.0;
         assert_eq!(e.sr_kandydat(Side::Buy, 4000.0, None, ts), Some(3985.0));
-        // oddech przed celem (stała 2 $, odległość bezwzględna): cel 3994
-        // leży 1 $ od poziomu 3995 → poziom odpada, zostaje 3985
         e.cfg.trail_sr_min_dist_price = 0.0;
         assert_eq!(
             e.sr_kandydat(Side::Buy, 4000.0, Some(3994.0), ts),
             Some(3985.0)
         );
-        // zła strona ceny: przy mid 3980 oba swingi leżą NAD ceną — nie ma
-        // kandydata (SL kupna nie może leżeć nad rynkiem)
         assert_eq!(e.sr_kandydat(Side::Buy, 3980.0, None, ts), None);
     }
 
-    /// `stops_level`: propozycja w pasie widełek → ŻADNEJ modyfikacji i
-    /// żadnego clampowania (stary SL trwa); ponowna próba na następnym
-    /// zamknięciu — gdy cena odjechała — przechodzi na PEŁNY poziom.
     #[test]
     fn stops_level_odmowa_pomija_swiece_bez_clampowania() {
         let mut b = Atrapa::nowa();
@@ -16689,15 +14587,12 @@ mod testy_trail_sr {
         });
         let t = pozycja(&mut b, Side::Buy, 3985.0, Some(3980.0), None, true);
         let po = karm_swiece(&mut e, &mut b, TS0, &SWIECE_3995);
-        // bid 4000, widełki 10 $: 3994.5 > 3990 — NIELEGALNY → pomiń świecę
         tick(&mut e, &mut b, po, 4000.0);
         assert_eq!(
             sl(&b, t),
             Some(3980.0),
             "odmowa brokera = pominięcie świecy; SL przycięty do widełek to INNY mechanizm"
         );
-        // cena odjeżdża: przy 4010 poziom 3994.5 jest już legalny — pierwsza
-        // próba na następnym zamknięciu przechodzi na pełny poziom struktury
         tick(&mut e, &mut b, po + 60_000, 4010.0);
         assert_eq!(
             sl(&b, t),
@@ -16706,8 +14601,6 @@ mod testy_trail_sr {
         );
     }
 
-    /// Zakres `Runner`: warstwa z celem zostaje bajt w bajt, runner dostaje
-    /// poziom struktury. Ta sama definicja runnera co w istniejącym passie.
     #[test]
     fn scope_runner_nie_dotyka_warstw() {
         let mut b = Atrapa::nowa();
@@ -16732,9 +14625,6 @@ mod testy_trail_sr {
         );
     }
 
-    /// Aktywacja `Tp2` liczona po DOTKNIĘCIACH celów sygnału (`tp_stage`
-    /// koszyka): przed TP2 zero modyfikacji, po dotknięciu TP2 pierwsze
-    /// zamknięcie świecy podbija.
     #[test]
     fn aktywacja_tp2_czeka_na_drugi_cel() {
         let mut b = Atrapa::nowa();
@@ -16747,7 +14637,6 @@ mod testy_trail_sr {
             TrailSrActivation::Tp2,
             "default ze spec"
         );
-        // koszyk CAŁY pod rynkiem (limity, zero wejść rynkowych przy 3998)
         e.on_message(
             &mut b,
             &wiad(
@@ -16812,8 +14701,6 @@ mod testy_trail_sr {
             (b, e, id, t)
         };
 
-        // ---- wariant A: S/R (3994.5) NAD BE (3990) — S/R ma zostać ----
-        // kolejność 1: najpierw S/R, potem BE
         let (mut b, mut e, id, t) = zaloz(true);
         let po = karm_swiece(&mut e, &mut b, TS0, &SWIECE_3995);
         tick(&mut e, &mut b, po, 4000.0);
@@ -16824,7 +14711,6 @@ mod testy_trail_sr {
             Some(3994.5),
             "BE nie cofa stopu podbitego przez S/R"
         );
-        // kolejność 2: najpierw BE, potem S/R — ten sam wynik
         let (mut b, mut e, id, t) = zaloz(true);
         tick(&mut e, &mut b, TS0 + 500, 4000.0);
         e.move_basket_to_be(&mut b, id, TS0 + 600);
@@ -16837,7 +14723,6 @@ mod testy_trail_sr {
             "S/R nad BE wygrywa — niezależnie od kolejności"
         );
 
-        // ---- wariant B: S/R (3986.5) POD BE (3990) — BE ma zostać ----
         let nizszy = [
             (4002.0, 3992.0),
             (4002.0, 3991.0),
@@ -16847,14 +14732,12 @@ mod testy_trail_sr {
             (4002.0, 3991.0),
             (4002.0, 3992.0),
         ];
-        // kolejność 1: najpierw BE, potem S/R
         let (mut b, mut e, id, t) = zaloz(true);
         tick(&mut e, &mut b, TS0 + 500, 4000.0);
         e.move_basket_to_be(&mut b, id, TS0 + 600);
         let po = karm_swiece(&mut e, &mut b, TS0 + 60_000, &nizszy);
         tick(&mut e, &mut b, po, 4000.0);
         assert_eq!(sl(&b, t), Some(3990.0), "S/R pod BE przegrywa z zapadką");
-        // kolejność 2: najpierw S/R, potem BE — ten sam wynik
         let (mut b, mut e, id, t) = zaloz(true);
         let po = karm_swiece(&mut e, &mut b, TS0, &nizszy);
         tick(&mut e, &mut b, po, 4000.0);
@@ -16870,7 +14753,6 @@ mod testy_trail_sr {
             "BE nadpisuje w górę — lepszy wygrywa"
         );
 
-        // ---- kontrakt zera: oś WYŁĄCZONA → BE nadpisuje bezwarunkowo ----
         let (mut b, mut e, id, t) = zaloz(false);
         tick(&mut e, &mut b, TS0 + 500, 4000.0);
         if let Some(p) = b.positions_mut().iter_mut().find(|p| p.ticket == t) {
@@ -16895,7 +14777,6 @@ mod testy_trail_sr {
         };
         let mut legacy = silnik(ustaw);
         let mut zero = silnik(ustaw);
-        // To pole ma być martwe, dopóki żadna dynamiczna bramka nie działa.
         zero.cfg.trail_sr_atr_period = 99;
         let t1 = pozycja(&mut b1, Side::Buy, 3990.0, None, None, true);
         let t2 = pozycja(&mut b2, Side::Buy, 3990.0, None, None, true);
@@ -16919,8 +14800,6 @@ mod testy_trail_sr {
             c.trail_sr_min_prominence_atr = 0.1;
             c.trail_sr_min_dist_price = 0.0;
         });
-        // close każdej świecy = low. TR: 1, 5, 6 => ATR=4. Swing low=5,
-        // prominencja=min(10,11)-5=5 => 1.25 ATR.
         let swiece = [(10.0, 9.0), (10.0, 5.0), (11.0, 9.0)];
         let po = karm_swiece(&mut e, &mut b, TS0, &swiece);
         assert!(
@@ -16938,7 +14817,6 @@ mod testy_trail_sr {
         assert_eq!(e.sr_kandydat(Side::Buy, 12.0, None, t), Some(5.0));
         e.cfg.trail_sr_min_prominence_atr = 1.26;
         assert_eq!(e.sr_kandydat(Side::Buy, 12.0, None, t), None);
-        // Późniejsza zmienność nie przelicza historycznej jakości.
         let zapisany = e.sr.prominence_low[0].2;
         tick(&mut e, &mut b, po + 60_000, 100.0);
         assert_eq!(e.sr.prominence_low[0].2, zapisany);
@@ -16975,7 +14853,6 @@ mod testy_trail_sr {
                 close: 10.0,
                 spread: 0.30,
             },
-            // marker/open candle: zamyka poprzednią, sama nie wchodzi do miar
             SrWarmupBar {
                 ts: TS0 + 180_000,
                 high: 10.0,
@@ -17079,15 +14956,9 @@ mod testy_odzysk_storm {
     use super::testy_pakiet_a::{silnik, wiad, zrodlo, Atrapa, TS0};
     use super::*;
 
-    /// Strefa GŁĘBOKO pod rynkiem atrapy (bid 3998), żeby wszystkie szczeble
-    /// legły jako zlecenia oczekujące zamiast wejść po rynku przez
-    /// `pending_cross_policy = Market`.
     const KUPNO: &str = "BUY LIMITS GOLD @ 3990/3985\nTP 4010\nTP 4020\nSL 3980";
-    /// To samo dla sprzedaży — strefa WYSOKO nad rynkiem.
     const SPRZEDAZ: &str = "SELL LIMITS GOLD @ 4010/4005\nTP 3990\nTP 3980\nSL 4020";
 
-    /// Geometria STORM w miniaturze: pięć warstw w strefie, stały lot bazowy,
-    /// bez limitu ryzyka koszyka (żeby liczyć SZCZEBLE, a nie budżet).
     fn siatka(c: &mut Settings) {
         c.lot_mode_percent = false;
         c.lot_fixed = 0.01;
@@ -17113,13 +14984,7 @@ mod testy_odzysk_storm {
         }
     }
 
-    // ============================================================
-    //  W30 — WARSTWA ALLOWANCE 1 $ PRZED STREFĄ
-    // ============================================================
 
-    /// Kontrakt zera: bez OBU pól plan siatki jest identyczny co do szczebla.
-    /// Sama kwota bez jednostek (i odwrotnie) też nie stawia niczego — dwa
-    /// pola opisują dwie różne decyzje i żadne nie zgaduje drugiego.
     #[test]
     fn w30_kontrakt_zera_wymaga_obu_pol() {
         let odniesienie = {
@@ -17149,10 +15014,6 @@ mod testy_odzysk_storm {
         }
     }
 
-    /// Geometria: przy BUY warstwa leży NAD górną krawędzią strefy, przy SELL
-    /// POD dolną — dokładnie odwrotnie niż `entry_deep_offset` i touchery.
-    /// To jest reguła Tylera („anything below 4699 is a valid entry zone"
-    /// dla strefy 4698–4696), a nie wariant istniejącej osi.
     #[test]
     fn w30_geometria_allowance_nad_strefa_i_pod_strefa() {
         for (tekst, strona) in [(KUPNO, Side::Buy), (SPRZEDAZ, Side::Sell)] {
@@ -17177,7 +15038,6 @@ mod testy_odzysk_storm {
                 "{strona:?}: warstwa ma leżeć 1 $ za krawędzią {krawedz:.2}, leży {:.2}",
                 w.price
             );
-            // POZA strefą, po stronie GORSZYCH wejść — to jest cała treść osi
             assert!(
                 strona.better(krawedz, w.price),
                 "{strona:?}: warstwa allowance musi być GORSZYM wejściem niż krawędź"
@@ -17195,8 +15055,6 @@ mod testy_odzysk_storm {
         }
     }
 
-    /// Warstwa DOKŁADA ekspozycję — i to jest jej główny koszt, więc test
-    /// pilnuje LICZBY zleceń, nie samego istnienia szczebla.
     #[test]
     fn w30_allowance_doklada_zlecenia_ponad_siatke() {
         let mut b0 = Atrapa::nowa();
@@ -17219,23 +15077,17 @@ mod testy_odzysk_storm {
         );
     }
 
-    // ============================================================
-    //  W31a — BE KRYJE PÓŹNE FILLE (scenariusz syntetyczny)
-    // ============================================================
 
-    /// Syntetyczny koszyk: komenda BE następuje przed późniejszym
-    /// wypełnieniem limitu. Zwraca atrapę, silnik, koszyk i późny ticket.
-    fn scenariusz_poznego_filla(os: bool) -> (Atrapa, Engine, u32, Ticket) {
+    fn scenariusz_b56(os: bool) -> (Atrapa, Engine, u32, Ticket) {
         let mut b = Atrapa::nowa();
         let mut e = silnik(|c| {
             siatka(c);
-            c.be_offset = 0.3;
+            c.be_offset = 0.3; // dokładnie jak w presecie STORM-1
             c.be_covers_late_fills = os;
         });
         e.on_message(&mut b, &wiad(1, 1, None, KUPNO));
         let id = e.baskets[0].id;
 
-        // komenda kanału: „SL IS SET TO BE"
         e.on_message(
             &mut b,
             &wiad_ts(1, 2, Some(1), TS0 + 60_000, "SL IS SET TO BE"),
@@ -17245,9 +15097,6 @@ mod testy_odzysk_storm {
             "komenda BE ma zostawić znacznik chwili"
         );
 
-        // PÓŹNY FILL: jedno ze zleceń oczekujących realizuje się trzy minuty
-        // później. Atrapa nie wypełnia sama, więc odtwarzamy realizację
-        // ręcznie: zlecenie znika, pozycja pojawia się z jego ceną i stopem.
         let o = b.pendings()[0].clone();
         let _ = b.cancel_pending(o.ticket);
         let t = b
@@ -17277,11 +15126,9 @@ mod testy_odzysk_storm {
         (b, e, id, t)
     }
 
-    /// Kontrakt zera: przy `false` późny fill nosi ORYGINALNY, głęboki stop —
-    /// czyli dokładnie tę stratę, o której mówi dziennik.
     #[test]
     fn w31a_kontrakt_zera_pozny_fill_nosi_stary_sl() {
-        let (b, e, _, t) = scenariusz_poznego_filla(false);
+        let (b, e, _, t) = scenariusz_b56(false);
         assert!(!e.cfg.be_covers_late_fills, "oś ma być domyślnie wyłączona");
         let p = b.find_position(t).expect("pozycja żyje");
         assert_eq!(
@@ -17291,11 +15138,9 @@ mod testy_odzysk_storm {
         );
     }
 
-    /// Oś włączona: fill wypełniony PO komendzie dostaje stop na SWOJEJ cenie
-    /// wejścia z tym samym offsetem, co `move_basket_to_be`.
     #[test]
     fn w31a_be_kryje_fill_po_komendzie() {
-        let (b, _, _, t) = scenariusz_poznego_filla(true);
+        let (b, _, _, t) = scenariusz_b56(true);
         let p = b.find_position(t).expect("pozycja żyje");
         let oczekiwany = p.open_price + 0.3;
         assert_eq!(
@@ -17306,8 +15151,6 @@ mod testy_odzysk_storm {
         );
     }
 
-    /// Pozycja otwarta PRZED komendą nie jest ruszana drugi raz — oś dotyczy
-    /// wyłącznie tego, co powstało PÓŹNIEJ, a nie całego koszyka co tick.
     #[test]
     fn w31a_wczesna_pozycja_nie_jest_ruszana_ponownie() {
         let mut b = Atrapa::nowa();
@@ -17318,7 +15161,6 @@ mod testy_odzysk_storm {
         });
         e.on_message(&mut b, &wiad(1, 1, None, KUPNO));
         let id = e.baskets[0].id;
-        // pozycja żyjąca PRZED komendą
         let t = b
             .open_market(OrderReq {
                 side: Side::Buy,
@@ -17337,7 +15179,6 @@ mod testy_odzysk_storm {
             &wiad_ts(1, 2, Some(1), TS0 + 60_000, "SL IS SET TO BE"),
         );
         let po_komendzie = b.find_position(t).and_then(|p| p.sl);
-        // ktoś inny (drabinka, S/R) podbija stop jeszcze wyżej
         if let Some(p) = b.positions_mut().iter_mut().find(|p| p.ticket == t) {
             p.sl = Some(3999.0);
         }
@@ -17356,14 +15197,7 @@ mod testy_odzysk_storm {
         );
     }
 
-    // ============================================================
-    //  W31b — „TAKE PARTIALS" JAKO KOMENDA
-    // ============================================================
 
-    /// Parser: przy wyłączonej osi wiadomość rozkłada się jak przed zmianą
-    /// (żadnego `TakePartials`), przy włączonej — powstaje polecenie.
-    /// Wariant WARUNKOWY („you can close 3 layers … or hold") zostaje
-    /// informacją w obu położeniach: to jest wybór autora, nie rozkaz.
     #[test]
     fn w31b_parser_kontrakt_zera_i_wariant_warunkowy() {
         let rozkaz = "Take partials.";
@@ -17396,9 +15230,6 @@ mod testy_odzysk_storm {
         );
     }
 
-    /// Silnik: koszyk z pięcioma pozycjami po komendzie inkasuje transzę
-    /// `partials_pct` — i NIE rusza etapu koszyka (transza partials jest
-    /// własną liczbą, a nie szczeblem drabinki `official_*`).
     #[test]
     fn w31b_inkaso_na_komende_i_kontrakt_zera() {
         let zaloz = |wykonuj: bool, pct: f64| {
@@ -17434,7 +15265,6 @@ mod testy_odzysk_storm {
             (b, e)
         };
 
-        // ---- kontrakt zera: oś wyłączona, komenda zostaje informacją ----
         let (b, e) = zaloz(false, 40.0);
         assert_eq!(
             b.positions().len(),
@@ -17443,7 +15273,6 @@ mod testy_odzysk_storm {
         );
         assert_eq!(e.baskets[0].tp_stage, 0, "bez osi etap nie drga");
 
-        // ---- oś włączona, transza 0 %: polecenie widziane, nic nie robi ----
         let (b, _) = zaloz(true, 0.0);
         assert_eq!(
             b.positions().len(),
@@ -17451,7 +15280,6 @@ mod testy_odzysk_storm {
             "transza 0 % nie ma prawa nic zamknąć"
         );
 
-        // ---- oś włączona, 40 % z pięciu pozycji = 2 warstwy ----
         let (b, e) = zaloz(true, 40.0);
         assert_eq!(
             b.positions().len(),
@@ -17465,9 +15293,6 @@ mod testy_odzysk_storm {
         );
     }
 
-    // ============================================================
-    //  W33 — ZASIĘG „CLOSE ALL"
-    // ============================================================
 
     #[test]
     fn w33_close_all_adresowanie() {
@@ -17480,7 +15305,6 @@ mod testy_odzysk_storm {
             e.on_message(&mut b, &wiad(1, 1, None, KUPNO));
             e.on_message(&mut b, &wiad(1, 2, None, SPRZEDAZ));
             assert_eq!(e.baskets.len(), 2, "test wymaga DWÓCH żywych koszyków");
-            // po jednej pozycji w każdym koszyku
             for i in 0..2 {
                 let id = e.baskets[i].id;
                 let side = e.baskets[i].side;
@@ -17532,9 +15356,6 @@ mod testy_odzysk_storm {
         assert!(e.baskets[1].alive(), "cudzy koszyk nietknięty");
     }
 
-    /// Kontrakt zera W33 liczony na SAMYM DOMYŚLNYM ustawieniu: pole ma
-    /// startować w `Global`, żeby żaden preset nie zmienił zachowania przez
-    /// samo dodanie osi.
     #[test]
     fn w33_domyslny_zasieg_to_global() {
         assert_eq!(
@@ -17547,35 +15368,13 @@ mod testy_odzysk_storm {
 
 #[cfg(test)]
 mod testy_krawedz_strefy {
-    //! NIEZMIENNIK: żadna warstwa ani wejście nie powstaje ZA DALSZĄ
-    //! KRAWĘDZIĄ strefy z sygnału (przy kupnie poniżej `lo`, przy sprzedaży
-    //! powyżej `hi`).
-    //!
-    //! Źródło reguły: `wiedza/ALPHA_TEST_EA.md` §7 pkt 1 („szczebel poniżej
-    //! dalszej krawędzi strefy — nie stawiamy; do wpisania jako NIEZMIENNIK
-    //! konstrukcji, nie jako pole ustawień") oraz `wiedza/STRATEGIA_TYLERA.md`
-    //! („warstwy wyłącznie W strefie co 1 $, allowance NAD górną krawędzią").
     use super::testy_pakiet_a::{silnik, wiad, Atrapa, TS0};
     use super::*;
 
-    /// Kupno, strefa 6 $ (3894–3900), cena rynku 3998 — czyli strefa leży pod
-    /// rynkiem i wszystkie limity są wykonalne.
     const BUY6: &str = "BUY LIMITS GOLD @ 3900/3894\nTP 3910\nTP 3920\nSL 3880";
-    /// Sprzedaż, strefa 6 $ (4094–4100) NAD rynkiem — lustro `BUY6`.
     const SELL6: &str = "SELL LIMITS GOLD @ 4094/4100\nTP 4084\nTP 4074\nSL 4101";
-    /// Kupno ze strefą TUŻ NAD rynkiem (3999–4005 przy kwotowaniu 3998/3998,3):
-    /// żaden limit kupna się nie położy, więc wariant zastępczy
-    /// `pending_cross_policy = Market` chce wejść po 3998,3 — czyli 0,7 $ POD
-    /// dolną krawędzią.
-    ///
-    /// Stop MUSI leżeć poniżej bieżącej ceny, inaczej sygnał odpada wcześniej
-    /// na `skip_if_sl_breached` (domyślnie WŁĄCZONE) i koszyk w ogóle nie
-    /// powstaje — sprawdzone, `odrzuty = {"SlBreached": 1}`.
     const BUY_NAD_RYNKIEM: &str = "BUY LIMITS GOLD @ 4005/3999\nTP 4010\nTP 4020\nSL 3997";
 
-    /// Geometria kanonu Synergy (EA-M-SYN): krok 1 $ z PPM, allowance 1,3 $
-    /// nad górną krawędzią, `entry_deep_offset = −0,3` (czyli siatka kończy
-    /// się 0,3 $ NAD dolną krawędzią — spread z onboardingu).
     fn kanon(c: &mut Settings) {
         c.zone_offset_mode = ZoneOffsetMode::Directional;
         c.entry_deep_offset = -0.3;
@@ -17588,16 +15387,11 @@ mod testy_krawedz_strefy {
         c.lot_fixed = 0.01;
     }
 
-    /// Ta sama geometria, ale z `entry_deep_offset = 3,0` — wartość z ery ATFX
-    /// opisana w `settings.rs` przy `drop_unplaceable_levels` („99,1 % siatek
-    /// miało dolne szczeble POD stop lossem"). To jest geometria, w której
-    /// siatka NAPRAWDĘ schodzi pod dalszą krawędź.
     fn glebokie(c: &mut Settings) {
         kanon(c);
         c.entry_deep_offset = 3.0;
     }
 
-    /// Ceny szczebli koszyka (bez touchérów i bez warstwy allowance).
     fn poziomy(e: &Engine) -> Vec<Px> {
         e.baskets[0]
             .levels
@@ -17614,23 +15408,18 @@ mod testy_krawedz_strefy {
         (b, e)
     }
 
-    /// (a) STREFA 6 $, `entry_units = 12`: ani jeden poziom pod dolną
-    /// krawędzią — i ile poziomów zostaje naprawdę.
     #[test]
     fn a_zaden_poziom_ponizej_dolnej_krawedzi() {
-        // --- geometria kanonu: reguła nie ma czego wyciąć ---
         let (_, e0) = postaw(kanon, BUY6);
         let p0 = poziomy(&e0);
         assert_eq!(e0.baskets[0].entry_lo, 3894.0);
         assert_eq!(e0.baskets[0].entry_hi, 3900.0);
-        // strefa robocza 3894,3 … 3901,3 → krok 1 $ → OSIEM poziomów
         assert_eq!(p0.len(), 8, "kanon Synergy: {p0:?}");
         assert!(
             p0.iter().all(|p| *p >= 3894.0 - 1e-9),
             "kanon i tak nie schodzi pod lo: {p0:?}"
         );
 
-        // --- geometria głęboka: BEZ osi siatka schodzi pod krawędź ---
         let (_, e1) = postaw(glebokie, BUY6);
         let p1 = poziomy(&e1);
         let pod1 = p1.iter().filter(|p| **p < 3894.0 - 1e-9).count();
@@ -17644,7 +15433,6 @@ mod testy_krawedz_strefy {
             "bez osi mają zostać trzy poziomy pod krawędzią: {p1:?}"
         );
 
-        // --- ta sama geometria Z OSIĄ: ani jednego ---
         let (_, e2) = postaw(
             |c| {
                 glebokie(c);
@@ -17664,7 +15452,6 @@ mod testy_krawedz_strefy {
         );
     }
 
-    /// (b) SPRZEDAŻ — lustro co do znaku: nic POWYŻEJ `hi`.
     #[test]
     fn b_sell_symetrycznie() {
         let (_, e1) = postaw(glebokie, SELL6);
@@ -17699,16 +15486,8 @@ mod testy_krawedz_strefy {
         );
     }
 
-    /// (c) WEJŚCIE RYNKOWE, gdy cena jest już pod strefą — odmowa z wpisem
-    /// w dzienniku.
-    ///
-    /// To jest ścieżka, która potrafi otworzyć pozycję dowolnie głęboko
-    /// niezależnie od geometrii siatki: żaden limit kupna nie mieści się przy
-    /// cenie, więc `pending_cross_policy = Market` zamienia KAŻDY szczebel na
-    /// zlecenie rynkowe — po cenie, która leży pod dolną krawędzią.
     #[test]
     fn c_wejscie_rynkowe_pod_strefa_odmowa() {
-        // BEZ osi: cała siatka wchodzi po rynku 96 $ pod dolną krawędzią
         let (b0, e0) = postaw(kanon, BUY_NAD_RYNKIEM);
         assert!(
             !b0.positions().is_empty(),
@@ -17724,7 +15503,6 @@ mod testy_krawedz_strefy {
             "bez osi nie ma odmów"
         );
 
-        // Z OSIĄ: ani jednej pozycji, odmowa policzona i opisana
         let (b1, e1) = postaw(
             |c| {
                 kanon(c);
@@ -17755,12 +15533,6 @@ mod testy_krawedz_strefy {
         );
     }
 
-    /// (d) RE-ENTRY nie wchodzi pod krawędzią.
-    ///
-    /// Dokładka po celu pilnuje strefy ROBOCZEJ (`zone_lo`/`zone_hi`), a ta
-    /// przy `entry_deep_offset = 3,0` sięga 3 $ POD krawędź z sygnału — czyli
-    /// bez niezmiennika re-entry ma prawo wejść tam, gdzie siatce właśnie
-    /// zabroniliśmy.
     #[test]
     fn d_reentry_nie_wchodzi_pod_krawedzia() {
         let przygotuj = |zakaz: bool| {
@@ -17773,7 +15545,6 @@ mod testy_krawedz_strefy {
                 c.zakaz_ponizej_krawedzi = zakaz;
             });
             e.on_message(&mut b, &wiad(1, 100, None, BUY6));
-            // koszyk „po TP1", bez wiszących zleceń i bez pozycji
             let id = e.baskets[0].id;
             b.pendings_mut().retain(|o| o.basket != Some(id));
             {
@@ -17782,8 +15553,6 @@ mod testy_krawedz_strefy {
                 bk.had_positions = true;
                 bk.last_entry_px = None;
             }
-            // cena 3892 — W strefie roboczej (3891 … 3901,3), ale 2 $ POD
-            // dolną krawędzią z sygnału (3894)
             b.ustaw_cene(TS0 + 60_000, 3891.9, 3892.0);
             let q = b.quote();
             e.reentry_pass(&mut b, &q);
@@ -17801,12 +15570,6 @@ mod testy_krawedz_strefy {
         );
     }
 
-    /// (e) KONTRAKT ZERA.
-    ///
-    /// Domyślna wartość to `false`, a przy `false` KAŻDA ze ścieżek zachowuje
-    /// się dokładnie tak, jak przed dodaniem osi: siatka schodzi pod krawędź,
-    /// wejście rynkowe pod strefą przechodzi, licznik odrzutów jest pusty,
-    /// a plan ma tę samą liczbę szczebli i te same ceny.
     #[test]
     fn e_kontrakt_zera() {
         assert!(
@@ -17847,8 +15610,6 @@ mod testy_krawedz_strefy {
             }
         }
 
-        // Predykat sam w sobie: przy wyłączonej osi NIGDY nie mówi „za krawędzią",
-        // choćby cena leżała o sto dolarów pod strefą.
         let e = silnik(|c| c.zakaz_ponizej_krawedzi = false);
         assert!(!e.za_dalsza_krawedzia(Side::Buy, 3800.0, 3894.0, 3900.0));
         assert!(!e.za_dalsza_krawedzia(Side::Sell, 4200.0, 4094.0, 4100.0));
@@ -17863,7 +15624,6 @@ mod testy_krawedz_strefy {
             !e.za_dalsza_krawedzia(Side::Sell, 4100.0, 4094.0, 4100.0),
             "NA krawędzi wolno"
         );
-        // strefa zdegenerowana (koszyk „BUY NOW") nie podlega regule
         assert!(!e.za_dalsza_krawedzia(Side::Buy, 3800.0, 3900.0, 3900.0));
     }
 }
@@ -17875,7 +15635,6 @@ mod testy_margines_lancuch {
     use crate::routing::{Widok, Wlasnosc};
     use crate::wielosilnik;
 
-    /// Slot 1 i slot 2 — dwie nogi jednego rachunku.
     const SLOT_A: u32 = 1;
     const SLOT_B: u32 = 2;
 
@@ -17887,8 +15646,6 @@ mod testy_margines_lancuch {
         }
     }
 
-    /// Otwiera pozycję kupna w koszyku `id` — wprost u brokera, bo test bada
-    /// LICZENIE, a nie drogę, którą pozycja powstała.
     fn otworz(b: &mut Atrapa, id: u32, vol: f64) {
         b.open_market(OrderReq {
             side: Side::Buy,
@@ -17903,8 +15660,6 @@ mod testy_margines_lancuch {
         .expect("atrapa nie odmawia otwarcia");
     }
 
-    /// Poziom marginesu policzony wprost ze WSZYSTKICH pozycji atrapy —
-    /// wzorem brokera, bez udziału silnika. To jest liczba, którą widzi konto.
     fn prawda(b: &Atrapa) -> f64 {
         let acc = b.account();
         let lev = acc.leverage.max(1) as f64;
@@ -17916,12 +15671,6 @@ mod testy_margines_lancuch {
         acc.equity / m * 100.0
     }
 
-    /// **TEST 1 — PADA NA KODZIE SPRZED NAPRAWY.**
-    ///
-    /// Dwie nogi, ta sama chwila, jeden rachunek: obie muszą podać ten sam
-    /// poziom marginesu i musi to być poziom CAŁEGO konta. Przed naprawą noga
-    /// z 0,02 lota widziała ~2 500 %, noga z 0,10 lota ~500 %, a prawda
-    /// wynosiła ~417 % — trzy różne liczby na jedno konto.
     #[test]
     fn obie_nogi_licza_ten_sam_poziom_marginesu_calego_rachunku() {
         let mut b = Atrapa::nowa();
@@ -17961,17 +15710,9 @@ mod testy_margines_lancuch {
         );
     }
 
-    /// **TEST 2 — KONTRAKT ZERA.**
-    ///
-    /// Jeden silnik: widok nie chowa niczego, więc `ukryte_*` są puste i suma
-    /// przebiega po tych samych składnikach w tej samej kolejności. Wynik ma
-    /// być identyczny CO DO BITU z liczonym wprost na brokerze — i taki sam
-    /// jak przed naprawą.
     #[test]
     fn jeden_silnik_poziom_marginesu_bit_w_bit_bez_zmian() {
         let mut b = Atrapa::nowa();
-        // dwa koszyki, w tym jeden ze slotu, którego nikt nie obsługuje —
-        // silnik zapasowy bierze wszystko, więc chować nie ma czego
         otworz(&mut b, 1, 0.07);
         otworz(&mut b, wielosilnik::baza_slotu(7) + 3, 0.03);
         b.place_pending(PendingReq {
@@ -18011,17 +15752,9 @@ mod testy_margines_lancuch {
             d_widok.map(f64::to_bits),
             "jeden silnik: poziom marginesu DOCELOWY drgnął przez widok"
         );
-        // i dla porządku: to jest liczba całego rachunku, a nie zero
         assert!(t_bez.is_some_and(|x| x > 0.0));
     }
 
-    /// **TEST 3 — BRAMKA NAPRAWDĘ ZAMYKA.**
-    ///
-    /// Noga A zjadła margines (0,5 lota przy 400 $ equity → ~100 % poziomu),
-    /// noga B nie ma ani jednej własnej pozycji i dostaje sygnał wejścia przy
-    /// `ml_min_wejscie = 150`. Przed naprawą B widziała „brak ekspozycji =
-    /// poziom nieskończony" i wchodziła; teraz musi odpaść z kodem
-    /// `MarginLevel`.
     #[test]
     fn ml_min_wejscie_blokuje_noge_b_gdy_margines_zjadla_noga_a() {
         let mut b = Atrapa::nowa();
@@ -18066,7 +15799,6 @@ mod testy_margines_lancuch {
 pub static ODSIANE_SZCZEBLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static KOSZYKI_Z_ODSIEWEM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Ile szczebli odsialo sito i ile koszykow tego doswiadczylo.
 pub fn odsiew_sita() -> (u64, u64) {
     (
         ODSIANE_SZCZEBLE.load(std::sync::atomic::Ordering::Relaxed),

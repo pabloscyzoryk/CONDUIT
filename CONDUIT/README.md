@@ -13,7 +13,7 @@ market ticks, exports, sweep results, or compiled executables.
 The repository includes the accumulated public preset catalogue under
 `config/presets/`. `GOD-X7` is marked as the current recommended reference,
 but it is **not the bot** and it is not the only strategy the engine can
-express. CONDUIT exposes 498 core axes, multiple signal formats, several
+express. CONDUIT exposes 515 core axes, multiple signal formats, several
 execution modes, and independent per-format presets.
 
 > Trading leveraged products can cause losses. Backtests are not guarantees.

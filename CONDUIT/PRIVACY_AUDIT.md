@@ -39,7 +39,8 @@ test-only sentinels, normal identifiers/function names, schema explanations or
 format examples; unresolved findings: **0**. Obvious placeholder credentials in
 tests and documentation remain deliberately nonfunctional.
 
-Five public presets have `SWEEP` in their names, while two Rust source/test files
+Five public presets have `SWEEP` in their names, three Python source files
+implement the public quick-sweep workflow, and two Rust source/test files
 implement the `alllogs` feature. These names triggered a filename heuristic but
 are neither sweep outputs nor bundled log data.
 

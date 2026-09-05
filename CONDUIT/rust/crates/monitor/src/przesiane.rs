@@ -305,6 +305,17 @@ impl Wynik {
 #[derive(Default)]
 pub struct Przesiane {
     pub wyniki: Vec<Wynik>,
+    /// `true` means that the file is a quick-sweep screening artefact, not
+    /// an exact backtest.  The rows remain sortable inside that screening
+    /// stage, but must never be presented as coronation/release candidates.
+    pub approximate: bool,
+    /// Requested quick block size. `None` for the historical exact map.
+    pub quick_tick_stride: Option<usize>,
+    /// Explicit release gate copied from the wrapper. Exact legacy maps are
+    /// eligible here; the ordinary reconciliation gates still apply later.
+    pub coronation_eligible: bool,
+    /// Human-readable warning supplied by the producer.
+    pub warning: Option<String>,
     /// Znacznik czasu pliku przy ostatnim odczycie — po nim poznajemy, że
     /// doszło coś nowego i trzeba przeliczyć rangi.
     pub stempel: Option<std::time::SystemTime>,
@@ -319,7 +330,34 @@ pub fn wczytaj(katalog: &Path) -> Option<Przesiane> {
     let sciezka = sciezka_wynikow(katalog)?;
     let stempel = std::fs::metadata(&sciezka).and_then(|m| m.modified()).ok();
     let txt = std::fs::read_to_string(&sciezka).ok()?;
-    let mapa: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&txt).ok()?;
+    let mut root: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&txt).ok()?;
+
+    // Quick results deliberately use a wrapper so that a release adapter
+    // expecting the historical flat map cannot consume them accidentally.
+    // Unwrap only an explicitly labelled approximate document: a perfectly
+    // legal legacy preset named `results` must remain a normal preset.
+    let approximate = root
+        .get("approximate")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let (mapa, quick_tick_stride, coronation_eligible, warning) = if approximate {
+        let stride = root
+            .get("quick_tick_stride")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok());
+        let eligible = root
+            .get("coronation_eligible")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let warning = root
+            .get("warning")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let results = root.remove("results")?.as_object()?.clone();
+        (results, stride, eligible, warning)
+    } else {
+        (root, None, true, None)
+    };
 
     let mut wyniki: Vec<Wynik> = mapa
         .into_iter()
@@ -336,7 +374,14 @@ pub fn wczytaj(katalog: &Path) -> Option<Przesiane> {
         return None;
     }
     ocena_laczna(&mut wyniki);
-    Some(Przesiane { wyniki, stempel })
+    Some(Przesiane {
+        wyniki,
+        approximate,
+        quick_tick_stride,
+        coronation_eligible,
+        warning,
+        stempel,
+    })
 }
 
 /// Który plik czytać: cząstkowy ma pierwszeństwo, bo jest świeższy.
@@ -453,6 +498,16 @@ pub fn kolejnosc(wyniki: &[Wynik], k: &Kryterium) -> Vec<usize> {
 #[cfg(test)]
 mod testy {
     use super::*;
+
+    fn temp_dir(suffix: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "conduit-przesiane-{}-{suffix}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     fn w(nazwa: &str, zysk: f64, dni: f64, wysadzony: bool) -> Wynik {
         let mut pola = serde_json::Map::new();
@@ -596,5 +651,58 @@ mod testy {
         };
         let kol = kolejnosc(&v, &k);
         assert_eq!(v[kol[0]].nazwa, "plytki");
+    }
+
+    #[test]
+    fn wczytuje_legacy_flat_map_bez_zmiany_kontraktu() {
+        let dir = temp_dir("legacy");
+        std::fs::write(
+            dir.join("wyniki_czastkowe.json"),
+            r#"{"alpha":{"total_profit":12.5,"trades":4,"blown":false}}"#,
+        )
+        .unwrap();
+
+        let result = wczytaj(&dir).expect("legacy result");
+        assert_eq!(result.wyniki.len(), 1);
+        assert_eq!(result.wyniki[0].nazwa, "alpha");
+        assert_eq!(result.wyniki[0].liczba("total_profit"), Some(12.5));
+        assert!(!result.approximate);
+        assert_eq!(result.quick_tick_stride, None);
+        assert!(result.coronation_eligible);
+        assert!(result.warning.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wczytuje_quick_wrapper_i_nie_robi_falszywego_presetu_results() {
+        let dir = temp_dir("quick-wrapper");
+        std::fs::write(
+            dir.join("wyniki_czastkowe.json"),
+            r#"{
+                "schema":"conduit.quick-sweep-partial.v1",
+                "approximate":true,
+                "coronation_eligible":false,
+                "quick_tick_stride":20,
+                "warning":"APPROXIMATE SCREENING ONLY",
+                "results":{
+                    "alpha":{"total_profit":12.5,"trades":4,"blown":false},
+                    "beta":{"total_profit":7.0,"trades":3,"blown":false}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let result = wczytaj(&dir).expect("quick result");
+        assert_eq!(result.wyniki.len(), 2);
+        assert!(result.wyniki.iter().any(|row| row.nazwa == "alpha"));
+        assert!(result.wyniki.iter().any(|row| row.nazwa == "beta"));
+        assert!(!result.wyniki.iter().any(|row| row.nazwa == "results"));
+        assert!(result.approximate);
+        assert_eq!(result.quick_tick_stride, Some(20));
+        assert!(!result.coronation_eligible);
+        assert_eq!(result.warning.as_deref(), Some("APPROXIMATE SCREENING ONLY"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
