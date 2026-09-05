@@ -31,6 +31,7 @@ class SyntheticFixture(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.addCleanup(self.cleanup_fixture)
         self.source = self.root / "source"
+        self.write("source/rust/crates/core/src/settings.rs", ("impl Default for Settings {\n" + "".join(f"    {key}: false,\n" for key in pkg.OVERLAY_MISSING_DEFAULTS) + "}\n").encode())
         self.template = self.root / "VPSREADY_TEMPLATE"
         self.runtime = self.root / "runtime-fixture"
         self.exe = self.root / "inert.exe"
@@ -44,9 +45,10 @@ class SyntheticFixture(unittest.TestCase):
         self.write("source/rust/crates/mt5/sidecar/not_imported.py", b"raise RuntimeError('unused')\n")
         self.caps = {key: 0 for key in pkg.CHAIN_CAP_KEYS}
         self.caps.update(maxLotow=5, maxKoszykow=200, celDniaZamyka=False, blokujPrzeciwneKierunki=False)
-        self.overlay = {key: 0 for key in pkg.ACCOUNT_OVERLAY_KEYS}
+        self.overlay = {key: False if key in pkg.OVERLAY_BOOL_KEYS else 0 for key in pkg.ACCOUNT_OVERLAY_KEYS}
         self.overlay.update(lot_base="Balance", close_receipt_reconcile=True, server_tz_offset_ms=10800000,
                             msg_clock_offset_ms=None, konto_dzwignia=500, exec_latency_ms=250)
+        self.ai = {"ai_enabled": False, "ai_model": "", "ai_decision_interval_s": 2.0, "ai_replaces_management": True}
         self.identity = {
             "mt5_login": "88990011", "mt5_server": "SyntheticBroker-TEST",
             "mt5_password": "synthetic-mt-password", "mt5_terminal_path": "C:/SyntheticOnly/terminal64.exe",
@@ -58,7 +60,9 @@ class SyntheticFixture(unittest.TestCase):
                       "presety": {"Synergy": "OLD", "ATFX": "OLD-OTHER"}, "pulapy": {"maxLotow": 0.01}}]}
         self.channels = {"bindings": {"Synergy": {"channelId": "-10088992233", "topicId": 447788}}}
         self.session = {"version": 1, "home_dc": 2, "dc_options": [
-            {"id": 2, "auth_key": "synthetic-home-authorization"}, {"id": 4, "auth_key": None}]}
+            {"id": 2, "ipv4": "192.0.2.2:443", "ipv6": "[2001:db8::2]:443", "auth_key": "ab" * 256},
+            {"id": 4, "ipv4": "192.0.2.4:443", "ipv6": "[2001:db8::4]:443", "auth_key": None}],
+            "peers": [], "updates": {"pts": 0, "qts": 0, "date": 0, "seq": 0, "channels": []}}
         self.secrets = {"telegram": {"apiId": 77889911, "apiHash": "synthetic-api-hash-material",
                         "sessionString": self.encode_session(self.session)},
                         "mt5": {"password": self.identity["mt5_password"]}}
@@ -75,11 +79,12 @@ class SyntheticFixture(unittest.TestCase):
         self.json("source/config/examples/lancuchy.example.json", self.chain)
         self.preset = self.root / "selected.json"
         self.selection = self.root / "selection.json"
-        self.preset_doc = {"name": "GOD-X8-TEST", "format": "Synergy", "settings": {"lot_max": 5}}
+        self.preset_doc = {"name": "GOD-X8-TEST", "format": "Synergy", "settings": {"lot_max": 5, **self.overlay, **self.ai}}
         self.json("selected.json", self.preset_doc)
         self.chosen = {"approved": True, "preset_id": self.preset_doc["name"],
                        "preset_sha256": pkg.sha(self.preset.read_bytes()),
-                       "chain_caps": self.caps, "account_overlay": self.overlay}
+                       "chain_caps": self.caps, "account_overlay": self.overlay,
+                       "ingress": {"live_telegram_ingress": True, "live_ingress_max_age_min": 5.0}}
         self.json("selection.json", self.chosen)
         self.json("source/config/presets/GOD-X7.json", {"name": "GOD-X7", "format": "Synergy", "settings": {"lot_max": 10}})
         self.runtime_check = self.enterContext(patch("portable_runtime.verify", return_value={"ok": True}))
@@ -141,6 +146,107 @@ class SyntheticFixture(unittest.TestCase):
 
 
 class PackageTests(SyntheticFixture):
+    def test_string_session_requires_the_full_production_serde_shape(self):
+        (self.template / 'telegram.session').unlink()
+        mutations = [lambda s:s.pop('peers'), lambda s:s.pop('updates'),
+            lambda s:s['dc_options'][0].pop('ipv4'),
+            lambda s:s['dc_options'][0].update(ipv6='invalid'),
+            lambda s:s['dc_options'][0].update(auth_key='ab'),
+            lambda s:s['dc_options'][0].update(auth_key=[0]*256),
+            lambda s:s['updates'].update(pts=False),
+            lambda s:s['updates'].update(channels=[{'id':3,'pts':1.5}]),
+            lambda s:s.update(peers=[{'User':{'id':3,'bot':1}}]),
+            lambda s:s.update(peers=[{'Channel':{'id':3,'kind':'Unknown'}}])]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(case=index):
+                value = copy.deepcopy(self.session); mutate(value)
+                self.secrets['telegram']['sessionString'] = self.encode_session(value)
+                self.json('VPSREADY_TEMPLATE/secrets.json', self.secrets)
+                self.assertIs(pkg.source_inspection(self.template)['telegram_authorization_matches'], False)
+
+    def test_string_only_session_is_validated_without_a_database(self):
+        (self.template / 'telegram.session').unlink()
+        self.assertIs(pkg.source_inspection(self.template)['telegram_authorization_matches'], True)
+        self.stage('private')
+        invalid = ['not-base64', base64.b64encode(b'not-json').decode(), self.encode_session({}),
+                   self.encode_session({**self.session, 'version': True}),
+                   self.encode_session({**self.session, 'home_dc': 4}),
+                   self.encode_session({**self.session, 'dc_options': []})]
+        for encoded in invalid:
+            with self.subTest(encoded_kind=invalid.index(encoded)):
+                self.secrets['telegram']['sessionString'] = encoded
+                self.json('VPSREADY_TEMPLATE/secrets.json', self.secrets)
+                self.assertIs(pkg.source_inspection(self.template)['telegram_authorization_matches'], False)
+                self.assert_code('private_telegram_material_incomplete_or_mismatched', pkg.stage,
+                    self.source, self.template, self.exe, self.preset, self.selection,
+                    self.root / 'VPSREADY_INVALID', 'private', self.runtime, self.monitor)
+
+    def test_all_36_overrides_must_equal_the_tested_preset(self):
+        for key, old in self.overlay.items():
+            value = not old if type(old) is bool else 'Equity' if key == 'lot_base' else 1 if old is None else old + 1
+            with self.subTest(field=key):
+                self.revise_selection(lambda doc: doc['account_overlay'].update({key: value}))
+                self.assert_code('account_overlay_changes_tested_preset', pkg.selected_preset, self.preset, self.selection)
+
+    def test_types_cannot_be_normalized_by_python_boolean_numeric_equality(self):
+        for key, old in self.overlay.items():
+            if key == 'lot_base' or old is None:
+                continue
+            value = int(old) if type(old) is bool else False
+            with self.subTest(overlay=key):
+                self.revise_selection(lambda doc: doc['account_overlay'].update({key: value}))
+                self.assert_code('invalid_account_overlay_value', pkg.selected_preset, self.preset, self.selection)
+        for key, old in self.caps.items():
+            value = int(old) if type(old) is bool else False
+            with self.subTest(cap=key):
+                self.revise_selection(lambda doc: doc['chain_caps'].update({key: value}))
+                self.assert_code('invalid_chain_cap_value', pkg.selected_preset, self.preset, self.selection)
+
+    def test_false_cannot_replace_zero_ingress_even_after_rehash(self):
+        self.revise_selection(lambda doc: doc['ingress'].update(live_ingress_max_age_min=0))
+        package = self.stage()
+        self.update_package_json(package, 'settings.json', lambda doc: doc['settings'].update(signal_max_age_min=False))
+        self.assert_code('live_ingress_differs_from_reviewed_selection', pkg.verify, package)
+
+    def test_false_cannot_replace_zero_cap_in_manifest_only(self):
+        package = self.stage()
+        self.update_package_json(package, 'PACKAGE_MANIFEST.json', lambda doc: doc['chain_caps'].update(maxDdPct=False))
+        self.assert_code('invalid_chain_cap_value', pkg.verify, package)
+
+    def test_defaults_are_pinned_and_future_source_changes_fail_closed(self):
+        real_source = Path(__file__).resolve().parents[1] / 'CONDUIT'
+        self.assertEqual(len(pkg.overlay_defaults_source(real_source)), 64)
+        sparse = {k:v for k,v in self.preset_doc['settings'].items() if k not in pkg.OVERLAY_MISSING_DEFAULTS}
+        self.assertEqual(pkg.tested_overlay(sparse), self.overlay)
+        source_file = self.source / 'rust/crates/core/src/settings.rs'
+        source_file.write_text(source_file.read_text().replace('closed_profit_net_costs: false', 'closed_profit_net_costs: true'))
+        self.assert_code('production_overlay_default_contract_changed', pkg.overlay_defaults_source, self.source)
+
+    def test_account_mapper_fields_have_an_explicit_ownership_class(self):
+        source = (Path(__file__).resolve().parents[1] / 'CONDUIT/rust/crates/core/src/wielosilnik.rs').read_text(encoding='utf-8')
+        body = source.split('pub const POLA_RACHUNKU', 1)[1].split('];', 1)[0]
+        import re
+        fields = set(re.findall(r'^\s*"([a-z0-9_]+)",', body, re.M))
+        self.assertEqual(fields, pkg.ACCOUNT_OVERLAY_KEYS | pkg.AI_ACCOUNT_KEYS | pkg.TECHNICAL_ACCOUNT_KEYS)
+
+    def test_equity_and_ai_strategy_survive_both_templates_without_identity_changes(self):
+        self.overlay['lot_base'] = 'Equity'
+        self.preset_doc['settings'].update(self.overlay)
+        self.json('selected.json', self.preset_doc)
+        self.chosen['preset_sha256'] = pkg.sha(self.preset.read_bytes())
+        self.json('selection.json', self.chosen)
+        self.settings['settings'].update(ai_enabled=True, ai_replaces_management=False, ai_decision_interval_s=99, ai_model='stale-model')
+        self.json('VPSREADY_TEMPLATE/settings.json', self.settings)
+        for kind in ('public', 'private'):
+            with self.subTest(kind=kind):
+                package = self.stage(kind)
+                actual = pkg.read_json(package / 'settings.json')['settings']
+                self.assertEqual(actual['lot_base'], 'Equity')
+                self.assertEqual({k:actual[k] for k in self.ai}, self.ai)
+                self.assertEqual(pkg.read_json(package / 'presets/BIEZACY.json')['settings'], self.preset_doc['settings'])
+                self.update_package_json(package, 'settings.json', lambda d:d['settings'].update(ai_enabled=True))
+                self.assert_code('ai_account_changes_tested_preset', pkg.verify, package, self.template if kind == 'private' else None)
+
     def test_public_stage_is_unconfigured_and_contains_portable_runtime(self):
         package = self.stage()
         settings = pkg.read_json(package / "settings.json")
@@ -197,7 +303,7 @@ class PackageTests(SyntheticFixture):
             package = self.stage(kind)
             selected = pkg.read_json(package / "presets/GOD-X8-TEST.json")
             self.assertEqual(selected, {"name": "GOD-X8-TEST", "nazwa": "GOD-X8-TEST", "format": "Synergy",
-                                        "tagline": "Synergy", "description": "", "opis": "", "settings": {"lot_max": 5}})
+                                        "tagline": "Synergy", "description": "", "opis": "", "settings": self.preset_doc["settings"]})
             self.assertEqual(pkg.read_json(package / "presets/BIEZACY.json"), selected)
             self.assertEqual(self.preset.read_bytes(), original, "approval source stays byte-identical")
             self.assertEqual((package / "presets/GOD-X7.json").read_bytes(), (self.source / "config/presets/GOD-X7.json").read_bytes())
@@ -326,6 +432,27 @@ class PackageTests(SyntheticFixture):
         package = self.stage("private")
         self.update_package_json(package, "settings.json", lambda v:v["settings"].update(lot_base="Equity"))
         self.assert_code("account_overlay_differs_from_reviewed_selection", pkg.verify, package, self.template)
+
+    def test_ingress_contract_is_required_and_validated(self):
+        self.revise_selection(lambda v:v.pop('ingress'))
+        self.assert_code('explicit_live_ingress_contract_required', pkg.selected_preset, self.preset, self.selection)
+        for age in (True, -1, float('nan'), float('inf'), '5'):
+            self.revise_selection(lambda v:v['ingress'].update(live_ingress_max_age_min=age))
+            self.assert_code('invalid_live_ingress_max_age', pkg.selected_preset, self.preset, self.selection)
+
+    def test_ingress_zero_and_custom_age_survive_packaging(self):
+        for age in (0, 30):
+            self.revise_selection(lambda v:v['ingress'].update(live_ingress_max_age_min=age))
+            package = self.stage('private', f'VPSREADY_AGE_{age}')
+            settings = pkg.read_json(package/'settings.json')
+            manifest = pkg.read_json(package/'PACKAGE_MANIFEST.json')
+            self.assertEqual(settings['settings']['signal_max_age_min'], age)
+            self.assertEqual(manifest['ingress_explicit']['live_ingress_max_age_min'], age)
+
+    def test_ingress_tampering_cannot_pass_by_rehashing_settings(self):
+        package = self.stage('private')
+        self.update_package_json(package, 'settings.json', lambda v:v['settings'].update(signal_max_age_min=0))
+        self.assert_code('live_ingress_differs_from_reviewed_selection', pkg.verify, package, self.template)
 
     def test_runtime_interpreter_must_be_portable(self):
         package = self.stage()

@@ -1,6 +1,6 @@
 import copy
 import unittest
-from export_research_site8 import checked_series, extrema_preview
+from export_research_site8 import checked_series, extrema_preview, legacy_balance_view, LEGACY_BALANCE_ALIAS_EXES
 
 
 class SiteExportTests(unittest.TestCase):
@@ -54,6 +54,43 @@ class SiteExportTests(unittest.TestCase):
         document['dni'][0]['date'], document['dni'][1]['date'] = document['dni'][1]['date'], document['dni'][0]['date']
         with self.assertRaisesRegex(ValueError, 'dates'):
             checked_series(document, metrics)
+
+    def legacy_fixture(self):
+        document, metrics = self.fixture()
+        metrics['end_balance'] = metrics['end_equity']
+        document.update(tryb='compound', saldo_start=600, metryki=copy.deepcopy(metrics))
+        receipt = {'exe_sha256': next(iter(LEGACY_BALANCE_ALIAS_EXES))}
+        return document, metrics, receipt
+
+    def test_known_legacy_alias_preserves_raw_curves_profit_and_summary(self):
+        document, metrics, receipt = self.legacy_fixture()
+        before = copy.deepcopy((document, metrics))
+        view, correction = legacy_balance_view(document, metrics, receipt)
+        self.assertEqual(view['end_balance'], 590)
+        self.assertEqual(view['total_profit'], -20)
+        self.assertFalse(correction['profitAndTradesChanged'])
+        self.assertEqual((document, metrics), before)
+        self.assertEqual(checked_series(document, view)[0][-1]['balance'], 590)
+
+    def test_unreviewed_binary_cannot_use_legacy_exception(self):
+        document, metrics, _ = self.legacy_fixture()
+        view, correction = legacy_balance_view(document, metrics, {'exe_sha256':'0'*64})
+        self.assertIsNone(correction)
+        with self.assertRaisesRegex(ValueError, 'Balance'): checked_series(document, view)
+
+    def test_legacy_exception_does_not_mask_other_daily_or_equity_corruption(self):
+        document, metrics, receipt = self.legacy_fixture()
+        document['dni'][1]['profit'] = 999
+        view, _ = legacy_balance_view(document, metrics, receipt)
+        with self.assertRaisesRegex(ValueError, 'continuity'): checked_series(document, view)
+
+    def test_credit_or_nonmatching_time_cannot_use_legacy_exception(self):
+        document, metrics, receipt = self.legacy_fixture()
+        document['metryki']['reporting_equity_basis'] = 'own_equity_excluding_constant_credit'
+        with self.assertRaisesRegex(ValueError, 'contract'): legacy_balance_view(document, metrics, receipt)
+        document, metrics, receipt = self.legacy_fixture()
+        document['saldo'][-1][0] = 2
+        with self.assertRaisesRegex(ValueError, 'contract'): legacy_balance_view(document, metrics, receipt)
         document, metrics = self.fixture()
         document['saldo'][-1][1] = 9999
         with self.assertRaisesRegex(ValueError, 'Balance'):

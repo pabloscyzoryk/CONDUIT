@@ -12,7 +12,9 @@ import ast
 import base64
 import hashlib
 import io
+import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -24,7 +26,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 
-SCHEMA = "conduit.package.v2"
+SCHEMA = "conduit.package.v3"
 PRIVATE_FILES = {"settings.json", "channels.json", "lancuchy.json", "secrets.json", "telegram.session"}
 DISALLOWED_PARTS = {".git", "node_modules", "target", "logs", "backup_memory", "exports", "__pycache__"}
 DISALLOWED_NAMES = {"accounts.dat", "servers.dat", "common.ini", "terminal.ini", "koszyki.json", "kronika.json", "smtp.json"}
@@ -35,6 +37,100 @@ CHAIN_CAP_KEYS = {"maxPozycji", "maxKoszykow", "maxLotow", "maxLotowKierunkowo",
 # A reviewed selection must record them instead of inheriting an old VPS math
 # contract. Operational preferences and authentication stay with the template.
 ACCOUNT_OVERLAY_KEYS = set("close_receipt_reconcile closed_profit_net_costs restore_strategy_continuation order_volume_contract_v2 commission_per_lot swap_enabled swap_long_points swap_short_points swap_point_value swap_rollover_mult swap_rollover_weekday swap_pomijaj_weekend swap_rollover_z_serwera swap_rollover3days_mt5 runner_ksiegowanie_v2 msg_kurs_sprzed_luki slippage_pts slippage_pending_pts stops_level exec_latency_ms msg_clock_offset_ms server_tz_offset_ms stop_out_level_pct margin_call_level_pct expo_cap_pct sim_margin_check_on_fill sim_validate_pending_stops sim_margin_at_market expo_cap_ml_pct expo_cap_close expo_cap_s lot_base odlicz_kredyt credit_balance_separate kredyt_reczny konto_dzwignia".split())
+
+
+OVERLAY_BOOL_KEYS = set("close_receipt_reconcile closed_profit_net_costs credit_balance_separate expo_cap_close msg_kurs_sprzed_luki odlicz_kredyt order_volume_contract_v2 restore_strategy_continuation runner_ksiegowanie_v2 sim_margin_at_market sim_margin_check_on_fill sim_validate_pending_stops swap_enabled swap_pomijaj_weekend swap_rollover_z_serwera".split())
+OVERLAY_INT_KEYS = {"exec_latency_ms", "server_tz_offset_ms", "msg_clock_offset_ms", "swap_rollover3days_mt5", "swap_rollover_weekday"}
+CHAIN_BOOL_KEYS = {"celDniaZamyka", "blokujPrzeciwneKierunki"}
+CHAIN_INT_KEYS = {"maxPozycji", "maxKoszykow", "pauzaPoStratachN"}
+AI_ACCOUNT_KEYS = {"ai_enabled", "ai_model", "ai_decision_interval_s", "ai_replaces_management"}
+TECHNICAL_ACCOUNT_KEYS = set("mt5_autostart mt5_watchdog mt5_health_interval_s mt5_restart_after mt5_retry_attempts mt5_retry_delay_s mt5_terminal_path journal_enabled journal_min_level journal_text_mirror journal_retention_days journal_excursions journal_snapshots journal_buffer_cap".split())
+
+
+def finite_number(value):
+    try:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def validate_overlay(overlay):
+    if not isinstance(overlay, dict) or set(overlay) != ACCOUNT_OVERLAY_KEYS:
+        fail("explicit_complete_account_overlay_required")
+    for key, value in overlay.items():
+        if key in OVERLAY_BOOL_KEYS:
+            valid = isinstance(value, bool)
+        elif key == "lot_base":
+            valid = isinstance(value, str) and value in {"Balance", "Equity", "MinOfBoth"}
+        elif key == "msg_clock_offset_ms" and value is None:
+            valid = True
+        elif key in OVERLAY_INT_KEYS:
+            valid = isinstance(value, int) and not isinstance(value, bool) and -(2**63) <= value < 2**63
+            if key in {"swap_rollover3days_mt5", "swap_rollover_weekday"}:
+                valid = valid and 0 <= value <= 0xffffffff
+        else:
+            valid = finite_number(value)
+        if not valid:
+            fail("invalid_account_overlay_value")
+
+
+def validate_caps(caps):
+    if not isinstance(caps, dict) or set(caps) != CHAIN_CAP_KEYS:
+        fail("explicit_complete_chain_caps_required")
+    for key, value in caps.items():
+        valid = isinstance(value, bool) if key in CHAIN_BOOL_KEYS else finite_number(value) and value >= 0
+        if key in CHAIN_INT_KEYS:
+            valid = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 0xffffffff
+        if not valid:
+            fail("invalid_chain_cap_value")
+
+
+# Verified against production Rust defaults. Missing values outside these four
+# are not guessed. Stage checks the current source defaults before relying on them.
+OVERLAY_MISSING_DEFAULTS = {"closed_profit_net_costs": False, "credit_balance_separate": False,
+                          "order_volume_contract_v2": False, "restore_strategy_continuation": False}
+
+
+def overlay_defaults_source(source):
+    path = checked_file(source, "rust/crates/core/src/settings.rs")
+    text = path.read_text(encoding="utf-8-sig")
+    body = text.split("impl Default for Settings", 1)[-1].split("impl Settings", 1)[0]
+    for key, expected in OVERLAY_MISSING_DEFAULTS.items():
+        found = re.findall(r"(?m)^\s*" + re.escape(key) + r":\s*(true|false)\s*,", body)
+        if found != ["true" if expected else "false"]:
+            fail("production_overlay_default_contract_changed")
+    return sha(path.read_bytes())
+
+
+def tested_overlay(settings):
+    values = {}
+    for key in ACCOUNT_OVERLAY_KEYS:
+        if key in settings:
+            values[key] = settings[key]
+        elif key in OVERLAY_MISSING_DEFAULTS:
+            values[key] = OVERLAY_MISSING_DEFAULTS[key]
+        else:
+            fail("selected_preset_incomplete_tested_overlay")
+    validate_overlay(values)
+    return values
+
+
+def require_tested_overlay(settings, overlay):
+    expected = tested_overlay(settings)
+    validate_overlay(overlay)
+    if any(expected[key] != overlay[key] for key in ACCOUNT_OVERLAY_KEYS):
+        fail("account_overlay_changes_tested_preset")
+
+
+def tested_ai_settings(settings):
+    if not AI_ACCOUNT_KEYS.issubset(settings):
+        fail("selected_preset_incomplete_ai_contract")
+    values = {key: settings[key] for key in AI_ACCOUNT_KEYS}
+    if (type(values["ai_enabled"]) is not bool or type(values["ai_replaces_management"]) is not bool
+            or not isinstance(values["ai_model"], str)
+            or not finite_number(values["ai_decision_interval_s"]) or values["ai_decision_interval_s"] < 0):
+        fail("invalid_ai_account_value")
+    return values
 
 
 class PackageError(Exception):
@@ -176,17 +272,83 @@ def source_inspection(template: Path) -> dict:
         fail("active_template_chain_missing")
     session_file = template / "telegram.session"
     session_match = None
-    if session_file.is_file() and tg.get("sessionString"):
+    if tg.get("sessionString"):
         try:
-            a = read_json(checked_file(template, "telegram.session"))
-            b = json.loads(base64.b64decode(tg["sessionString"], validate=True))
+            # String-only sessions are supported, but must be structurally valid
+            # even when no on-disk session exists for comparison.
+            encoded = tg["sessionString"]
+            if not isinstance(encoded, str):
+                raise ValueError("invalid_session_type")
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError('duplicate_session_field')
+                    result[key] = value
+                return result
+            b = json.loads(base64.b64decode(encoded.strip(), validate=True).decode('utf-8'), object_pairs_hook=unique_object)
             def auth(record):
-                return {d["id"]: d.get("auth_key") for d in record.get("dc_options", [])}
-            aa, ab = auth(a), auth(b)
-            session_match = (a.get("version") == b.get("version") == 1 and a.get("home_dc") == b.get("home_dc")
-                             and bool(aa.get(a.get("home_dc"))) and aa == ab)
+                def integer(value, bits):
+                    return type(value) is int and -(2**(bits-1)) <= value < 2**(bits-1)
+                def socket(value, version):
+                    if not isinstance(value, str):
+                        raise ValueError('invalid_session_socket')
+                    host, port = value.rsplit(':', 1)
+                    if version == 6:
+                        if not (host.startswith('[') and host.endswith(']')):
+                            raise ValueError('invalid_session_socket')
+                        host = host[1:-1]
+                    if ipaddress.ip_address(host).version != version or not port.isdecimal() or not 0 <= int(port) <= 65535:
+                        raise ValueError('invalid_session_socket')
+                if not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != 1:
+                    raise ValueError("invalid_session_version")
+                home = record.get("home_dc")
+                options = record.get("dc_options")
+                if not integer(home, 32) or not isinstance(options, list):
+                    raise ValueError("invalid_session_shape")
+                keys = {}
+                for item in options:
+                    if not isinstance(item, dict) or not integer(item.get("id"), 32) or item["id"] in keys:
+                        raise ValueError("invalid_session_dc")
+                    socket(item.get('ipv4'), 4)
+                    socket(item.get('ipv6'), 6)
+                    key = item.get('auth_key')
+                    # grammers-session 0.10 serde uses Option<Hex<[u8;256]>>.
+                    if key is not None and (not isinstance(key, str) or re.fullmatch(r'[0-9a-fA-F]{512}', key) is None):
+                        raise ValueError('invalid_session_auth_key')
+                    keys[item["id"]] = key.lower() if key is not None else None
+                key = keys.get(home)
+                if not key:
+                    raise ValueError("empty_session_home_auth")
+                peers, updates = record.get('peers'), record.get('updates')
+                if not isinstance(peers, list) or not isinstance(updates, dict):
+                    raise ValueError('invalid_session_state')
+                for peer in peers:
+                    if not isinstance(peer, dict) or len(peer) != 1:
+                        raise ValueError('invalid_session_peer')
+                    kind, value = next(iter(peer.items()))
+                    if kind not in {'User', 'Chat', 'Channel'} or not isinstance(value, dict) or not integer(value.get('id'), 64):
+                        raise ValueError('invalid_session_peer')
+                    if kind != 'Chat' and value.get('auth') is not None and not integer(value['auth'], 64):
+                        raise ValueError('invalid_session_peer_auth')
+                    if kind == 'User' and any(value.get(k) is not None and type(value[k]) is not bool for k in ('bot', 'is_self')):
+                        raise ValueError('invalid_session_peer_flags')
+                    if kind == 'Channel' and value.get('kind') not in {None, 'Broadcast', 'Megagroup', 'Gigagroup'}:
+                        raise ValueError('invalid_session_channel_kind')
+                if any(not integer(updates.get(k), 32) for k in ('pts', 'qts', 'date', 'seq')) or not isinstance(updates.get('channels'), list):
+                    raise ValueError('invalid_session_updates')
+                for channel in updates['channels']:
+                    if not isinstance(channel, dict) or not integer(channel.get('id'), 64) or not integer(channel.get('pts'), 32):
+                        raise ValueError('invalid_session_channel_state')
+                return home, keys
+            ab = auth(b)
+            if session_file.is_file():
+                a = json.loads(checked_file(template, 'telegram.session').read_text(encoding='utf-8-sig'), object_pairs_hook=unique_object)
+                session_match = auth(a) == ab
+            else:
+                session_match = True
         except (ValueError, KeyError, TypeError):
-            fail("telegram_session_encoding_invalid")
+            session_match = False
     return {
         "mode": doc.get("mode"),
         "follow_terminal": bool(settings.get("mt5_follow_terminal_account")),
@@ -236,9 +398,23 @@ def selected_preset(preset: Path, selection: Path):
         fail("explicit_complete_account_overlay_required")
     if any(re.sub(r"[^a-z0-9]", "", key.lower()) in SECRET_KEYS for key in chosen["account_overlay"]):
         fail("account_overlay_cannot_change_identity")
+    validate_overlay(chosen["account_overlay"])
+    validate_caps(chosen["chain_caps"])
+    require_tested_overlay(doc["settings"], chosen["account_overlay"])
+    validate_ingress(chosen.get("ingress"))
     check_public_config(chosen)
     check_public_config(doc)
     return chosen, doc
+
+
+def validate_ingress(ingress):
+    if (not isinstance(ingress, dict)
+            or set(ingress) != {"live_telegram_ingress", "live_ingress_max_age_min"}
+            or ingress.get("live_telegram_ingress") is not True):
+        fail("explicit_live_ingress_contract_required")
+    age = ingress["live_ingress_max_age_min"]
+    if not finite_number(age) or age < 0:
+        fail("invalid_live_ingress_max_age")
 
 
 def production_preset_metadata(document: dict, selected_id: str) -> dict:
@@ -274,6 +450,7 @@ def stage(source: Path, template: Path, executable: Path, preset: Path, selectio
     if kind not in {"private", "public"}:
         fail("invalid_package_kind")
     destination = safe_destination(destination, kind)
+    defaults_source_sha = overlay_defaults_source(source)
     chosen, preset_doc = selected_preset(preset, selection)
     name = chosen["preset_id"]
     private_values = sensitive_values([template])
@@ -301,6 +478,10 @@ def stage(source: Path, template: Path, executable: Path, preset: Path, selectio
         fail("active_chain_missing")
     settings["presetId"] = name
     settings.setdefault("settings", {}).update(chosen["account_overlay"])
+    # These account-merge fields can replace strategy management. They belong
+    # to the tested preset, never an unrelated private/public template.
+    settings["settings"].update(tested_ai_settings(preset_doc["settings"]))
+    settings["settings"]["signal_max_age_min"] = chosen["ingress"]["live_ingress_max_age_min"]
     # The app resolves this packaged path relative to its executable, not CWD.
     settings["settings"]["mt5_python"] = "runtime/python.exe"
     active["pulapy"] = chosen["chain_caps"]
@@ -376,6 +557,10 @@ def stage(source: Path, template: Path, executable: Path, preset: Path, selectio
                 "preset_metadata_policy": "selected_identity_only_v1", "public_files": public_members,
                 "private_files": sorted(f for f in PRIVATE_FILES if (staging / f).is_file()) if kind == "private" else [],
                 "chain_caps": active.get("pulapy", {}), "account_overlay_explicit": chosen.get("account_overlay", {}),
+                "ingress_explicit": chosen["ingress"],
+                "tested_overlay_policy": "all_36_exact_v1",
+                "overlay_missing_defaults": OVERLAY_MISSING_DEFAULTS,
+                "overlay_defaults_source_sha256": defaults_source_sha,
                 "runtime_authentication_verified": False, "execution_started": False}
     check_public_config(manifest)
     public_bytes(json.dumps(manifest, ensure_ascii=False).encode("utf-8"), private_values)
@@ -437,8 +622,26 @@ def verify(package: Path, template: Path | None = None, allow_incomplete=False) 
     if active.get("pulapy") != manifest.get("chain_caps") or set(active.get("pulapy", {})) != CHAIN_CAP_KEYS:
         fail("chain_caps_differ_from_reviewed_selection")
     overlay = manifest.get("account_overlay_explicit", {})
-    if not ACCOUNT_OVERLAY_KEYS.issubset(overlay) or any(settings.get("settings", {}).get(k) != v for k, v in overlay.items()):
+    validate_overlay(overlay)
+    if (manifest.get("tested_overlay_policy") != "all_36_exact_v1"
+            or manifest.get("overlay_missing_defaults") != OVERLAY_MISSING_DEFAULTS
+            or any(type(v) is not bool for v in manifest.get("overlay_missing_defaults", {}).values())
+            or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("overlay_defaults_source_sha256", "")))):
+        fail("tested_overlay_contract_missing")
+    require_tested_overlay(packaged_preset["settings"], overlay)
+    validate_caps(active.get("pulapy"))
+    validate_caps(manifest.get("chain_caps"))
+    actual_overlay = {key: settings.get("settings", {}).get(key) for key in ACCOUNT_OVERLAY_KEYS}
+    validate_overlay(actual_overlay)
+    if any(actual_overlay[k] != v for k, v in overlay.items()):
         fail("account_overlay_differs_from_reviewed_selection")
+    if tested_ai_settings(settings.get("settings", {})) != tested_ai_settings(packaged_preset["settings"]):
+        fail("ai_account_changes_tested_preset")
+    ingress = manifest.get("ingress_explicit")
+    validate_ingress(ingress)
+    actual_age = settings.get("settings", {}).get("signal_max_age_min")
+    if not finite_number(actual_age) or actual_age < 0 or actual_age != ingress["live_ingress_max_age_min"]:
+        fail("live_ingress_differs_from_reviewed_selection")
     if settings.get("settings", {}).get("mt5_python") != "runtime/python.exe":
         fail("portable_interpreter_not_selected")
     if kind == "public":
@@ -447,6 +650,10 @@ def verify(package: Path, template: Path | None = None, allow_incomplete=False) 
         if settings.get("mode") != "MANUAL" or read_json(checked_file(package, "channels.json")) != {"bindings": {}}:
             fail("public_package_not_unconfigured_manual")
     else:
+        inspection = source_inspection(template)
+        if (not inspection['telegram_api_present'] or not inspection['telegram_string_present']
+                or inspection['telegram_authorization_matches'] is not True):
+            fail('private_telegram_material_incomplete_or_mismatched')
         for name in ("secrets.json", "telegram.session", "channels.json"):
             a, b = package / name, template / name
             if a.exists() != b.exists() or a.exists() and checked_file(package, name).read_bytes() != checked_file(template, name).read_bytes():
@@ -458,7 +665,8 @@ def verify(package: Path, template: Path | None = None, allow_incomplete=False) 
                 fail("private_account_selection_changed")
     return {"schema": SCHEMA, "ok": True, "kind": kind, "public_files_verified": len(manifest["public_files"]),
             "private_material_compared_in_memory": kind == "private", "credential_values_or_hashes_reported": False,
-            "live_authentication_verified": False, "preset_and_chain_match": True}
+            "live_authentication_verified": False, "preset_and_chain_match": True,
+            "recipe_matches": True, "strategy_matches_tested_preset": True}
 
 
 def export_source(repo: Path, revision: str, destination: Path, template: Path) -> dict:

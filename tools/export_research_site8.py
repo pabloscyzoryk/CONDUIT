@@ -16,6 +16,11 @@ from verified_replay_report import collect
 from research_runner_exact8 import verify_detail_binding
 
 CONTRACTS = {'historical_reference', 'observed_receipts', 'mixed_missing_original_stress'}
+# This completed public G8i build has a documented summary-only bug:
+# metrics::compute initializes end_balance from end_equity, and runner replaces
+# it only for the credit-reporting path. Its sampled balance curve is the actual
+# broker.balance. Never extend this exception to an unreviewed executable.
+LEGACY_BALANCE_ALIAS_EXES = {'f7eae2549d99ac3e4b3be498fb6123dcb146ed4b999468e0af9f19f97996feff'}
 
 
 def finite(value):
@@ -24,6 +29,32 @@ def finite(value):
 
 def close(a, b):
     return finite(a) and finite(b) and math.isclose(a, b, abs_tol=.011, rel_tol=1e-10)
+
+
+def legacy_balance_view(document, metrics, receipt):
+    """Correct only the derived view, using an already completion-bound curve.
+
+    Source summaries, curves, trades and profits are never rewritten. The caller
+    must verify_detail_binding before calling this function, then checked_series.
+    """
+    balance, equity = document.get('saldo', []), document.get('krzywa', [])
+    if not balance or not equity or close(balance[-1][1], metrics.get('end_balance')):
+        return metrics, None
+    if receipt.get('exe_sha256') not in LEGACY_BALANCE_ALIAS_EXES:
+        return metrics, None  # Normal strict endpoint validation will reject it.
+    own = document.get('metryki', {})
+    if (document.get('tryb') != 'compound' or own.get('reporting_equity_basis') is not None
+            or not close(document.get('saldo_start'), metrics['start_balance'])
+            or not close(own.get('end_balance'), metrics.get('end_balance'))
+            or not close(metrics.get('end_balance'), metrics['end_equity'])
+            or balance[-1][0] != equity[-1][0] or not finite(balance[-1][1])):
+        raise ValueError('Legacy balance alias does not match the audited producer contract')
+    correction = {'code': 'legacy_summary_balance_was_equity',
+                  'reportedSummaryEndBalance': metrics['end_balance'],
+                  'measuredEndBalance': balance[-1][1],
+                  'evidence': 'completion-bound actual broker balance curve',
+                  'profitAndTradesChanged': False}
+    return {**metrics, 'end_balance': balance[-1][1]}, correction
 
 
 def checked_series(document, metrics):
@@ -133,7 +164,9 @@ def export(plans, source_calendar=None, series_names=None):
             receipt = json.loads(receipt_path.read_text('utf-8-sig'))
             detail_sha = verify_detail_binding(data_path, receipt)
             document = json.loads(data_path.read_text('utf-8-sig'))
+            m, balance_correction = legacy_balance_view(document, m, receipt)
             points, daily = checked_series(document, m)
+            row['endBalance'] = m['end_balance']
             signal_path = job['argv'][job['argv'].index('--signals')+1]
             input_hash = next(a['sha256'] for a in plan['inputs'] if Path(a['path']).resolve() == Path(signal_path).resolve())
             source = coverage_by_hash.get(input_hash, coverage.get(corpus))
@@ -158,11 +191,14 @@ def export(plans, source_calendar=None, series_names=None):
                         'originalPointCount': len(points), 'previewPreservesBucketExtrema': True})
             evidence.append({'candidate': name, 'case': job['id'], 'planSha256': report['plan_sha256'],
                 'receiptSha256': result['receipt_sha256'], 'summarySha256': result['result_sha256'],
-                'curveSha256AtCompletion': detail_sha})
+                'curveSha256AtCompletion': detail_sha,
+                **({'balanceViewCorrection': balance_correction} if balance_correction else {})})
     return {'schema': 'conduit.site-research-data.v1', 'ready': not incomplete,
         'coronationRows': coronation, 'comparisonRows': comparisons, 'equitySeries': series,
         'incomplete': incomplete, 'evidence': evidence, 'productionChoiceMade': False,
         'notes': ['Daily profit is the movement in account equity.',
+            'Open positions remain marked to the last quote; account equity is not automatically realized cash.',
+            'Known legacy summary balance aliases are explicitly recorded; the bound actual balance curve is never rewritten.',
             'Preview extrema are preserved; exact account summaries use the complete series.',
             'The source-start view removes only leading dates before any available source event, never interior gaps or flat days.',
             'Source event span does not prove continuous capture.',
