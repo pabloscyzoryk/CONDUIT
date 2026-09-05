@@ -133,7 +133,9 @@ def main():
                              "signal_contract": args.signal_contract})
     inputs = [{"path": str(path.resolve()), "sha256": file_hash(path)}
               for path in (args.finalists, args.source_manifest, args.signals, args.tick_manifest,
-                           args.exe, args.trade_sessions)]
+                           args.exe, args.trade_sessions, Path(__file__),
+                           Path(__file__).with_name('research_runner.py'),
+                           Path(__file__).with_name('research_runner_exact8.py'))]
     inputs.append({"path": str(args.ticks.resolve()), "sha256": tick_manifest["output_sha256"]})
     for folder in presets.values():
         inputs.extend({"path": str(p), "sha256": file_hash(p)} for p in sorted(folder.glob("*.json")))

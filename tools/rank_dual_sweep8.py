@@ -12,6 +12,7 @@ from pathlib import Path
 
 from rank_giga_sweep8 import collect
 from research_runner import file_hash
+from training_contract8 import screening_contract
 
 
 def finite_metric(value):
@@ -139,10 +140,13 @@ def main():
     p.add_argument('--count', type=int, default=48)
     p.add_argument('--min-activity-ratio', type=float, default=.7)
     args = p.parse_args()
+    contract = screening_contract(json.loads(args.plan.read_text('utf-8-sig')))
     a, pa = collect(args.plan, args.manifest, prefix='historical_screen_')
     b, pb = collect(args.plan, args.manifest, prefix='observed_screen_')
     validate_instruments(pa, pb)
     result = select_dual(a, b, args.count, args.min_activity_ratio)
+    result['screening_contract'] = contract
+    result['stage'] = 'screening'
     result['provenance'] = {'historical': pa, 'observed': pb,
                             'ranker_sha256': file_hash(Path(__file__))}
     args.out.parent.mkdir(parents=True, exist_ok=True)

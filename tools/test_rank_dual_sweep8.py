@@ -2,12 +2,14 @@ import copy
 import unittest
 import contextlib
 import io
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from rank_dual_sweep8 import select_dual, validate_instruments, main
 from research_metrics import compact
+from training_contract8 import WINDOWS
 
 
 def row(name, profit=100, filled=100, green=70):
@@ -85,9 +87,14 @@ class DualRankingTests(unittest.TestCase):
         rows = {'GOD-X7-cap5': row('GOD-X7-cap5')}
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'ranking.json'
+            plan = Path(temporary) / 'synthetic-plan.json'
+            plan.write_text(json.dumps({'metadata': {'tryb_obliczen': 'quick', 'status_walidacji': 'in_sample'},
+                'protocol': {key + '_training': window for key, window in WINDOWS.items()},
+                'jobs': [{'corpus': key, 'window': window, 'deposit': 600, 'lot_cap': 5}
+                         for key, window in WINDOWS.items()]}), encoding='utf-8')
             provenance = lambda digest: {'receipts': [{'exe_sha256': digest * 64}]}
             with patch('rank_dual_sweep8.collect', side_effect=[(rows, provenance('a')), (rows, provenance('b'))]), \
-                 patch('sys.argv', ['rank_dual_sweep8', '--plan', 'synthetic-plan.json', '--manifest', 'synthetic-manifest.json', '--out', str(output)]), \
+                 patch('sys.argv', ['rank_dual_sweep8', '--plan', str(plan), '--manifest', 'synthetic-manifest.json', '--out', str(output)]), \
                  contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(ValueError, 'same research instrument'):
                     main()

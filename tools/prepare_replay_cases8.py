@@ -15,6 +15,7 @@ import re
 
 from giga_sweep8 import BROKER_FIELDS, fingerprint
 from research_runner import file_hash
+from training_contract8 import require_exact_training
 
 CONTRACTS = {'historical_reference', 'observed_receipts', 'mixed_missing_original_stress'}
 
@@ -61,7 +62,9 @@ def prepare(selection, space, exe, source_manifest, cases_path, output, progress
         if case['lot_cap'] == 0 and any(doc['settings'].get('order_volume_contract_v2') for doc in originals.values()):
             raise ValueError('V2 unlimited arithmetic requires an explicit broker-volume profile')
     artifacts = {selection, space/'manifest.json', exe, source_manifest, cases_path, Path(__file__),
-                 Path(__file__).with_name('research_runner.py')}
+                 Path(__file__).with_name('research_runner.py'),
+                 Path(__file__).with_name('research_runner_exact8.py'),
+                 Path(__file__).with_name('training_contract8.py')}
     for case in cases:
         artifacts.update(Path(case[key]) for key in ('ticks', 'signals'))
         if case.get('trade_sessions'):
@@ -98,20 +101,24 @@ def prepare(selection, space, exe, source_manifest, cases_path, output, progress
                      'expected_candidates': len(originals), 'result_dir': str(result.resolve()),
                      'deposit': case['deposit'], 'lot_cap': case['lot_cap'],
                      'window': {'from': case['from'], 'to': case['to']},
-                     'signal_contract': case['signal_contract'], 'broker_overlay': case.get('broker_overlay', {})})
+                     'signal_contract': case['signal_contract'], 'broker_overlay': case.get('broker_overlay', {}),
+                     'economic_contract': case.get('economic_contract'),
+                     'source_coverage_note': case.get('source_coverage_note')})
     plan = {'id': 'giga_sweep8_exact_' + stage, 'name': 'giga_sweep8 — dokładne porównanie osobnych historii',
             'threads': 24, 'output': str(output.resolve()), 'progress_dir': str(progress.resolve()),
             'stop_at': stop_at, 'source_revision': file_hash(source_manifest), 'jobs': jobs,
             'inputs': [{'path': str(path.resolve()), 'sha256': file_hash(path)} for path in sorted(artifacts)],
             'metadata': {'etap_badania': stage, 'tryb_obliczen': 'exact', 'kanal': 'Synergy',
-                         'kandydaci': len(originals), 'status_walidacji': 'full_window_comparison'},
-            'protocol': {'continuous_account': True, 'parameter_search': False,
+                         'kandydaci': len(originals), 'status_walidacji': stage},
+            'protocol': {'continuous_account': True, 'parameter_search': stage == 'training_confirmation',
                          'starting_selection': 'All candidates were searched at lot cap5; only cap and stated common broker overlays change.',
                          'overlap': 'Separate contracts; never combine their profits or call overlapping periods independent.',
                          'calibration': 'Quick screening is not an exact result; this plan replays every retained tick.',
                          'unknown_originals': 'Historical publication-final assumptions and mixed missing-original stress remain explicit.',
                          'best_day_exclusion': 'Only permitted at cap0.01, never at higher compounding caps.',
                          'production_choice_made': False}, 'selection': chosen}
+    if stage == 'training_confirmation':
+        require_exact_training(plan)
     (output/'plan.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
     return {'cases': len(cases), 'candidates': len(originals), 'exact_runs': len(cases)*len(originals), 'launched': False}
 
