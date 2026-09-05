@@ -3,6 +3,7 @@ import { Badge, Button, Icon, Segmented, Tooltip, type IconName } from "@/compon
 import { LancuchyPanel, WyborLancucha } from "@/components/panels/LancuchyPanel";
 import { DymekLotAuto, useEkspozycjaAuto } from "@/components/panels/LotAuto";
 import { CofnijPonow } from "./CofnijPonow";
+import { CommandMenu, type SettingsRequest } from "./CommandMenu";
 import { WiekKwotowania, ZdrowieMT5, stanKwotowania, useTykanie } from "./PulsRynku";
 import { presetDlaFormatu } from "@/data/formaty";
 import { useApp } from "@/store/AppStore";
@@ -74,13 +75,14 @@ function zdrowieTelegrama(c: ConnectionState): string {
   ].join(String.fromCharCode(10));
 }
 
-export function Shell({ view, onView, children }: { view: ViewId; onView: (v: ViewId) => void; children: ReactNode }) {
+export function Shell({ view, onView, onSettings, children }: { view: ViewId; onView: (v: ViewId) => void; onSettings: (request: SettingsRequest) => void; children: ReactNode }) {
   const app = useApp();
   const { theme, toggle } = useTheme();
   const tt = useT();
   const [collapsed, setCollapsed] = useState(() => window.innerWidth < 1180);
   const [mobileNav, setMobileNav] = useState(false);
   const [lancuchyOtwarte, setLancuchyOtwarte] = useState(false);
+  const [commandsOpen, setCommandsOpen] = useState(false);
 
   const cur = app.settings.display_currency;
   const eqTone = toneOf(app.stats.pnlSession);
@@ -88,15 +90,19 @@ export function Shell({ view, onView, children }: { view: ViewId; onView: (v: Vi
   /* skróty klawiszowe 1–7 przełączają widoki (L obsługuje I18nProvider) */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault(); setCommandsOpen(open => !open); return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || commandsOpen) return;
       const el = document.activeElement;
-      if (el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName)) return;
+      if (el && (el.closest('[role="dialog"]') || (el instanceof HTMLElement && el.isContentEditable) || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName))) return;
       const i = Number(e.key);
       if (i >= 1 && i <= NAV.length) onView(NAV[i - 1].id);
       if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey) toggle();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onView, toggle]);
+  }, [onView, toggle, commandsOpen]);
 
   /* SKRÓT „PARAMETRY EA" z panelu łańcuchów (projekt EA-2). Panel zgłasza
      żądanie do wspólnego stanu, Shell przełącza WIDOK, a ekran ustawień
@@ -154,12 +160,18 @@ export function Shell({ view, onView, children }: { view: ViewId; onView: (v: Vi
           </button>
         </div>
 
-        <nav className="rail__nav">
+        <button className="rail__search" onClick={() => setCommandsOpen(true)} title={tt("command.title")}>
+          <Icon name="search" size={16} /><span className="rail__label">{tt("command.search")}</span><kbd className="rail__kbd">Ctrl K</kbd>
+        </button>
+        <nav className="rail__nav" aria-label={tt("command.navigate")}>
           {NAV.map((n, i) => (
             <button
               key={n.id}
               className="rail__item"
               data-active={view === n.id}
+              aria-current={view === n.id ? "page" : undefined}
+              aria-label={tt(`nav.${n.id}`)}
+              data-nav-group={i === 0 ? "start" : i === 5 ? "research" : i === 10 ? "audit" : undefined}
               onClick={() => {
                 onView(n.id);
                 setMobileNav(false);
@@ -168,7 +180,7 @@ export function Shell({ view, onView, children }: { view: ViewId; onView: (v: Vi
             >
               <Icon name={n.icon} size={17} />
               <span className="rail__label">{tt(`nav.${n.id}`)}</span>
-              <kbd className="rail__kbd">{i + 1}</kbd>
+              {i < 9 && <kbd className="rail__kbd">{i + 1}</kbd>}
               {n.id === "signals" && app.messages.some((m) => m.pendingAction === "await") && (
                 <span className="rail__dot" />
               )}
@@ -229,7 +241,7 @@ export function Shell({ view, onView, children }: { view: ViewId; onView: (v: Vi
               — stąd zwykły przycisk logowania zamiast blokady albo ostrzeżenia. */}
           {app.telegramZalogowany ? (
             <button className="rail__user" onClick={app.logout} title={tt("shell.tgLogout.title")}>
-              <span className="rail__avatar">PC</span>
+              <span className="rail__avatar">{app.connection.user.name?.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase() || "TG"}</span>
               <span className="rail__label rail__uinfo">
                 <b>{app.connection.user.name}</b>
                 <small>{app.connection.user.handle}</small>
@@ -352,6 +364,7 @@ export function Shell({ view, onView, children }: { view: ViewId; onView: (v: Vi
           <Button variant="ghost" size="sm" icon={theme === "dark" ? "sun" : "moon"} onClick={toggle} title={tt("topbar.theme.title")} />
         </header>
 
+        {!app.live && <div className="preview-status" role="status"><Icon name="info" size={14} /><b>{tt("shell.preview.title")}</b><span>{tt("shell.preview.text")}</span></div>}
         <StatStrip />
 
         {app.halt.active && (
@@ -359,7 +372,7 @@ export function Shell({ view, onView, children }: { view: ViewId; onView: (v: Vi
             <Icon name="alert" size={16} />
             <div>
               <b>{tt("halt.title")}</b>
-              <span>
+              <span title={app.halt.reason}>
                 {tSilnik(app.halt.reason)} · {tt(app.halt.diagnoza?.trim() ? "halt.diagnosisNote" : "halt.resumeNote")}
               </span>
             </div>
@@ -374,7 +387,7 @@ export function Shell({ view, onView, children }: { view: ViewId; onView: (v: Vi
             <Icon name="shield-alert" size={16} />
             <div>
               <b>{tt("halt.overrideTitle")}</b>
-              <span>
+              <span title={app.riskOverride.reason}>
                 {tSilnik(app.riskOverride.reason)} ·{" "}
                 {tt("halt.overrideNote", { time: timeShort(app.riskOverride.since) })}
               </span>
@@ -391,6 +404,7 @@ export function Shell({ view, onView, children }: { view: ViewId; onView: (v: Vi
       {mobileNav && <div className="shell__scrim" onClick={() => setMobileNav(false)} />}
 
       <LancuchyPanel open={lancuchyOtwarte} onClose={() => setLancuchyOtwarte(false)} />
+      <CommandMenu open={commandsOpen} onClose={() => setCommandsOpen(false)} onView={onView} onSettings={onSettings} views={NAV} />
     </div>
   );
 }
@@ -487,7 +501,7 @@ function StatStrip() {
   return (
     <div className="statstrip">
       {items.map((it) => (
-        <div className="stat" key={it.k}>
+        <div className={`stat${it.k === "MT5" ? " stat--account" : ""}`} key={it.k}>
           <span className="stat__k">
             {it.k}
             {"tip" in it ? it.tip : null}

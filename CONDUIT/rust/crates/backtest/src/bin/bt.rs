@@ -1456,6 +1456,18 @@ fn main() -> Result<()> {
         } else {
             "compounding"
         };
+        // Account compounding and tick fidelity are independent dimensions.
+        // Never infer exact replay merely from the compounding label.
+        let tryb_obliczen = if a.quick_tick_stride > 1 { "quick" } else { "full" };
+        let limit_lota = {
+            let mut caps: Vec<f64> = warianty.iter().map(|p| p.settings.lot_max).collect();
+            caps.sort_by(f64::total_cmp);
+            caps.dedup();
+            if caps.len() == 1 {
+                if caps[0] == 0.0 { "bez limitu".to_string() }
+                else { conduit_monitor::pl_liczba(caps[0], 2) }
+            } else { "różny dla presetów".to_string() }
+        };
         // Okno rozdziela trzy różne zakresy, których nie wolno zlewać w jedno
         // „okres": dane na dysku, zdarzenia eksportu i ticki faktycznie
         // mierzone. Koniec pomiaru pokazujemy jako OSTATNI REALNY TICK, nie
@@ -1571,8 +1583,8 @@ fn main() -> Result<()> {
                 // 19/22" sugerowałby, że liczy się jeden, a liczą się wszystkie
                 // wolne rdzenie naraz.
                 let co = match trwa.first() {
-                    Some((n, _)) if k > 1 => format!("gotowe {g}/{ile} · {k} naraz — {n}"),
-                    Some((n, _)) => format!("gotowe {g}/{ile} — {n}"),
+                    Some((n, _)) if k > 1 => format!("gotowe {g}/{ile} · liczone {k} naraz — {n}"),
+                    Some((n, _)) => format!("gotowe {g}/{ile} · aktualnie liczone — {n}"),
                     None => format!("gotowe {g}/{ile}"),
                 };
                 // Cienki pasek: JEDEN przebieg, ten najdalej zaawansowany —
@@ -1586,13 +1598,13 @@ fn main() -> Result<()> {
                         r.biezacy(
                             *u,
                             format!(
-                                "{} · najdalej z {k} naraz (najsłabszy {} %)",
+                                "aktualnie liczone: {} · najdalej z {k} naraz (najsłabszy {} %)",
                                 trunc(n, 22),
                                 conduit_monitor::pl_liczba(najslabszy * 100.0, 0)
                             ),
                         );
                     }
-                    Some((n, u)) => r.biezacy(*u, format!("{} · ten jeden przebieg", trunc(n, 30))),
+                    Some((n, u)) => r.biezacy(*u, format!("aktualnie liczone: {}", trunc(n, 30))),
                     None => r.biezacy(0.0, ""),
                 }
 
@@ -1607,11 +1619,11 @@ fn main() -> Result<()> {
                 );
                 if let Ok(n) = najlepszy.lock() {
                     if let Some(b) = n.as_ref() {
-                        st.dodaj("najlepszy", trunc(&b.nazwa, 26));
+                        st.dodaj("najlepszy z ukończonych", format!("{} · {g}/{ile} gotowych", b.nazwa));
                         st.dodaj(
-                            "jego wynik",
+                            "wynik tego presetu",
                             format!(
-                                "{} $ · PF {} · {} trejdów",
+                                "{} $ · PF {} · {} zamknięć",
                                 zn(b.zysk, 0),
                                 if b.pf.is_finite() {
                                     conduit_monitor::pl_liczba(b.pf, 2)
@@ -1624,7 +1636,7 @@ fn main() -> Result<()> {
                         // §4a: zysk bez najgorszego dnia i bez dna equity nie
                         // wystarcza do żadnej decyzji
                         st.dodaj(
-                            "jego straty",
+                            "ryzyko tego presetu",
                             format!(
                                 "najgorszy dzień {} $ · dno {} $ · dni+ {} %",
                                 zn(b.najgorszy_dzien, 0),
@@ -1658,6 +1670,8 @@ fn main() -> Result<()> {
                     conduit_monitor::pl_duza(tickow_na_przebieg as f64),
                 );
                 st.dodaj("rdzenie", rdzenie.to_string());
+                st.dodaj("tryb_obliczen", tryb_obliczen);
+                st.dodaj("max_lot", limit_lota.clone());
                 st.dodaj("tryb", tryb.to_string());
                 st.dodaj("wykresy", wykresy.to_string());
                 st.dodaj("wyniki trafią do", plik_wynikow.clone());
@@ -2047,14 +2061,24 @@ fn main() -> Result<()> {
                 }
             })
             .collect();
-        if !a.no_charts && !a.summary_only {
-            let svg = chart::run_chart(
-                &format!("{name} · {} … {} · {tag}", fmt_ts(from), fmt_ts(to)),
-                &r.metrics,
-                &r.equity_curve,
-                &r.daily,
-            );
-            std::fs::write(a.out.join(format!("{safe}_{tag}.svg")), svg)?;
+        if (a.dump_trades || !a.no_charts) && !a.summary_only {
+            if !a.no_charts {
+                let svg = chart::run_chart(
+                    &format!("{name} · {} … {} · {tag}", fmt_ts(from), fmt_ts(to)),
+                    &r.metrics,
+                    &r.equity_curve,
+                    &r.daily,
+                );
+                std::fs::write(a.out.join(format!("{safe}_{tag}.svg")), svg)?;
+            }
+            // A multi-preset coronation needs the same primary daily and
+            // basket evidence as a single run, even when SVG output is off.
+            if a.dump_trades {
+                std::fs::write(a.out.join(format!("{safe}_{tag}_dni.json")),
+                    serde_json::to_string(&r.daily)?)?;
+                std::fs::write(a.out.join(format!("{safe}_{tag}_koszyki.json")),
+                    serde_json::to_string(&r.baskets_dump)?)?;
+            }
 
             // SUROWE DANE WYKRESU, nie tylko obrazek.
             //

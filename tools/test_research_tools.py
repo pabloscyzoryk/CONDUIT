@@ -18,7 +18,7 @@ class CandidateSpaceTests(unittest.TestCase):
         self.assertEqual({r['family'] for r in rows}, {*FAMILIES, 'reference'})
         for row in rows:
             self.assertEqual(row['settings']['lot_max'], 5)
-            self.assertTrue(row['settings']['explicit_pending_until_cancel'])
+            self.assertNotIn('explicit_pending_until_cancel', row['settings'])
             self.assertFalse(set(row['changes']) & BROKER_FIELDS)
             self.assertEqual(row['settings']['konto_dzwignia'], 500)
             self.assertEqual(row['settings']['swap_long_points'], -75.82)
@@ -28,6 +28,50 @@ class CandidateSpaceTests(unittest.TestCase):
     def test_broker_cannot_smuggle_strategy_axes(self):
         with self.assertRaises(ValueError):
             generate({'settings': {}}, {'lot_percent': 50}, 3, 1)
+
+    def test_optional_families_keep_common_contract_and_native_supported_measure(self):
+        base = {'settings': {'lot_max': 10, 'entry_units': 8}}
+        default_before = generate(base, {}, 25, 123)
+        rows = generate(base, {}, 80, 456, ('daily_bank', 'soft_regime'), 'G8E2')
+        self.assertEqual({r['family'] for r in rows}, {'reference', 'daily_bank', 'soft_regime'})
+        for row in rows:
+            self.assertEqual(row['settings']['lot_max'], 5)
+            self.assertNotIn('explicit_pending_until_cancel', row['settings'])
+            if row['family'] == 'soft_regime':
+                self.assertEqual(row['settings']['regime_miara'], 'Srednia')
+                self.assertEqual(row['settings']['regime_gdy_rozerwany'], 'Milcz')
+                self.assertTrue(row['settings']['regime_soft'])
+        self.assertEqual(default_before, generate(base, {}, 25, 123))
+
+    def test_profit_budget_space_is_opt_in_and_keeps_broker_and_lot_contract(self):
+        base = {'settings': {'profit_budget_arm_pct': 0, 'entry_units': 8}}
+        rows = generate(base, {'konto_dzwignia': 500}, 257, 20260907,
+                        ('budget_reinvest', 'budget_soft_regime'), 'G8B')
+        self.assertEqual(rows[0]['settings']['profit_budget_arm_pct'], 0)
+        for row in rows[1:]:
+            s = row['settings']
+            self.assertGreater(s['profit_budget_arm_pct'], 0)
+            self.assertTrue(0 < s['profit_budget_keep_pct'] < 100)
+            self.assertTrue(0 < s['profit_budget_deploy_pct'] <= 100)
+            self.assertIn(s['day_trail_stop_pct'], [0, 100-s['profit_budget_keep_pct']])
+            self.assertEqual(s['lot_max'], 5)
+            self.assertNotIn('explicit_pending_until_cancel', s)
+            self.assertFalse(set(row['changes']) & BROKER_FIELDS)
+
+    def test_reference_preserves_preset_management_and_ingress_policies(self):
+        for protect in (False, True):
+            settings = {'lot_max': 10, 'explicit_pending_until_cancel': protect,
+                        'edycja_sieroty_nie_otwiera': False,
+                        'pending_lifetime': 'UntilTp1', 'pending_ttl_h': 4,
+                        'day_trail_basis': 'ProfitPeak', 'rearm_grid_on_return': True}
+            rows = generate({'settings': settings}, {}, 10, 333, ('basket_harvest',))
+            self.assertEqual(rows[0]['settings'], {**settings, 'lot_max': 5.0})
+            for row in rows:
+                self.assertEqual(row['settings']['explicit_pending_until_cancel'], protect)
+                self.assertFalse(row['settings']['edycja_sieroty_nie_otwiera'])
+                self.assertEqual(row['settings']['pending_lifetime'], 'UntilTp1')
+                self.assertEqual(row['settings']['pending_ttl_h'], 4)
+                self.assertEqual(row['settings']['day_trail_basis'], 'ProfitPeak')
 
 
 class CompletionTests(unittest.TestCase):

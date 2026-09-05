@@ -406,3 +406,48 @@ fn actual_runtime_settings_reload_requires_review_without_replacing_old_proof(){
         drop(st);std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[test]
+fn profit_budget_preserves_day_anchor_without_optional_continuation_and_resets_next_day() {
+    let mut c=cfg();c.restore_strategy_continuation=false;c.profit_budget_arm_pct=5.0;
+    c.profit_budget_keep_pct=75.0;c.profit_budget_deploy_pct=100.0;
+    let (mut s,mut b)=rig(c.clone());
+    b.inner.balance+=200.0;tick(&mut s,&mut b,T+1000,4004.0);
+    let original=conduit_core::profit_budget::BudgetAnchor::from(&s.glowny().engine.stats);
+    assert_eq!(original.start,1000.0);assert!(original.peak>1190.0);
+    let signature=sygnatura_ryzyka(&s);
+    s.glowny_mut().engine.stats.day_peak_equity+=1.0;
+    assert_ne!(sygnatura_ryzyka(&s),signature,"peak advancement must dirty the durable risk snapshot");
+    let original=conduit_core::profit_budget::BudgetAnchor::from(&s.glowny().engine.stats);
+    let before=conduit_core::profit_budget::available(&c,original,&b,None).unwrap().unwrap();
+    let memory=memory_of(&mut s,&b);
+    let (mut restored,reports)=restore_memory(c.clone(),memory,&b,ContinuationOrigin::Memory);
+    assert!(reports.is_empty());
+    let after_anchor=conduit_core::profit_budget::BudgetAnchor::from(&restored.glowny().engine.stats);
+    assert_eq!(after_anchor,original);
+    assert_eq!(conduit_core::profit_budget::available(&c,after_anchor,&b,None).unwrap(),Some(before));
+    let before_count=b.positions().len();
+    restored.glowny_mut().engine.on_message(&mut b,&msg(T+1000,101,TEXT,None));
+    assert_eq!(b.positions().len(),before_count,"restart cannot erase consumed downside");
+    let next_day=T+86_400_000;tick(&mut restored,&mut b,next_day,4004.0);
+    let fresh=conduit_core::profit_budget::BudgetAnchor::from(&restored.glowny().engine.stats);
+    assert_ne!(fresh.day,original.day);assert_eq!(fresh.start,fresh.peak);
+    assert_eq!(conduit_core::profit_budget::available(&c,fresh,&b,None).unwrap(),None);
+}
+
+#[test]
+fn profit_budget_panel_rejects_oversize_without_sending_or_silently_resizing() {
+    let mut c=cfg();c.restore_strategy_continuation=false;c.profit_budget_arm_pct=5.0;
+    let (mut s,mut b)=rig(c);b.inner.balance+=200.0;tick(&mut s,&mut b,T+1000,4004.0);
+    // Remove existing downside through actual broker close, then book it.
+    for p in b.positions().to_vec(){b.close_position(p.ticket,CloseReason::Manual).unwrap();}
+    tick(&mut s,&mut b,T+2000,4004.0);
+    let before=(b.positions().len(),b.pendings().len(),b.account().equity);
+    let error=manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,Some(3990.0),1.0).unwrap_err();
+    assert!(error.contains("maximum allowed volume:"));assert!(error.contains("requested volume is unchanged"));
+    assert_eq!((b.positions().len(),b.pendings().len(),b.account().equity),before);
+    assert!(manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,Some(3990.0),0.01).is_ok());
+    assert!(manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,None,0.01).is_err());
+    s.glowny_mut().engine.cfg.profit_budget_arm_pct=0.0;
+    assert!(manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,None,1.0).is_ok());
+}

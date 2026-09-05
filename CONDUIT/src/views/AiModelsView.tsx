@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, Empty, Field, Icon, Segmented, Select, Switch } from "@/components/ui";
 import { api } from "@/store/transport";
@@ -1085,14 +1086,14 @@ export function AiModelsView() {
         {blad && (
           <div className="aim__err">
             <Icon name="alert" size={14} />
-            <span>{blad}</span>
+            <span>{tSilnik(blad)}</span>
           </div>
         )}
       </Card>
 
       {!model || !siec ? (
         <Card>
-          <Empty icon="brain" title={t("aim.empty")} text={blad ?? t("aim.empty.text")} />
+          <Empty icon="brain" title={t("aim.empty")} text={tSilnik(blad) || t("aim.empty.text")} />
         </Card>
       ) : (
         <>

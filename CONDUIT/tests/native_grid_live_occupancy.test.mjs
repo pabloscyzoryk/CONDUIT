@@ -21,6 +21,7 @@ function rig(on=true){
   const e={In_ConfirmedExitRetry:on,g_b:[{npos:2,pos:[11,12],pos_lv:[0,1],npend:1,pend:[21],pend_lv:[2]}],
     positions:[12],orders:[21],complete:true,ArraySize:x=>x.length,snapshotCalls:0};
   e.ExitOwnedSnapshot=(_bi,p,o)=>{e.snapshotCalls++;p.push(...e.positions);o.push(...e.orders);return e.complete;};
+  e.NativeLevelKnown=new Function('level',actualBody('NativeLevelKnown'));
   e.GridLevelHasLivePosition=new Function('env',`with(env){return function(bi,lv){${actualBody('GridLevelHasLivePosition')}}}`)(e);
   return e;
 }
@@ -38,4 +39,14 @@ test('both native market-budget and placement phases use the same occupancy proo
   const start=source.indexOf('int PlaceGrid(');const end=source.indexOf('\nvoid ',start);
   const body=source.slice(start,end);
   assert.equal((body.match(/GridLevelHasLivePosition\(bi, i\)/g)||[]).length,2);
+});
+
+test('known fast-addon, reentry and target legs do not occupy every unrelated grid level',()=>{
+  for(const level of [-2,-3,-4]){
+    const e=rig();e.g_b[0].pos_lv[1]=level;e.g_b[0].pend_lv[0]=level;
+    assert.equal(e.GridLevelHasLivePosition(0,0),false,`known special level ${level}`);
+    assert.equal(e.GridLevelHasLivePosition(0,level),true,`its own level ${level}`);
+  }
+  const e=rig();e.g_b[0].pos_lv[1]=-99;
+  assert.equal(e.GridLevelHasLivePosition(0,0),true,'unknown future level remains blocked');
 });

@@ -1,3 +1,5 @@
+import { useT } from "@/i18n";
+import { tSilnik } from "@/i18n/silnik";
 
 
 import { useEffect, useState } from "react";
@@ -34,6 +36,7 @@ export function WyborSciezki({
   onWybierz: (p: string) => void;
   onZamknij: () => void;
 }) {
+  const t = useT();
   const [dane, setDane] = useState<Zawartosc | null>(null);
   const [blad, setBlad] = useState<string | null>(null);
   const [nazwa, setNazwa] = useState("");
@@ -66,12 +69,12 @@ export function WyborSciezki({
           </div>
 
           <p className="hint" style={{ marginBottom: "var(--sp-2)" }}>
-            Ścieżki są ścieżkami <b>serwera</b>, na którym pracuje bot — nie tego komputera.
+            {t("path.server")}
           </p>
 
           {blad && (
             <p className="hint" style={{ color: "var(--short-text)" }}>
-              {blad}
+              {tSilnik(blad)}
             </p>
           )}
 
@@ -88,19 +91,19 @@ export function WyborSciezki({
                   icon="arrow-up"
                   onClick={() => wczytaj(dane.parent ?? "NAPĘDY")}
                 >
-                  W górę
+                  {t("logs.dirPick.up")}
                 </Button>
                 <span className="spacer" />
                 {tryb === "katalog" && (
                   <Button size="sm" variant="primary" icon="check" onClick={() => onWybierz(dane.path)}>
-                    Wybierz ten katalog
+                    {t("logs.dirPick.pick")}
                   </Button>
                 )}
               </div>
 
               <div style={{ maxHeight: 280, overflowY: "auto", display: "grid", gap: 2 }}>
                 {dane.dirs.length === 0 && !dane.pliki?.length && (
-                  <span className="hint">pusto</span>
+                  <span className="hint">{t("logs.dirPick.empty")}</span>
                 )}
                 {dane.dirs.map((d) => (
                   <button
@@ -140,7 +143,7 @@ export function WyborSciezki({
                       <TextInput
                         value={nazwa}
                         onChange={setNazwa}
-                        placeholder="…albo wpisz nazwę nowego pliku"
+                        placeholder={t("path.newName")}
                       />
                     </div>
                     <Button
@@ -150,7 +153,7 @@ export function WyborSciezki({
                       disabled={!nazwa.trim()}
                       onClick={() => onWybierz(zlacz(dane.path, nazwa.trim()))}
                     >
-                      Użyj tej nazwy
+                      {t("path.useName")}
                     </Button>
                   </div>
                 </>

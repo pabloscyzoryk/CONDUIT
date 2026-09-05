@@ -30,6 +30,7 @@ use crate::mailer::{
     MailSender, SmtpTarget, ThrottleConfig,
 };
 use crate::state::{Shared, StateHandle};
+use crate::mailer::i18n::{self as mail_i18n, Language};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
@@ -156,32 +157,12 @@ impl Notifier {
         self.policy.lock().pending_total()
     }
 
-    fn temat(&self, st: &Shared, cat: MailCategory, subject: &str) -> String {
+    fn temat_i_jezyk(&self, st: &Shared, cat: MailCategory, event: &str) -> (String, Language) {
         let tpl = self.setup.lock().subject_tpl.clone();
-        if tpl.trim().is_empty() {
-            return temat_systemowy(cat, subject);
-        }
-        // Zmienne liczymy WEWNĄTRZ `read`, na referencji — kopiowanie całej
-        // migawki (600 logów, 500 transakcji, 300 wiadomości) po to, żeby
-        // odczytać z niej saldo, byłoby marnotrawstwem przy każdym alercie.
-        let vars = st.read(|s| crate::mailer::zmienne_tematu(s, cat, subject, crate::now_ms()));
-        let temat = crate::mailer::render_subject(&tpl, &vars);
-        // Serwery SMTP nie lubią pustego ani wielolinijkowego `Subject:`;
-        // złamanie wiersza w nagłówku to w najlepszym razie ucięty temat,
-        // w najgorszym odrzucona wiadomość.
-        let jedna_linia: String = temat
-            .chars()
-            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-            .collect();
-        let jedna_linia = jedna_linia.trim().to_string();
-        if jedna_linia.is_empty() {
-            // Szablon złożony wyłącznie ze zmiennych, które akurat wyszły puste
-            // (`${zdarzenie}` przy pustym zdarzeniu). Mail bez tematu ginie
-            // w skrzynce, więc wracamy do systemowego zamiast wysyłać pustkę.
-            temat_systemowy(cat, subject)
-        } else {
-            jedna_linia
-        }
+        st.read(|snap| (
+            mail_i18n::subject(snap, cat, event, &tpl, crate::now_ms()),
+            Language::from_app(&snap.language),
+        ))
     }
 
     /// ZGŁOSZENIE ZDARZENIA. Nie blokuje i nie wysyła — tylko loguje
@@ -206,13 +187,13 @@ impl Notifier {
         if !wlaczona {
             return;
         }
-        let temat = self.temat(st, cat, subject);
+        let (temat, language) = self.temat_i_jezyk(st, cat, subject);
 
         let decyzja = self.policy.lock().offer(cat, subject, now);
         use crate::mailer::Decision;
         match decyzja {
             Decision::Send => {
-                self.queue.push(cat, temat, body.to_string(), now);
+                self.queue.push(cat, temat, mail_i18n::body(language, body), now);
             }
             Decision::Coalesce { pending } | Decision::RateLimited { pending } => {
                 tracing::debug!(
@@ -245,7 +226,7 @@ impl Notifier {
         // Mail testowy leci Z TYM SAMYM tematem, co produkcyjny — inaczej
         // przycisk „wyślij mail testowy" nie sprawdzałby tego, co użytkownik
         // właśnie wpisał, a to jest jedyny powód, dla którego się go naciska.
-        let temat = self.temat(st, MailCategory::Test, "mail testowy");
+        let (temat, language) = self.temat_i_jezyk(st, MailCategory::Test, "mail testowy");
         let tresc = format!(
             "To jest wiadomość testowa z CONDUIT.\n\n\
              Serwer SMTP: {host}:{port} ({sec})\n\
@@ -258,13 +239,14 @@ impl Notifier {
             sec = match setup.target.security {
                 MailSecurity::Starttls => "STARTTLS",
                 MailSecurity::Ssl => "SSL/TLS",
-                MailSecurity::None => "bez szyfrowania",
+                MailSecurity::None => language.choose("bez szyfrowania", "unencrypted"),
             },
             from = setup.target.sender(),
             to = setup.target.to.join(", "),
             czas = crate::store::stamp(crate::now_ms()),
         );
 
+        let tresc = mail_i18n::body(language, &tresc);
         match self.sender.send(&setup.target, &temat, &tresc) {
             Ok(()) => {
                 let ile = setup.target.to.len();
@@ -299,7 +281,7 @@ impl Notifier {
         // zaległe zbiorcze → do kolejki
         let due = self.policy.lock().take_due(now);
         for (cat, ile, body) in due {
-            let temat = self.temat(st, cat, &format!("{ile} zdarzeń"));
+            let (temat, language) = self.temat_i_jezyk(st, cat, &format!("{ile} zdarzeń"));
             let konto = st.read(|s| {
                 if s.connection.account.login != 0 {
                     format!(
@@ -320,7 +302,7 @@ impl Notifier {
                 format!("Zbiorcze powiadomienie: {ile} × {}", cat.label()),
                 tresc.clone(),
             );
-            self.queue.push(cat, temat, tresc, now);
+            self.queue.push(cat, temat, mail_i18n::body(language, &tresc), now);
         }
 
         let (wlaczona, target) = {
@@ -483,7 +465,9 @@ mod tests {
             workspace: dir,
             ..Default::default()
         };
-        crate::bootstrap(&cfg, crate::default_auth()).unwrap()
+        let st = crate::bootstrap(&cfg, crate::default_auth()).unwrap();
+        st.update(crate::coalesce::Sections::one(crate::coalesce::Section::Settings), |snap| snap.language = "pl".into());
+        st
     }
 
     fn setup() -> MailSetup {
@@ -505,6 +489,40 @@ mod tests {
             categories: MailCategories::default(),
             subject_tpl: String::new(),
         }
+    }
+
+    #[test]
+    fn english_delivery_uses_app_language_and_preserves_original_journal() {
+        let st = stan("language-en");
+        st.update(crate::coalesce::Sections::one(crate::coalesce::Section::Settings), |snap| snap.language = "en".into());
+        let fake = Arc::new(Atrapa::default());
+        let n = Notifier::new(setup(), fake.clone() as Arc<dyn MailSender>, None);
+        let subject = "Niepełne potwierdzenie zamknięcia — blokada nowych wejść";
+        let body = "Odczyt stanu brokera zakończony; tymczasowa bramka wejść zdjęta.";
+        n.notify(&st, MailCategory::OrderError, subject, body);
+        n.tick(&st);
+        let sent = fake.wyslane();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "[CONDUIT] order error — Incomplete close confirmation — new entries blocked");
+        assert_eq!(sent[0].1, "Broker state read completed; temporary entry gate removed.");
+        assert!(st.read(|snap| snap.logs.iter().any(|entry| entry.title == subject && entry.content == body)));
+    }
+
+    #[test]
+    fn test_email_is_localized_and_language_switch_applies_to_next_event() {
+        let st = stan("language-test");
+        let fake = Arc::new(Atrapa::default());
+        let n = Notifier::new(setup(), fake.clone() as Arc<dyn MailSender>, None);
+        st.update(crate::coalesce::Sections::one(crate::coalesce::Section::Settings), |snap| snap.language = "en".into());
+        n.send_test(&st).unwrap();
+        st.update(crate::coalesce::Sections::one(crate::coalesce::Section::Settings), |snap| snap.language = "pl".into());
+        n.send_test(&st).unwrap();
+        let sent = fake.wyslane();
+        assert_eq!(sent[0].0, "[CONDUIT] test — test email");
+        assert!(sent[0].1.starts_with("This is a test message from CONDUIT."));
+        assert!(sent[0].1.contains("SMTP server: smtp.example.com:587 (STARTTLS)"));
+        assert!(sent[1].1.starts_with("To jest wiadomość testowa z CONDUIT."));
+        assert!(sent.iter().all(|(_, body)| !body.contains("tajne")));
     }
 
     #[test]

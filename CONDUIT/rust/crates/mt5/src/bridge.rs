@@ -1635,6 +1635,8 @@ impl Broker for Mt5Bridge {
         self.sym.volume_max
     }
 
+    fn normalize_order_price(&self, price:f64)->f64 { self.sym.round_price(price) }
+
     fn close_receipt_reconciliation_active(&self) -> bool {
         self.tr.config().close_receipt_reconcile
     }

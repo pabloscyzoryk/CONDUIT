@@ -1,3 +1,4 @@
+import { LANGUAGES, useLanguage, type Jezyk } from "@/i18n";
 /* ============================================================
    WIZUALIZACJA MODELI AI — punkt wejścia samodzielnej aplikacji
 
@@ -112,6 +113,7 @@ function useInfo(): WizInfo | null {
 function Wizualizacja() {
   const { theme, palette, toggleTheme, setPalette } = useWyglad();
   const info = useInfo();
+  const { lang, setLanguage, t } = useLanguage();
 
   /* skrót `T` na motyw — ten sam co w panelu */
   useEffect(() => {
@@ -142,8 +144,8 @@ function Wizualizacja() {
             </svg>
           </span>
           <span className="wiz__name">
-            <b>Wizualizacja modeli AI</b>
-            <small>CONDUIT · podgląd sieci</small>
+            <b>{t("wiz.title")}</b>
+            <small>{t("wiz.subtitle")}</small>
           </span>
         </div>
 
@@ -152,7 +154,7 @@ function Wizualizacja() {
         {info && (
           <span
             className="wiz__path"
-            title={`${info.katalog}\n${info.liczba} modeli${info.pominiete ? `, pominięto ${info.pominiete} plików bez sieci` : ""}`}
+            title={`${info.katalog}\n${t("wiz.models", { n: info.liczba, m: info.pominiete })}`}
           >
             <Icon name="layers" size={12} />
             <span className="mono">{info.katalog}</span>
@@ -160,18 +162,19 @@ function Wizualizacja() {
         )}
 
         <div className="wiz__tools">
+          <Select<Jezyk> value={lang} onChange={setLanguage} size="sm" options={LANGUAGES.map(l => ({ value: l.id, label: `${l.flag} ${l.native}` }))} />
           <Select<PaletteName>
             value={palette}
             onChange={setPalette}
             size="sm"
-            options={PALETTES.map((p) => ({ value: p.id, label: p.label }))}
+            options={PALETTES.map((p) => ({ value: p.id, label: t(`pal.${p.id}`) }))}
           />
           <Button
             variant="ghost"
             size="sm"
             icon={theme === "dark" ? "sun" : "moon"}
             onClick={toggleTheme}
-            title="Motyw jasny / ciemny (T)"
+            title={t("topbar.theme.title")}
           />
         </div>
       </header>
@@ -181,9 +184,9 @@ function Wizualizacja() {
           <div className="wiz__pusto">
             <Icon name="alert" size={15} style={{ flex: "none", marginTop: 1 }} />
             <div>
-              <b>Nie znalazłem ani jednego wytrenowanego modelu.</b>
+              <b>{t("wiz.empty")}</b>
               <div className="wiz__gdzie">
-                Szukałem plików <code>*.json</code> z siecią (<code>policy.pos.dims</code>) w:
+                {t("wiz.searched")}
                 <ul>
                   {info.szukano.map((p) => (
                     <li key={p}>
@@ -193,14 +196,12 @@ function Wizualizacja() {
                 </ul>
                 {info.pominiete > 0 && (
                   <div>
-                    Pominąłem {info.pominiete} plików <code>*.json</code> bez sieci — to migawki treningu
-                    (<code>*.checkpoint.json</code>), nie modele.
+                    {t("wiz.skipped", { n: info.pominiete })}
                   </div>
                 )}
               </div>
-              Wszystko poniżej to <b>model demonstracyjny</b> z wagami generatora pseudolosowego (plakietka „wagi
-              lokalne") — <b>nie</b> model wytrenowany. Wskaż właściwy katalog:{" "}
-              <code>wizualizacja.exe --modele C:\ścieżka\do\models</code>
+              {t("wiz.demo")}{" "}
+              <code>wizualizacja.exe --modele C:\path\to\models</code>
             </div>
           </div>
         )}

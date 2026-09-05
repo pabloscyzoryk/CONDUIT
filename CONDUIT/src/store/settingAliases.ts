@@ -26,11 +26,22 @@ function detectionPair(source: TpSource) {
 export function settingControlValue(doc: Document, key: SettingKey): unknown {
   if (key === "trail_after_tp2") return effectiveSmartSlDelay(doc) > 0;
   if (key === "tp_detect_price" || key === "tp_detect_signal") return detectionPair(effectiveTpSource(doc))[key];
+  if (key === "custom_entry") return !doc.entry_offset_dir && doc.custom_entry === true;
+  if (key === "official_mode") return !doc.all_runners && doc.official_mode === true;
+  if (key === "scale_out") return !doc.all_runners && !doc.official_mode && doc.scale_out === true;
   return doc[key];
 }
 
 /** Sibling keys travel in ONE patch to ONE owner, not multiple asynchronous writes. */
 export function settingControlPatch(doc: Document, key: SettingKey, value: unknown): SettingControlPatch {
+  // Each family is a single enum in the engine. An explicit selection must
+  // clear competing aliases, otherwise an earlier selection silently wins.
+  if (value === true && (key === "custom_entry" || key === "entry_offset_dir")) {
+    return { custom_entry: key === "custom_entry", entry_offset_dir: key === "entry_offset_dir" };
+  }
+  if (value === true && (key === "all_runners" || key === "official_mode" || key === "scale_out")) {
+    return { all_runners: key === "all_runners", official_mode: key === "official_mode", scale_out: key === "scale_out" };
+  }
   if (key === "trail_after_tp2") {
     const enabled = value === true;
     return { trail_after_tp2: enabled, smart_sl_delay_n: enabled ? 1 : 0 };

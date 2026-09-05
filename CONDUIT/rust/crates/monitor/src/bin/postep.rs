@@ -15,6 +15,8 @@
 
 use conduit_monitor as m;
 use eframe::egui;
+use m::language::{self, text as l, Language};
+use m::localized_format as lf;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -30,13 +32,13 @@ const KROK_PRZEWIJANIA: f32 = 48.0;
 //  PALETA — ta sama, co w panelu webowym CONDUIT
 // ============================================================
 
-const TLO: egui::Color32 = egui::Color32::from_rgb(0x0b, 0x0e, 0x14);
-const KARTA: egui::Color32 = egui::Color32::from_rgb(0x11, 0x15, 0x20);
-const INSET: egui::Color32 = egui::Color32::from_rgb(0x0d, 0x10, 0x17);
-const KRESKA: egui::Color32 = egui::Color32::from_rgb(0x22, 0x28, 0x39);
-const KRESKA_MOCNA: egui::Color32 = egui::Color32::from_rgb(0x2f, 0x37, 0x4b);
-const TEKST: egui::Color32 = egui::Color32::from_rgb(0xe6, 0xeb, 0xf5);
-const TEKST_SLABY: egui::Color32 = egui::Color32::from_rgb(0x85, 0x90, 0xa8);
+const TLO: egui::Color32 = egui::Color32::from_rgb(0x0d, 0x11, 0x19);
+const KARTA: egui::Color32 = egui::Color32::from_rgb(0x14, 0x1a, 0x24);
+const INSET: egui::Color32 = egui::Color32::from_rgb(0x10, 0x16, 0x20);
+const KRESKA: egui::Color32 = egui::Color32::from_rgb(0x28, 0x34, 0x48);
+const KRESKA_MOCNA: egui::Color32 = egui::Color32::from_rgb(0x3a, 0x4b, 0x64);
+const TEKST: egui::Color32 = egui::Color32::from_rgb(0xed, 0xf2, 0xfa);
+const TEKST_SLABY: egui::Color32 = egui::Color32::from_rgb(0x99, 0xaa, 0xc1);
 const ZIELEN: egui::Color32 = egui::Color32::from_rgb(0x26, 0xd9, 0xa3);
 const FIOLET: egui::Color32 = egui::Color32::from_rgb(0xc8, 0x8d, 0xff);
 const BURSZTYN: egui::Color32 = egui::Color32::from_rgb(0xf5, 0xb7, 0x4e);
@@ -234,6 +236,7 @@ impl Przeglad {
 
 struct Apka {
     dir: PathBuf,
+    language_error: Option<String>,
     zadania: Vec<m::Postep>,
     wygl: HashMap<String, Wygladzanie>,
     /// id → ostatni znany stan; służy do rozpoznania „zadanie właśnie zniknęło"
@@ -314,8 +317,9 @@ impl Apka {
             Ok(p) => (format!("\"{}\" ", p.display()), String::new()),
             Err(sprawdzone) => (
                 String::new(),
-                format!(
+                lf!(
                     "nie znalazłem btp.exe — wpisz pełną ścieżkę. Sprawdziłem: {}",
+                    "btp.exe was not found — enter its full path. Checked: {}",
                     sprawdzone
                         .iter()
                         .take(6)
@@ -331,6 +335,7 @@ impl Apka {
 
         Apka {
             dir,
+            language_error: None,
             zadania: Vec::new(),
             wygl: HashMap::new(),
             widziane: HashMap::new(),
@@ -396,15 +401,24 @@ impl Apka {
                         rodzaj: ost.rodzaj.clone(),
                         przerwane,
                         kiedy: Instant::now(),
-                        podsumowanie: format!(
+                        podsumowanie: lf!(
                             "{} · {} w {}",
+                            "{} · {} in {}",
                             if przerwane {
-                                format!("zatrzymano na {:.0} %", ost.postep * 100.0)
+                                lf!(
+                                    "zatrzymano na {:.0} %",
+                                    "stopped at {:.0} %",
+                                    ost.postep * 100.0
+                                )
                             } else {
-                                "ukończono".to_string()
+                                l("ukończono", "completed").to_string()
                             },
                             if ost.calosc > 0.0 {
-                                format!("{} {}", m::pl_duza(ost.zrobione), ost.jednostka)
+                                format!(
+                                    "{} {}",
+                                    language::large(ost.zrobione),
+                                    language::unit(&ost.jednostka)
+                                )
                             } else {
                                 String::new()
                             },
@@ -478,7 +492,10 @@ impl Apka {
                         w.uwaga = if kod == Some(0) {
                             String::new()
                         } else if ogon.is_empty() {
-                            format!("bez wyjścia na ekran · log: {log}")
+                            lf!(
+                                "bez wyjścia na ekran · log: {log}",
+                                "no screen output · log: {log}"
+                            )
                         } else {
                             ogon
                         };
@@ -496,7 +513,10 @@ impl Apka {
                     if let Some(w) = self.kolejka.znajdz_mut(&id) {
                         w.stan = m::kolejka::Stan::Nieznane;
                         w.koniec_ts = teraz;
-                        w.uwaga = format!("straciłem kontakt z procesem: {opis}");
+                        w.uwaga = lf!(
+                            "straciłem kontakt z procesem: {opis}",
+                            "lost contact with the process: {opis}"
+                        );
                     }
                     zmiana = true;
                 }
@@ -541,7 +561,11 @@ impl Apka {
                 w.stan = m::kolejka::Stan::Padlo;
                 w.start_ts = teraz;
                 w.koniec_ts = teraz;
-                w.uwaga = format!("nie dało się uruchomić: {e}");
+                w.uwaga = lf!(
+                    "nie dało się uruchomić: {}",
+                    "could not start: {}",
+                    language::label(language::current(), &e.to_string())
+                );
             }
         }
     }
@@ -684,6 +708,15 @@ const PLAKIETKA_RAMKA: f32 = 16.0;
 ///
 /// Osobno od rysowania, żeby dało się to i zmierzyć, i sprawdzić testem.
 fn czesci_plakietki(skrot: &str, z: &m::zbiorczy::Zbiorczy, st: Stopien) -> Vec<Czesc> {
+    czesci_plakietki_w_jezyku(skrot, z, st, language::current())
+}
+
+fn czesci_plakietki_w_jezyku(
+    skrot: &str,
+    z: &m::zbiorczy::Zbiorczy,
+    st: Stopien,
+    jezyk: Language,
+) -> Vec<Czesc> {
     // „~" = procent jest ŚREDNIĄ z zadań o różnych jednostkach, a nie udziałem
     // przemielonych danych. Jeden znak zamiast zdania, bo zdanie się tu nie
     // mieści — pełne wyjaśnienie jest w podpowiedzi pod kursorem.
@@ -691,9 +724,9 @@ fn czesci_plakietki(skrot: &str, z: &m::zbiorczy::Zbiorczy, st: Stopien) -> Vec<
         Some(p) => format!(
             "{}{} %",
             if z.srednia_z_ulamkow { "~" } else { "" },
-            m::pl_liczba(p * 100.0, 0)
+            jezyk.number(p * 100.0, 0)
         ),
-        None => "bez skali".to_string(),
+        None => jezyk.text("bez skali", "no total").to_string(),
     };
     // „≥" = część zadań nie umie się oszacować, więc to dolna granica.
     let czas = if z.eta_s >= 0.0 {
@@ -729,7 +762,11 @@ fn czesci_plakietki(skrot: &str, z: &m::zbiorczy::Zbiorczy, st: Stopien) -> Vec<
             TEKST_SLABY.gamma_multiply(0.7),
             10.0,
         ));
-        v.push(Czesc::Tekst(z.opis_szybkosci(), TEKST_SLABY, 10.5));
+        v.push(Czesc::Tekst(
+            z.opis_szybkosci_w_jezyku(jezyk),
+            TEKST_SLABY,
+            10.5,
+        ));
     }
     v
 }
@@ -808,7 +845,7 @@ fn szerokosc_tytulu(ui: &egui::Ui) -> f32 {
         .x;
     let b = ui
         .painter()
-        .layout_no_wrap("· postęp".into(), f, TEKST)
+        .layout_no_wrap(l("· postęp", "· progress").into(), f, TEKST)
         .size()
         .x;
     a + b + ui.spacing().item_spacing.x * 2.0
@@ -822,6 +859,121 @@ fn plakietka(ui: &mut egui::Ui, tekst: &str, kolor: egui::Color32) {
         .corner_radius(egui::CornerRadius::same(5))
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| etykieta(ui, tekst, kolor, 10.0));
+}
+
+/// Research context is supplied by the producer. Never derive fidelity or
+/// holdout status from a profitable result or the name of a candidate.
+fn panel_badania(ui: &mut egui::Ui, z: &m::Postep) {
+    use m::badanie::{tryb, wartosc, TrybObliczen};
+    if z.rodzaj == m::TRENING {
+        return;
+    }
+    let s = &z.statystyki;
+    let (mode, color, explanation) = match tryb(s) {
+        TrybObliczen::Quick => (
+            "QUICK",
+            BURSZTYN,
+            l(
+                "Selekcja wstępna. Kandydaci wymagają pełnego przebiegu.",
+                "Initial screening. Candidates require a full replay.",
+            ),
+        ),
+        TrybObliczen::Full => (
+            "FULL",
+            ZIELEN,
+            l(
+                "Pełny przebieg tickowy według deklaracji zadania.",
+                "Full tick replay, as declared by the task.",
+            ),
+        ),
+        TrybObliczen::Mixed => (
+            "QUICK + FULL",
+            FIOLET,
+            l(
+                "Porównanie trybów. Każdy wynik zachowuje własną metodę obliczeń.",
+                "Mode comparison. Each result retains its own calculation method.",
+            ),
+        ),
+        TrybObliczen::Niepodany => (
+            l("TRYB NIEPODANY", "MODE UNSPECIFIED"),
+            TEKST_SLABY,
+            l(
+                "Zadanie nie podało metody obliczeń. Nie zakładamy pełnych ticków.",
+                "The task did not declare its method. Full ticks are not assumed.",
+            ),
+        ),
+    };
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        plakietka(ui, mode, color);
+        if let Some(channel) = wartosc(s, "kanal") {
+            plakietka(ui, channel, TEKST);
+        }
+        if let Some(threads) = wartosc(s, "watki") {
+            plakietka(
+                ui,
+                &lf!("{threads} wątków", "{threads} threads"),
+                TEKST_SLABY,
+            );
+        }
+        if let Some(lot) = wartosc(s, "max_lot") {
+            plakietka(ui, &format!("max lot {lot}"), TEKST_SLABY);
+        }
+        if let Some(deposit) = wartosc(s, "depozyt") {
+            plakietka(
+                ui,
+                &lf!("depozyt ${deposit}", "deposit ${deposit}"),
+                TEKST_SLABY,
+            );
+        }
+    })
+    .response
+    .on_hover_text(explanation);
+    ui.label(
+        egui::RichText::new(m::badanie::walidacja_w_jezyku(s, language::current()))
+            .size(11.0)
+            .color(TEKST_SLABY),
+    );
+    if let Some(stage) = wartosc(s, "etap_badania") {
+        ui.add_space(5.0);
+        ui.label(egui::RichText::new(stage).size(17.0).strong().color(TEKST));
+    }
+    if let Some(window) = wartosc(s, "okno") {
+        ui.label(egui::RichText::new(window).size(11.0).color(TEKST_SLABY));
+    }
+    let counts = [
+        ("zaplanowane", "PLAN", TEKST_SLABY),
+        ("ukonczone", l("GOTOWE", "DONE"), ZIELEN),
+        ("nieudane", l("BŁĘDY", "ERRORS"), CZERWIEN),
+    ];
+    if counts.iter().any(|(k, _, _)| wartosc(s, k).is_some()) {
+        ui.add_space(5.0);
+        ui.columns(3, |columns| {
+            for (column, (key, label, color)) in columns.iter_mut().zip(counts) {
+                mini_metryka(column, label, wartosc(s, key).unwrap_or("—"), color);
+            }
+        });
+    }
+    if let Some(candidates) = wartosc(s, "kandydaci") {
+        ui.label(
+            egui::RichText::new(lf!("Kandydaci: {candidates}", "Candidates: {candidates}"))
+                .size(11.0)
+                .color(TEKST_SLABY),
+        );
+    }
+    ui.add_space(7.0);
+}
+
+fn mini_metryka(ui: &mut egui::Ui, label: &str, value: &str, color: egui::Color32) {
+    egui::Frame::default()
+        .fill(INSET)
+        .corner_radius(egui::CornerRadius::same(7))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width((ui.available_width() - 1.0).max(0.0));
+            ui.label(egui::RichText::new(label).size(9.5).color(TEKST_SLABY));
+            ui.label(egui::RichText::new(value).size(15.0).strong().color(color));
+        });
 }
 
 /// Skrót po ZNAKACH, nie po bajtach — polecenia mają w sobie polskie nazwy
@@ -839,16 +991,7 @@ fn skroc(s: &str, n: usize) -> String {
 /// „1 zadanie", „2 zadania", „5 zadań" — polski wymaga trzech form, a „2 zadań"
 /// kłuje w oczy tak samo jak literówka.
 fn odmien_zadania(n: usize) -> String {
-    let d = n % 10;
-    let s = n % 100;
-    let forma = if n == 1 {
-        "zadanie"
-    } else if (2..=4).contains(&d) && !(12..=14).contains(&s) {
-        "zadania"
-    } else {
-        "zadań"
-    };
-    format!("{n} {forma}")
+    language::current().tasks(n)
 }
 
 /// „klucz ————— wartość" w jednej linii, na całą szerokość karty.
@@ -865,6 +1008,9 @@ fn odmien_zadania(n: usize) -> String {
 /// okno patrzy. Zdarzyło się to od razu po dołożeniu wierszy w rodzaju
 /// „najgorszy dzień −87 $ · dno 112 $ · dni+ 61 %".
 fn wiersz_klucz_wartosc(ui: &mut egui::Ui, klucz: &str, wartosc: &str) {
+    let localized_value = language::statistic_value(language::current(), klucz, wartosc);
+    let wartosc = localized_value.as_str();
+    let klucz = language::label(language::current(), klucz);
     // Dwa sufity, jak przy pasku: bez `max_rect` pojedynczy szeroki element
     // sprawia, że „dostępna szerokość" robi się tysiącami pikseli.
     let dostepna = ui.available_width().min(ui.max_rect().width());
@@ -953,7 +1099,7 @@ fn rysuj_pasek(
         p.rect_filled(wyp, r, k.gamma_multiply(0.9));
     }
     if z_procentem {
-        let txt = format!("{} %", m::pl_liczba(ulamek * 100.0, 1));
+        let txt = format!("{} %", language::number(ulamek * 100.0, 1));
         p.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -1053,7 +1199,7 @@ fn pasek_cienki(ui: &mut egui::Ui, ulamek: f64, kolor: egui::Color32, martwy: bo
         |ui| {
             mono(
                 ui,
-                &format!("{} %", m::pl_liczba(ulamek * 100.0, 1)),
+                &format!("{} %", language::number(ulamek * 100.0, 1)),
                 TEKST_SLABY,
                 10.5,
             )
@@ -1075,9 +1221,9 @@ fn godzina_konca(eta_s: f64) -> String {
     let koniec =
         teraz + chrono::TimeDelta::seconds(eta_s.round().clamp(0.0, 30.0 * 86_400.0) as i64);
     if koniec.date_naive() == teraz.date_naive() {
-        format!("ok. {}", koniec.format("%H:%M"))
+        lf!("ok. {}", "about {}", koniec.format("%H:%M"))
     } else {
-        format!("ok. {}", koniec.format("%d.%m %H:%M"))
+        lf!("ok. {}", "about {}", koniec.format("%d.%m %H:%M"))
     }
 }
 
@@ -1088,26 +1234,27 @@ fn liczby_skali(zrobione: f64, calosc: f64, jednostka: &str) -> String {
         return String::new();
     }
     let (dz, sufiks) = if calosc >= 1e9 {
-        (1e9, " mld")
+        (1e9, l(" mld", " B"))
     } else if calosc >= 1e6 {
-        (1e6, " mln")
+        (1e6, l(" mln", " M"))
     } else if calosc >= 1e4 {
-        (1e3, " tys.")
+        (1e3, l(" tys.", " k"))
     } else {
         (1.0, "")
     };
     let miejsca = if dz > 1.0 { 1 } else { 0 };
-    format!(
+    lf!(
         "{} z {}{} {}",
-        m::pl_liczba(zrobione / dz, miejsca),
-        m::pl_liczba(calosc / dz, miejsca),
+        "{} of {}{} {}",
+        language::number(zrobione / dz, miejsca),
+        language::number(calosc / dz, miejsca),
         sufiks,
         jednostka
     )
 }
 
 fn liczby_bezwzgledne(z: &m::Postep) -> String {
-    liczby_skali(z.zrobione, z.calosc, &z.jednostka)
+    liczby_skali(z.zrobione, z.calosc, language::unit(&z.jednostka))
 }
 
 impl Apka {
@@ -1180,13 +1327,12 @@ impl Apka {
                 // ---------- nagłówek: czempiona widać nawet po zwinięciu ----------
                 let odpadlo = dane.wyniki.iter().filter(|w| w.zdyskwalifikowany()).count();
                 let ogon = if odpadlo > 0 {
-                    format!("   ({odpadlo} bez handlu / na zerze — na końcu listy)")
+                    lf!("   ({odpadlo} bez handlu / na zerze — na końcu listy)", "   ({odpadlo} with no trades / depleted — at the end)")
                 } else {
                     String::new()
                 };
                 let tryb = if dane.approximate {
-                    format!(
-                        "APPROX N={} · NIE DO KORONACJI · ",
+                    lf!("APPROX N={} · NIE DO KORONACJI · ", "APPROX N={} · NOT ELIGIBLE FOR FINAL SELECTION · ",
                         dane.quick_tick_stride
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "?".into())
@@ -1194,11 +1340,15 @@ impl Apka {
                 } else {
                     String::new()
                 };
-                let naglowek = format!(
-                    "{tryb}przesiane presety · {}   ·   czoło: {}  {}{}",
+                let total = m::badanie::wartosc(&z.statystyki, "zaplanowane")
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| if z.calosc > 0.0 && z.jednostka.contains("preset") {
+                        language::number(z.calosc, 0)
+                    } else { "?".to_owned() });
+                let naglowek = lf!("{tryb}ukończone {}/{total} · najlepszy ukończony: {}  {}{}", "{tryb}completed {}/{total} · best completed: {}  {}{}",
                     ile,
                     dane.wyniki[czolo].nazwa,
-                    dane.wyniki[czolo].napis(kryt),
+                    dane.wyniki[czolo].napis_w_jezyku(kryt, language::current()),
                     ogon
                 );
                 // Font okna ma z trojkatow tylko te, ktore sa znakami EMOJI
@@ -1216,7 +1366,7 @@ impl Apka {
                         .fill(egui::Color32::TRANSPARENT)
                         .stroke(egui::Stroke::NONE),
                     )
-                    .on_hover_text("statystyki presetów policzonych do tej pory (wyniki_czastkowe.json)")
+                    .on_hover_text(l("statystyki presetów policzonych do tej pory (wyniki_czastkowe.json)", "Statistics for presets evaluated so far (wyniki_czastkowe.json)"))
                     .clicked()
                 {
                     stan.rozwiniete = !stan.rozwiniete;
@@ -1233,7 +1383,7 @@ impl Apka {
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "?".into());
                     let warning = dane.warning.as_deref().unwrap_or(
-                        "Wynik przybliżony: finalista musi przejść dokładny backtest N=1.",
+                        l("Wynik przybliżony: finalista musi przejść dokładny backtest N=1.", "Approximate result: a finalist must pass an exact N=1 backtest."),
                     );
                     etykieta(
                         ui,
@@ -1260,7 +1410,7 @@ impl Apka {
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(stan.wybrany > 0, egui::Button::new(egui::RichText::new("◀").size(12.0)))
-                        .on_hover_text("poprzedni w kolejności")
+                        .on_hover_text(l("poprzedni w kolejności", "previous in ranking"))
                         .clicked()
                     {
                         skok = -1;
@@ -1269,14 +1419,14 @@ impl Apka {
                         .add(
                             egui::Button::new(
                                 egui::RichText::new(if dane.approximate {
-                                    "CZOŁO SITA (APPROX)"
+                                    l("CZOŁO SITA (APPROX)", "SCREENING LEADER (APPROX)")
                                 } else {
-                                    "NAJLEPSZY PRESET"
+                                    l("NAJLEPSZY PRESET", "BEST PRESET")
                                 }).size(11.5).color(TLO).strong(),
                             )
                             .fill(ZIELEN),
                         )
-                        .on_hover_text("skacze na czoło i porządkuje resztę wg wybranego kryterium")
+                        .on_hover_text(l("skacze na czoło i porządkuje resztę wg wybranego kryterium", "Jump to the leader and rank the rest by the selected criterion"))
                         .clicked()
                     {
                         na_czolo = true;
@@ -1286,22 +1436,22 @@ impl Apka {
                             stan.wybrany + 1 < ile,
                             egui::Button::new(egui::RichText::new("▶").size(12.0)),
                         )
-                        .on_hover_text("następny w kolejności")
+                        .on_hover_text(l("następny w kolejności", "next in ranking"))
                         .clicked()
                     {
                         skok = 1;
                     }
 
                     ui.add_space(2.0);
-                    etykieta(ui, "(strzałki ◀ ▶ działają też z klawiatury)", TEKST_SLABY, 10.0);
+                    etykieta(ui, l("(strzałki ◀ ▶ działają też z klawiatury)", "(keyboard arrows ◀ ▶ also work)"), TEKST_SLABY, 10.0);
                     ui.add_space(8.0);
-                    etykieta(ui, "sortuj wg:", TEKST_SLABY, 11.0);
+                    etykieta(ui, l("sortuj wg:", "sort by:"), TEKST_SLABY, 11.0);
                     egui::ComboBox::from_id_salt(format!("kryt-{}", z.id))
-                        .selected_text(egui::RichText::new(kryt.etykieta).size(11.5))
+                        .selected_text(egui::RichText::new(language::label(language::current(), kryt.etykieta)).size(11.5))
                         .width(170.0)
                         .show_ui(ui, |ui| {
                             for (i, k) in m::przesiane::KRYTERIA.iter().enumerate() {
-                                ui.selectable_value(&mut nowe_kryt, i, egui::RichText::new(k.etykieta).size(11.5));
+                                ui.selectable_value(&mut nowe_kryt, i, egui::RichText::new(language::label(language::current(), k.etykieta)).size(11.5));
                             }
                         });
                 });
@@ -1339,7 +1489,7 @@ impl Apka {
                             "#{}  {}   {}",
                             stan.wybrany + 1,
                             dane.wyniki[i].nazwa,
-                            dane.wyniki[i].napis(kryt)
+                            dane.wyniki[i].napis_w_jezyku(kryt, language::current())
                         )
                     })
                     .unwrap_or_else(|| "—".into());
@@ -1353,12 +1503,11 @@ impl Apka {
                             // Liczba transakcji stoi w każdym wierszu, bo bez
                             // niej „100 % dni dodatnich" z jednej transakcji
                             // wygląda dokładnie tak samo jak z tysiąca.
-                            let powod = w.powod_dyskwalifikacji();
-                            let txt = format!(
-                                "#{}  {}   {}   · {} trans.{}{}",
+                            let powod = language::label(language::current(), w.powod_dyskwalifikacji());
+                            let txt = lf!("#{}  {}   {}   · {} trans.{}{}", "#{}  {}   {}   · {} trades{}{}",
                                 poz + 1,
                                 w.nazwa,
-                                w.napis(kryt),
+                                w.napis_w_jezyku(kryt, language::current()),
                                 w.transakcje(),
                                 if powod.is_empty() { "" } else { "   " },
                                 powod
@@ -1385,7 +1534,7 @@ impl Apka {
                     ui.add_space(3.0);
                     etykieta(
                         ui,
-                        "ten przebieg WYZEROWAŁ KONTO — liczby niżej są zapisem drogi do zera, nie wynikiem",
+                        l("ten przebieg WYZEROWAŁ KONTO — liczby niżej są zapisem drogi do zera, nie wynikiem", "This run DEPLETED THE ACCOUNT — the figures below describe the path to depletion."),
                         CZERWIEN,
                         11.0,
                     );
@@ -1393,7 +1542,7 @@ impl Apka {
                     ui.add_space(3.0);
                     etykieta(
                         ui,
-                        "ten przebieg NIE ZAWARŁ ANI JEDNEJ TRANSAKCJI — zerowe ryzyko niżej to brak strategii, nie jej zaleta",
+                        l("ten przebieg NIE ZAWARŁ ANI JEDNEJ TRANSAKCJI — zerowe ryzyko niżej to brak strategii, nie jej zaleta", "This run MADE NO TRADES — zero measured risk does not establish a useful strategy."),
                         CZERWIEN,
                         11.0,
                     );
@@ -1403,7 +1552,7 @@ impl Apka {
                 // osobnego, niskiego obszaru przewijania układamy je w tyle
                 // kolumn, ile faktycznie mieści szerokość okna. Na szerokim
                 // monitorze pełne ~90 pól mieści się w 11–15 wierszach.
-                let wiersze = w.wiersze();
+                let wiersze = w.wiersze_w_jezyku(language::current());
                 let kolumny = ((ui.available_width() / 315.0).floor() as usize)
                     .clamp(1, 8)
                     .min(wiersze.len().max(1));
@@ -1453,7 +1602,7 @@ impl Apka {
                 // ---------- nagłówek ----------
                 ui.horizontal(|ui| {
                     let znacznik = if z.rodzaj == m::TRENING {
-                        "TRENING"
+                        l("TRENING", "TRAINING")
                     } else {
                         "BACKTEST"
                     };
@@ -1465,11 +1614,12 @@ impl Apka {
                     ui.label(
                         egui::RichText::new(&z.nazwa)
                             .color(TEKST)
-                            .size(14.0)
+                            .size(15.0)
                             .strong(),
                     );
                 });
                 ui.add_space(2.0);
+                panel_badania(ui, z);
 
                 // ---------- pasek ----------
                 pasek(ui, z.postep, kolor, !zywy);
@@ -1477,7 +1627,13 @@ impl Apka {
                 // ---------- cienki pasek: JEDEN element, nie całość ----------
                 if !z.etykieta_biezacego.is_empty() {
                     ui.add_space(3.0);
-                    pasek_cienki(ui, z.postep_biezacy, kolor, !zywy, &z.etykieta_biezacego);
+                    pasek_cienki(
+                        ui,
+                        z.postep_biezacy,
+                        kolor,
+                        !zywy,
+                        &language::progress_text(language::current(), &z.etykieta_biezacego),
+                    );
                 }
 
                 // ---------- iskierka prędkości ----------
@@ -1522,11 +1678,12 @@ impl Apka {
                             ui.add_space(1.0);
                             etykieta(
                                 ui,
-                                &format!(
+                                &lf!(
                                     "{zmiana:+.0} % od {} próbek · szczyt {} {}",
+                                    "{zmiana:+.0} % over {} samples · peak {} {}",
                                     h.len(),
-                                    m::pl_duza(h.iter().map(|(_, v)| *v).fold(0.0, f64::max)),
-                                    z.jednostka_szybkosci
+                                    language::large(h.iter().map(|(_, v)| *v).fold(0.0, f64::max)),
+                                    language::unit(&z.jednostka_szybkosci)
                                 ),
                                 barwa,
                                 10.0,
@@ -1537,7 +1694,11 @@ impl Apka {
 
                 // ---------- liczby ----------
                 let szybkosc = if zywy && w.0 > 0.0 {
-                    format!("{} {}", m::pl_duza(w.0), z.jednostka_szybkosci)
+                    format!(
+                        "{} {}",
+                        language::large(w.0),
+                        language::unit(&z.jednostka_szybkosci)
+                    )
                 } else {
                     String::new()
                 };
@@ -1547,24 +1708,34 @@ impl Apka {
                     |ui| mono(ui, &szybkosc, TEKST_SLABY, 12.0),
                 );
 
-                ui.horizontal(|ui| {
-                    etykieta(ui, "minęło", TEKST_SLABY, 11.5);
-                    mono(ui, &m::pl_czas(z.trwa_s(teraz)), TEKST, 12.0);
-                    ui.add_space(10.0);
-                    etykieta(ui, "zostało", TEKST_SLABY, 11.5);
-                    let eta = if zywy {
-                        m::pl_czas(w.1)
+                ui.columns(3, |columns| {
+                    mini_metryka(
+                        &mut columns[0],
+                        l("MINĘŁO", "ELAPSED"),
+                        &czas_zwiezly(z.trwa_s(teraz)),
+                        TEKST,
+                    );
+                    mini_metryka(
+                        &mut columns[1],
+                        l("POZOSTAŁO · ETA", "REMAINING · ETA"),
+                        &if zywy {
+                            czas_zwiezly(w.1)
+                        } else {
+                            "—".into()
+                        },
+                        BURSZTYN,
+                    );
+                    let koniec = if zywy && w.1 >= 0.0 {
+                        godzina_konca(w.1)
                     } else {
-                        "—".to_string()
+                        "—".into()
                     };
-                    mono(ui, &eta, if zywy { BURSZTYN } else { TEKST_SLABY }, 12.0);
-                    if zywy {
-                        let g = godzina_konca(w.1);
-                        if !g.is_empty() {
-                            ui.add_space(6.0);
-                            mono(ui, &g, TEKST_SLABY, 11.5);
-                        }
-                    }
+                    mini_metryka(
+                        &mut columns[2],
+                        l("KONIEC · SZACUNEK", "ESTIMATED FINISH"),
+                        &koniec,
+                        TEKST,
+                    );
                 });
 
                 // ---------- co teraz ----------
@@ -1576,19 +1747,25 @@ impl Apka {
                         .inner_margin(egui::Margin::symmetric(9, 6))
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
-                                etykieta(ui, "teraz:", TEKST_SLABY, 11.5);
+                                etykieta(ui, l("teraz:", "now:"), TEKST_SLABY, 11.5);
                                 ui.label(
-                                    egui::RichText::new(&z.co_teraz)
-                                        .color(TEKST)
-                                        .size(12.0)
-                                        .monospace(),
+                                    egui::RichText::new(language::progress_text(
+                                        language::current(),
+                                        &z.co_teraz,
+                                    ))
+                                    .color(TEKST)
+                                    .size(12.0)
+                                    .monospace(),
                                 );
                             });
                         });
                 }
 
                 // ---------- statystyki ----------
-                if !z.statystyki.is_empty() {
+                if z.statystyki
+                    .iter()
+                    .any(|(key, _)| !m::badanie::metadane(key))
+                {
                     ui.add_space(4.0);
                     egui::Frame::default()
                         .fill(INSET)
@@ -1596,7 +1773,9 @@ impl Apka {
                         .inner_margin(egui::Margin::symmetric(9, 7))
                         .show(ui, |ui| {
                             for (k, v) in z.statystyki.iter() {
-                                wiersz_klucz_wartosc(ui, k, v);
+                                if !m::badanie::metadane(k) {
+                                    wiersz_klucz_wartosc(ui, k, v);
+                                }
                             }
                         });
                 }
@@ -1614,8 +1793,9 @@ impl Apka {
                             ui,
                             |ui| {
                                 ui.label(
-                                    egui::RichText::new(format!(
-                                        "ZADANIE PADŁO — brak znaku życia od {}",
+                                    egui::RichText::new(lf!(
+                                        "BRAK AKTUALIZACJI od {} — sprawdź proces i log",
+                                        "NO UPDATE for {} — check the process and log",
                                         m::pl_czas(z.cisza_s(teraz))
                                     ))
                                     .color(CZERWIEN)
@@ -1624,8 +1804,10 @@ impl Apka {
                                 );
                             },
                             |ui| {
-                                ui.button(egui::RichText::new("usuń wpis").size(12.0))
-                                    .clicked()
+                                ui.button(
+                                    egui::RichText::new(l("usuń wpis", "remove entry")).size(12.0),
+                                )
+                                .clicked()
                             },
                         )
                         .1;
@@ -1635,9 +1817,10 @@ impl Apka {
                     }
                 } else if z.przerywanie || self.poproszone.contains_key(&z.id) {
                     ui.label(
-                        egui::RichText::new(
+                        egui::RichText::new(l(
                             "PRZERYWAM — zadanie domyka bieżący krok i zapisuje wynik…",
-                        )
+                            "STOPPING — finishing the current step and saving results…",
+                        ))
                         .color(BURSZTYN)
                         .size(12.0)
                         .strong(),
@@ -1650,7 +1833,10 @@ impl Apka {
                             |ui| {
                                 etykieta(
                                     ui,
-                                    "Przerwać? Wynik cząstkowy zostanie ZAPISANY.",
+                                    l(
+                                        "Przerwać? Wynik cząstkowy zostanie ZAPISANY.",
+                                        "Stop this task? Partial results will be SAVED.",
+                                    ),
                                     BURSZTYN,
                                     12.0,
                                 );
@@ -1658,11 +1844,13 @@ impl Apka {
                             |ui| {
                                 // Sides układa prawą stronę OD PRAWEJ, więc
                                 // „nie" dodane pierwsze wypada skrajnie z brzegu.
-                                let n = ui.button(egui::RichText::new("nie").size(12.0)).clicked();
+                                let n = ui
+                                    .button(egui::RichText::new(l("nie", "no")).size(12.0))
+                                    .clicked();
                                 let t = ui
                                     .add(
                                         egui::Button::new(
-                                            egui::RichText::new("TAK, PRZERWIJ")
+                                            egui::RichText::new(l("TAK, PRZERWIJ", "YES, STOP"))
                                                 .size(12.0)
                                                 .color(TLO)
                                                 .strong(),
@@ -1690,7 +1878,7 @@ impl Apka {
                             |ui| {
                                 ui.add(
                                     egui::Button::new(
-                                        egui::RichText::new("PRZERWIJ")
+                                        egui::RichText::new(l("PRZERWIJ", "STOP"))
                                             .size(12.5)
                                             .color(CZERWIEN)
                                             .strong(),
@@ -1698,9 +1886,10 @@ impl Apka {
                                     .fill(CZERWIEN.gamma_multiply(0.14))
                                     .stroke(egui::Stroke::new(1.0, CZERWIEN.gamma_multiply(0.6))),
                                 )
-                                .on_hover_text(
+                                .on_hover_text(l(
                                     "zadanie zatrzyma się i ZAPISZE to, co zdążyło policzyć",
-                                )
+                                    "The task will stop and SAVE the results completed so far",
+                                ))
                                 .clicked()
                             },
                         )
@@ -1804,20 +1993,25 @@ impl Apka {
         if !z.srednia_z_ulamkow && z.calosc > 0.0 {
             opis.push_str(&format!(
                 "\n{}",
-                liczby_skali(z.zrobione, z.calosc, &z.jednostka)
+                liczby_skali(z.zrobione, z.calosc, language::unit(&z.jednostka))
             ));
         }
         if z.srednia_z_ulamkow {
-            opis.push_str("\nprocent to ŚREDNIA z zadań o różnych jednostkach — ticków nie wolno dodać do ocen");
+            opis.push_str(l("\nprocent to ŚREDNIA z zadań o różnych jednostkach — ticków nie wolno dodać do ocen", "\nPercentage is an AVERAGE across different units — ticks cannot be added to evaluations"));
         }
         if !z.szybkosci.is_empty() {
-            opis.push_str(&format!("\nłącznie {}", z.opis_szybkosci()));
+            opis.push_str(&lf!(
+                "\nłącznie {}",
+                "\ncombined {}",
+                z.opis_szybkosci_w_jezyku(language::current())
+            ));
         }
         if z.eta_s >= 0.0 {
-            opis.push_str(&format!(
+            opis.push_str(&lf!(
                 "\nzostało {}{} · {}",
+                "\nremaining {}{} · {}",
                 if z.eta_dolna_granica {
-                    "co najmniej "
+                    l("co najmniej ", "at least ")
                 } else {
                     ""
                 },
@@ -1825,11 +2019,15 @@ impl Apka {
                 godzina_konca(z.eta_s)
             ));
         } else {
-            opis.push_str("\nczasu do końca jeszcze nie da się policzyć");
+            opis.push_str(l(
+                "\nczasu do końca jeszcze nie da się policzyć",
+                "\nCompletion time cannot yet be estimated",
+            ));
         }
         if z.bez_skali > 0 {
-            opis.push_str(&format!(
+            opis.push_str(&lf!(
                 "\n{} zadań nie podaje skali — nie wchodzą do procentu",
+                "\n{} tasks provide no total — excluded from the percentage",
                 z.bez_skali
             ));
         }
@@ -1864,23 +2062,27 @@ impl Apka {
             ui,
             |ui| {
                 ui.label(
-                    egui::RichText::new("POCZEKALNIA")
+                    egui::RichText::new(l("POCZEKALNIA", "QUEUE"))
                         .color(BURSZTYN)
                         .size(11.5)
                         .strong(),
                 );
                 let opis = if wpisy.is_empty() {
-                    "pusta — wpisz polecenie, ruszy, gdy maszyna będzie wolna".to_string()
+                    l(
+                        "pusta — wpisz polecenie, ruszy, gdy maszyna będzie wolna",
+                        "Empty — add a command to start when the machine is idle",
+                    )
+                    .to_string()
                 } else {
                     let mut cz = Vec::new();
                     if czeka > 0 {
-                        cz.push(format!("{czeka} czeka"));
+                        cz.push(lf!("{czeka} czeka", "{czeka} waiting"));
                     }
                     if self.dziecko.is_some() {
-                        cz.push("1 liczy się".to_string());
+                        cz.push(l("1 liczy się", "1 running").to_string());
                     }
                     if skonczone > 0 {
-                        cz.push(format!("{skonczone} po wszystkim"));
+                        cz.push(lf!("{skonczone} po wszystkim", "{skonczone} finished"));
                     }
                     cz.join(" · ")
                 };
@@ -1889,15 +2091,26 @@ impl Apka {
             |ui| {
                 // `Sides` układa prawą stronę OD PRAWEJ
                 if ui
-                    .button(egui::RichText::new(if rozwin { "zwiń" } else { "rozwiń" }).size(11.0))
+                    .button(
+                        egui::RichText::new(if rozwin {
+                            l("zwiń", "collapse")
+                        } else {
+                            l("rozwiń", "expand")
+                        })
+                        .size(11.0),
+                    )
                     .clicked()
                 {
                     rozwin = !rozwin;
                 }
-                ui.checkbox(&mut auto, egui::RichText::new("po kolei").size(11.0))
-                    .on_hover_text(
-                        "zaznaczone: okno samo startuje kolejną pozycję, gdy maszyna się zwolni",
-                    );
+                ui.checkbox(
+                    &mut auto,
+                    egui::RichText::new(l("po kolei", "in sequence")).size(11.0),
+                )
+                .on_hover_text(l(
+                    "zaznaczone: okno samo startuje kolejną pozycję, gdy maszyna się zwolni",
+                    "When enabled, start the next queued item when the machine is idle",
+                ));
             },
         );
 
@@ -1912,13 +2125,25 @@ impl Apka {
         // ---------- co się teraz dzieje z kolejką ----------
         if czeka > 0 {
             let powod = if !auto {
-                "kolejka wyłączona — nic samo nie ruszy".to_string()
+                l(
+                    "kolejka wyłączona — nic samo nie ruszy",
+                    "Queue paused — automatic starts are disabled",
+                )
+                .to_string()
             } else if self.dziecko.is_some() {
-                "czekam na koniec pozycji, która się liczy".to_string()
+                l(
+                    "czekam na koniec pozycji, która się liczy",
+                    "Waiting for the running item to finish",
+                )
+                .to_string()
             } else if zajeta {
-                "czekam, aż maszyna się zwolni — coś już liczy".to_string()
+                l(
+                    "czekam, aż maszyna się zwolni — coś już liczy",
+                    "Waiting for the machine — another task is running",
+                )
+                .to_string()
             } else {
-                "za chwilę ruszam".to_string()
+                l("za chwilę ruszam", "Starting shortly").to_string()
             };
             etykieta(ui, &powod, TEKST_SLABY, 11.0);
             ui.add_space(3.0);
@@ -1943,16 +2168,16 @@ impl Apka {
             .inner_margin(egui::Margin::symmetric(9, 7))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    etykieta(ui, "nazwa", TEKST_SLABY, 11.0);
+                    etykieta(ui, l("nazwa", "name"), TEKST_SLABY, 11.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.f_nazwa)
-                            .hint_text("nieobowiązkowa")
+                            .hint_text(l("nieobowiązkowa", "optional"))
                             .desired_width(150.0),
                     );
-                    etykieta(ui, "katalog", TEKST_SLABY, 11.0);
+                    etykieta(ui, l("katalog", "directory"), TEKST_SLABY, 11.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.f_katalog)
-                            .hint_text("katalog roboczy")
+                            .hint_text(l("katalog roboczy", "working directory"))
                             .desired_width(ui.available_width() - 4.0),
                     );
                 });
@@ -1960,7 +2185,7 @@ impl Apka {
                     let dodaj = ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("DODAJ").size(11.5).color(TLO).strong(),
+                                egui::RichText::new(l("DODAJ", "ADD")).size(11.5).color(TLO).strong(),
                             )
                             .fill(BURSZTYN),
                         )
@@ -1970,7 +2195,7 @@ impl Apka {
                     }
                     let pole = ui.add(
                         egui::TextEdit::singleline(&mut self.f_polecenie)
-                            .hint_text("pełny wiersz polecenia, np. \"…\\btp.exe\" --presets presets_x --out out_x")
+                            .hint_text(l("pełny wiersz polecenia, np. \"…\\btp.exe\" --presets presets_x --out out_x", "Full command, e.g. \"…\\btp.exe\" --presets presets_x --out out_x"))
                             .font(egui::TextStyle::Monospace)
                             .desired_width(ui.available_width() - 4.0),
                     );
@@ -1992,7 +2217,7 @@ impl Apka {
                     |ui| {
                         etykieta(
                             ui,
-                            "zamknięcie okna NIE zatrzyma uruchomionego zadania",
+                            l("zamknięcie okna NIE zatrzyma uruchomionego zadania", "Closing this window does NOT stop a running task"),
                             TEKST_SLABY.gamma_multiply(0.7),
                             10.0,
                         );
@@ -2000,7 +2225,7 @@ impl Apka {
                     |ui| {
                         if skonczone > 0
                             && ui
-                                .button(egui::RichText::new("usuń domknięte").size(10.5))
+                                .button(egui::RichText::new(l("usuń domknięte", "remove finished")).size(10.5))
                                 .clicked()
                         {
                             akcje.push(Akcja::SprzatajSkonczone);
@@ -2033,11 +2258,11 @@ impl Apka {
     ) {
         use m::kolejka::Stan;
         let (napis, kolor) = match w.stan {
-            Stan::Czeka => ("CZEKA", TEKST_SLABY),
-            Stan::Liczy => ("LICZY SIĘ", ZIELEN),
-            Stan::Gotowe => ("GOTOWE", ZIELEN),
-            Stan::Padlo => ("PADŁO", CZERWIEN),
-            Stan::Nieznane => ("NIE WIEM", BURSZTYN),
+            Stan::Czeka => (l("CZEKA", "WAITING"), TEKST_SLABY),
+            Stan::Liczy => (l("LICZY SIĘ", "RUNNING"), ZIELEN),
+            Stan::Gotowe => (l("GOTOWE", "DONE"), ZIELEN),
+            Stan::Padlo => (l("PADŁO", "FAILED"), CZERWIEN),
+            Stan::Nieznane => (l("NIE WIEM", "UNKNOWN"), BURSZTYN),
         };
         egui::Frame::default()
             .fill(INSET)
@@ -2059,34 +2284,34 @@ impl Apka {
                         if w.stan == Stan::Liczy {
                             etykieta(
                                 ui,
-                                "przerwij w karcie zadania wyżej",
+                                l("przerwij w karcie zadania wyżej", "Stop using the task card above"),
                                 TEKST_SLABY.gamma_multiply(0.7),
                                 10.0,
                             );
                         } else {
                             if ui
-                                .small_button(egui::RichText::new("usuń").size(10.5))
+                                .small_button(egui::RichText::new(l("usuń", "remove")).size(10.5))
                                 .clicked()
                             {
                                 akcje.push(Akcja::Usun(w.id.clone()));
                             }
                             if ui
-                                .small_button(egui::RichText::new("niżej").size(10.5))
+                                .small_button(egui::RichText::new(l("niżej", "down")).size(10.5))
                                 .clicked()
                             {
                                 akcje.push(Akcja::WDol(w.id.clone()));
                             }
                             if ui
-                                .small_button(egui::RichText::new("wyżej").size(10.5))
+                                .small_button(egui::RichText::new(l("wyżej", "up")).size(10.5))
                                 .clicked()
                             {
                                 akcje.push(Akcja::WGore(w.id.clone()));
                             }
                             if w.stan == Stan::Czeka
                                 && ui
-                                    .small_button(egui::RichText::new("uruchom teraz").size(10.5))
+                                    .small_button(egui::RichText::new(l("uruchom teraz", "start now")).size(10.5))
                                     .on_hover_text(
-                                        "startuje mimo zajętej maszyny — sweepy odbiorą sobie rdzenie",
+                                        l("startuje mimo zajętej maszyny — sweepy odbiorą sobie rdzenie", "Start even while busy — sweeps will share CPU cores"),
                                     )
                                     .clicked()
                             {
@@ -2109,39 +2334,39 @@ impl Apka {
                 .on_hover_text(if w.katalog.is_empty() {
                     w.polecenie.clone()
                 } else {
-                    format!("{}\n\nkatalog: {}", w.polecenie, w.katalog)
+                    lf!("{}\n\nkatalog: {}", "{}\n\ndirectory: {}", w.polecenie, w.katalog)
                 });
 
                 // ---------- szczegóły stanu ----------
                 match w.stan {
                     Stan::Liczy => {
-                        let mut opis = format!("minęło {}", m::pl_czas(w.trwa_s(teraz)));
+                        let mut opis = lf!("minęło {}", "elapsed {}", m::pl_czas(w.trwa_s(teraz)));
                         match procent {
                             Some(p) => {
-                                opis.push_str(&format!(" · {} %", m::pl_liczba(p * 100.0, 1)))
+                                opis.push_str(&format!(" · {} %", language::number(p * 100.0, 1)))
                             }
                             // Proces żyje, ale jeszcze nie napisał pliku postępu
                             // — mówimy to, zamiast rysować zero.
-                            None => opis.push_str(" · jeszcze nie melduje postępu"),
+                            None => opis.push_str(l(" · jeszcze nie melduje postępu", " · no progress reported yet")),
                         }
                         mono(ui, &opis, ZIELEN, 10.5);
                     }
                     Stan::Gotowe => {
                         mono(
                             ui,
-                            &format!("skończone w {} · kod 0", m::pl_czas(w.trwa_s(teraz))),
+                            &lf!("skończone w {} · kod 0", "finished in {} · exit code 0", m::pl_czas(w.trwa_s(teraz))),
                             TEKST_SLABY,
                             10.5,
                         );
                     }
                     Stan::Padlo | Stan::Nieznane => {
                         let kod = match w.kod {
-                            Some(k) => format!("kod {k} · "),
+                            Some(k) => lf!("kod {k} · ", "exit code {k} · "),
                             None => String::new(),
                         };
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(format!("{kod}{}", w.uwaga))
+                                egui::RichText::new(format!("{kod}{}", language::label(language::current(), &w.uwaga)))
                                     .color(kolor)
                                     .size(10.5),
                             )
@@ -2173,8 +2398,11 @@ impl Apka {
                     // Jeden proces z kolejki naraz — inaczej okno przestałoby
                     // panować nad tym, co samo uruchomiło.
                     if self.dziecko.is_some() {
-                        self.f_komunikat =
-                            "najpierw musi skończyć pozycja, która już się liczy".into();
+                        self.f_komunikat = l(
+                            "najpierw musi skończyć pozycja, która już się liczy",
+                            "The running item must finish first",
+                        )
+                        .into();
                     } else if let Some(i) = self.kolejka.wpisy.iter().position(|w| w.id == id) {
                         self.startuj(i, teraz);
                         zmiana = true;
@@ -2192,7 +2420,13 @@ impl Apka {
                             self.f_komunikat.clear();
                             zmiana = true;
                         }
-                        Err(e) => self.f_komunikat = format!("nie dodałem: {e}"),
+                        Err(e) => {
+                            self.f_komunikat = lf!(
+                                "nie dodałem: {}",
+                                "could not add: {}",
+                                language::label(language::current(), &e.to_string())
+                            )
+                        }
                     }
                 }
             }
@@ -2213,9 +2447,9 @@ impl Apka {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
                         egui::RichText::new(if z.przerwane {
-                            "PRZERWANO — POSTĘP ZAPISANY"
+                            l("PRZERWANO — POSTĘP ZAPISANY", "STOPPED — PROGRESS SAVED")
                         } else {
-                            "GOTOWE"
+                            l("GOTOWE", "DONE")
                         })
                         .color(kolor)
                         .size(12.0)
@@ -2224,9 +2458,13 @@ impl Apka {
                     ui.label(egui::RichText::new(&z.nazwa).color(TEKST).size(12.5));
                 });
                 ui.label(
-                    egui::RichText::new(format!("{} · {}", z.rodzaj, z.podsumowanie))
-                        .color(TEKST_SLABY)
-                        .size(11.5),
+                    egui::RichText::new(format!(
+                        "{} · {}",
+                        language::unit(&z.rodzaj),
+                        z.podsumowanie
+                    ))
+                    .color(TEKST_SLABY)
+                    .size(11.5),
                 );
             });
     }
@@ -2384,7 +2622,7 @@ impl eframe::App for Apka {
                                     .strong(),
                             );
                             ui.label(
-                                egui::RichText::new("· postęp")
+                                egui::RichText::new(l("· postęp", "· progress"))
                                     .color(TEKST_SLABY)
                                     .size(13.0),
                             );
@@ -2395,8 +2633,38 @@ impl eframe::App for Apka {
                             // powód, dla którego plakietki wchodzą DALEJ:
                             // przełącznik i licznik nie drgną, gdy plakietka
                             // pojawi się albo zniknie.
+                            let previous_language = language::current();
+                            let mut selected_language = previous_language;
+                            egui::ComboBox::from_id_salt("monitor-language")
+                                .width(46.0)
+                                .selected_text(selected_language.code().to_ascii_uppercase())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut selected_language, Language::En, "EN");
+                                    ui.selectable_value(&mut selected_language, Language::Pl, "PL");
+                                });
+                            if selected_language != previous_language {
+                                language::set(selected_language);
+                                self.language_error = language::save(&self.dir, selected_language)
+                                    .err()
+                                    .map(|e| e.to_string());
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                                    l("CONDUIT — postęp", "CONDUIT — progress").into(),
+                                ));
+                            }
+                            if let Some(error) = &self.language_error {
+                                ui.label(egui::RichText::new("!").color(BURSZTYN))
+                                    .on_hover_text(lf!(
+                                        "Język zmieniony, lecz nie zapisany: {}",
+                                        "Language changed, but could not be saved: {}",
+                                        error
+                                    ));
+                            }
                             let z = ui
-                                .checkbox(&mut nw, egui::RichText::new("na wierzchu").size(11.5))
+                                .checkbox(
+                                    &mut nw,
+                                    egui::RichText::new(l("na wierzchu", "always on top"))
+                                        .size(11.5),
+                                )
                                 .changed();
                             ui.label(
                                 egui::RichText::new(odmien_zadania(zywe))
@@ -2433,7 +2701,7 @@ impl eframe::App for Apka {
                                         Apka::plakietka_zbiorcza(
                                             ui,
                                             "AI",
-                                            "wszystkie treningi AI",
+                                            l("wszystkie treningi AI", "all AI training tasks"),
                                             FIOLET,
                                             z,
                                             st,
@@ -2443,7 +2711,7 @@ impl eframe::App for Apka {
                                         Apka::plakietka_zbiorcza(
                                             ui,
                                             "BT",
-                                            "wszystkie backtesty",
+                                            l("wszystkie backtesty", "all backtests"),
                                             ZIELEN,
                                             z,
                                             st,
@@ -2479,26 +2747,41 @@ impl eframe::App for Apka {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     etykieta(ui, "↑ ↓", TEKST_SLABY, 10.5);
-                    etykieta(ui, "przewijanie", TEKST_SLABY.gamma_multiply(0.75), 10.5);
-                    ui.add_space(10.0);
-                    etykieta(ui, "PgUp PgDn", TEKST_SLABY, 10.5);
-                    etykieta(ui, "strona", TEKST_SLABY.gamma_multiply(0.75), 10.5);
-                    ui.add_space(10.0);
-                    etykieta(ui, "Home End", TEKST_SLABY, 10.5);
                     etykieta(
                         ui,
-                        "poczatek / koniec",
+                        l("przewijanie", "scroll"),
                         TEKST_SLABY.gamma_multiply(0.75),
                         10.5,
                     );
                     ui.add_space(10.0);
-                    etykieta(ui, "kółko", TEKST_SLABY, 10.5);
-                    etykieta(ui, "też działa", TEKST_SLABY.gamma_multiply(0.75), 10.5);
+                    etykieta(ui, "PgUp PgDn", TEKST_SLABY, 10.5);
+                    etykieta(
+                        ui,
+                        l("strona", "page"),
+                        TEKST_SLABY.gamma_multiply(0.75),
+                        10.5,
+                    );
+                    ui.add_space(10.0);
+                    etykieta(ui, "Home End", TEKST_SLABY, 10.5);
+                    etykieta(
+                        ui,
+                        l("poczatek / koniec", "start / end"),
+                        TEKST_SLABY.gamma_multiply(0.75),
+                        10.5,
+                    );
+                    ui.add_space(10.0);
+                    etykieta(ui, l("kółko", "mouse wheel"), TEKST_SLABY, 10.5);
+                    etykieta(
+                        ui,
+                        l("też działa", "also works"),
+                        TEKST_SLABY.gamma_multiply(0.75),
+                        10.5,
+                    );
                 });
             });
 
         // ---------- poczekalnia, przymocowana na dole ----------
-        egui::Panel::bottom(egui::Id::new("poczekalnia"))
+        egui::Panel::bottom(egui::Id::new(l("poczekalnia", "queue")))
             .frame(
                 egui::Frame::default()
                     .fill(TLO)
@@ -2527,14 +2810,14 @@ impl eframe::App for Apka {
                             ui.add_space(28.0);
                             let auto = self.automatyczne;
                             ui.vertical_centered(|ui| {
-                                etykieta(ui, "nic się nie liczy", TEKST_SLABY, 13.5);
+                                etykieta(ui, l("nic się nie liczy", "No tasks running"), TEKST_SLABY, 13.5);
                                 ui.add_space(6.0);
                                 etykieta(
                                     ui,
                                     if auto {
-                                        "okno zamknie się samo za chwilę"
+                                        l("okno zamknie się samo za chwilę", "This window will close shortly")
                                     } else {
-                                        "czekam na backtest albo trening — uruchom go w terminalu"
+                                        l("czekam na backtest albo trening — uruchom go w terminalu", "Waiting for a backtest or training task — start one in the terminal")
                                     },
                                     TEKST_SLABY.gamma_multiply(0.75),
                                     11.5,
@@ -2543,7 +2826,7 @@ impl eframe::App for Apka {
                                     ui.add_space(3.0);
                                     etykieta(
                                         ui,
-                                        "zadanie podchwycę sam, w ciągu pół sekundy",
+                                        l("zadanie podchwycę sam, w ciągu pół sekundy", "New tasks appear automatically within half a second"),
                                         TEKST_SLABY.gamma_multiply(0.55),
                                         11.0,
                                     );
@@ -2618,6 +2901,11 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+    let arguments: Vec<String> = std::env::args().collect();
+    if let Err(error) = language::initialize(&arguments, &m::katalog()) {
+        eprintln!("{error}");
+        return Ok(());
+    }
     // Druga instancja nie ma czego pokazywać — pierwsza pokazuje to samo.
     // Zamek jest wyłącznym uchwytem pliku, więc zwalnia się nawet po ubiciu
     // procesu; nie ma stanu „okno nie wstanie, bo poprzednie padło".
@@ -2634,9 +2922,9 @@ fn main() -> eframe::Result<()> {
     // Uruchomione RĘCZNIE (podwójne kliknięcie `postep.exe`) zachowuje się
     // odwrotnie — skoro ktoś je otworzył, to chce je widzieć.
     let mut widok = egui::ViewportBuilder::default()
-        .with_inner_size([520.0, 640.0])
+        .with_inner_size([650.0, 820.0])
         .with_min_inner_size([380.0, 220.0])
-        .with_title("CONDUIT — postęp");
+        .with_title(l("CONDUIT — postęp", "CONDUIT — progress"));
     widok = if automatyczne {
         // `with_active(false)` = pokaż, ale nie kradnij ognia.
         widok.with_active(false)
@@ -2668,7 +2956,10 @@ mod testy {
         let path = std::env::current_dir().unwrap();
         let text = path.to_string_lossy();
         assert_eq!(portable_monitor_dir(&text).unwrap(), path);
-        assert_eq!(portable_monitor_dir(&format!("\u{feff}{text}\r\n")).unwrap(), path);
+        assert_eq!(
+            portable_monitor_dir(&format!("\u{feff}{text}\r\n")).unwrap(),
+            path
+        );
         for bad in ["", "relative/path", "a\nb", "a\0b"] {
             assert!(portable_monitor_dir(bad).is_err(), "{bad:?}");
         }
@@ -2718,6 +3009,15 @@ mod testy {
         );
         assert_eq!(
             tekst(&czesci_plakietki("BT", &z, Stopien::Pelny)),
+            "BT [nitka] 43 % · 2h14 · 12.4 M ticks/s"
+        );
+        assert_eq!(
+            tekst(&czesci_plakietki_w_jezyku(
+                "BT",
+                &z,
+                Stopien::Pelny,
+                Language::Pl
+            )),
             "BT [nitka] 43 % · 2h14 · 12,4 mln ticków/s"
         );
     }
@@ -2750,7 +3050,16 @@ mod testy {
             ..Default::default()
         };
         let t = tekst(&czesci_plakietki("BT", &z, Stopien::Pelny));
-        assert_eq!(t, "BT bez skali · —");
+        assert_eq!(t, "BT no total · —");
+        assert_eq!(
+            tekst(&czesci_plakietki_w_jezyku(
+                "BT",
+                &z,
+                Stopien::Czas,
+                Language::Pl
+            )),
+            "BT bez skali · —"
+        );
         assert!(!t.contains("nitka"));
     }
 

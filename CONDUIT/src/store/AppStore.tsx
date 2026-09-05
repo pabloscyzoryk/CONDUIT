@@ -629,7 +629,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }),
   );
   const [notify, setNotifyState] = useState<NotifyConfig>(() =>
-    storage.load("notify", { channels: [CHANNELS[5].id], summaryEnabled: true, summaryIntervalMin: 240 }),
+    storage.load("notify", { channels: [] as number[], summaryEnabled: true, summaryIntervalMin: 240 }),
   );
   const [favorites, setFavorites] = useState<string[]>(() => storage.load("favorites", [PRIMARY_SYMBOL, "BTCUSD"]));
 

@@ -1,0 +1,83 @@
+/* Preserve the original terminal layout, palette and visible information.
+   These additions support search, clearer labels and recoverable UI errors. */
+.rail__search { display: flex; align-items: center; gap: 10px; padding: 10px; margin: 7px 10px 12px; min-height: 37px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); background: var(--bg-surface); }
+.rail__search:hover { border-color: var(--accent-line); color: var(--text); }
+.rail__search .rail__label { font-size: 12px; }
+.shell--collapsed .rail__search { justify-content: center; margin-inline: 10px; padding: 10px 0; }
+.shell--collapsed .rail__search .rail__label, .shell--collapsed .rail__search .rail__kbd { display: none; }
+
+.preview-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: none; background: var(--warn-soft); color: var(--warn-text); padding: 7px 18px; font-size: 11px; border-bottom: 1px solid var(--border); }
+.preview-status b { font-weight: 700; }
+
+/* Labels remain readable while the original dense metric strip stays complete. */
+.stat__k { letter-spacing: .045em; white-space: normal; overflow: visible; line-height: 1.35; }
+.stat__v { font-variant-numeric: tabular-nums; }
+.stat--account .stat__v { white-space: normal; overflow-wrap: anywhere; font-size: var(--fs-2xs); line-height: 1.35; }
+.setfield__label { line-height: 1.45; }
+.setfield__hint { line-height: 1.6; }
+.setfield:focus-within { outline: 1px solid var(--accent-line); outline-offset: 3px; border-radius: var(--r-sm); }
+.setfield[data-inactive="true"] { border: 1px dashed var(--border-strong); padding: 8px 10px; border-radius: var(--r-sm); }
+.context-help { font-size: 11px; color: var(--text-muted); }
+.context-help > summary { cursor: pointer; width: fit-content; padding: 3px 0; }
+.context-help[open] > summary { margin-bottom: 7px; }
+.group-help { margin-bottom: 18px; padding-bottom: 10px; border-bottom: 1px solid var(--border-soft); }
+
+.settings__nav { max-height: calc(100dvh - 290px); overflow-y: auto; overscroll-behavior: contain; }
+.settings__search { position: sticky; top: 0; z-index: 2; flex: none; }
+.settings__navitem { width: 100%; }
+.settings__result-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-muted); font-size: var(--fs-xs); }
+.settings__result-summary .badge { margin-left: auto; }
+.field-help { color: var(--text-muted); font-size: 10px; }
+.field-help > summary { display: flex; align-items: center; gap: 5px; width: fit-content; cursor: pointer; list-style: none; }
+.field-help > summary::-webkit-details-marker { display: none; }
+.field-help > summary:hover { color: var(--accent-text); }
+.field-help[open] > summary { margin-bottom: 7px; }
+.field-help code { display: block; margin-top: 7px; font-size: 9px; word-break: break-all; color: var(--accent-text); }
+.field-help-expanded { display: none; }
+.settings-view[data-descriptions="true"] .field-help { display: none; }
+.settings-view[data-descriptions="true"] .field-help-expanded { display: block; }
+.settings__inactive { margin-top: 20px; border-top: 1px solid var(--border-soft); padding-top: 13px; }
+
+.command-scrim { position: fixed; inset: 0; z-index: 600; display: flex; align-items: flex-start; justify-content: center; background: var(--scrim); backdrop-filter: blur(5px); padding: min(15vh, 120px) 20px 20px; }
+.command { display: flex; flex-direction: column; width: min(660px, 100%); max-height: 75vh; border: 1px solid var(--border-strong); background: var(--bg-surface); border-radius: 15px; box-shadow: var(--shadow-pop); overflow: hidden; }
+.command__search { display: flex; align-items: center; gap: 14px; padding: 17px 20px; border-bottom: 1px solid var(--border); color: var(--accent-text); }
+.command__search input { flex: 1; min-width: 0; border: 0; outline: 0; box-shadow: none; font-size: 15px; color: var(--text); background: transparent; }
+.command__search input::placeholder { color: var(--text-muted); }
+.command kbd { font: 10px var(--font-sans); border: 1px solid var(--border-strong); border-radius: 4px; padding: 3px 5px; color: var(--text-muted); }
+.command__caption { font-size: 10px; letter-spacing: .07em; text-transform: uppercase; padding: 14px 20px 8px; color: var(--text-muted); }
+.command__results { overflow-y: auto; overscroll-behavior: contain; min-height: 70px; padding: 0 8px 8px; }
+.command__item { display: flex; align-items: center; gap: 13px; width: 100%; padding: 11px 12px; border-radius: 8px; text-align: left; color: var(--text-muted); }
+.command__item[aria-selected="true"] { color: var(--accent-text); background: var(--accent-soft); }
+.command__item > span { flex: 1; min-width: 0; }
+.command__item b { display: block; color: var(--text); font-size: 13px; font-weight: 500; }
+.command__item small { display: block; font-size: 10px; color: var(--text-muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command__footer { display: flex; gap: 20px; padding: 11px 20px; border-top: 1px solid var(--border); font-size: 10px; color: var(--text-muted); }
+.command__footer > :last-child { margin-left: auto; }
+.command__empty { padding: 20px 12px; color: var(--text-muted); font-size: 12px; }
+.app-recovery { display: grid; place-items: center; height: 100%; padding: 24px; }
+.app-recovery > div { max-width: 490px; padding: 30px; border-radius: 14px; background: var(--bg-surface); border: 1px solid var(--border); }
+.app-recovery h1 { margin-top: 18px; font-size: 24px; }
+.app-recovery p { margin: 14px 0 22px; color: var(--text-muted); font-size: 13px; }
+.order-limits { padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; }
+.order-limits p { margin-block: 8px; font-size: 10px; }
+.order-limits__row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; padding-block: 7px; border-bottom: 1px solid var(--border-soft); }
+.order-limits__row b { color: var(--text); }
+
+/* A short VPS window must scroll from the first login control to the last. */
+.login { justify-content: flex-start; }
+.login__panel { margin-block: auto; flex: none; }
+@media (max-width: 1240px) {
+  .topbar { flex-wrap: wrap; height: auto; min-height: var(--topbar-h); padding-block: 7px; }
+}
+@media (max-width: 1100px) {
+  .settings__nav { max-height: 210px; position: static; }
+  .settings__search { width: 100%; }
+  .settings__nav > div:not(.settings__search) { display: flex; flex-wrap: wrap; gap: 4px; }
+  .settings__nav[data-searching="true"] > div:not(.settings__search) { display: none; }
+  .settings__scope { width: 100%; }
+  .settings__navitem { width: auto; max-width: 100%; }
+}
+@media (max-width: 760px) {
+  .command-scrim { padding: 20px 10px; }
+  .command { max-height: calc(100dvh - 40px); }
+}

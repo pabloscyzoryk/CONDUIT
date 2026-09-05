@@ -15,6 +15,7 @@ import { AiModelsView } from "@/views/AiModelsView";
 import { LabView } from "@/views/LabView";
 import { DemoView } from "@/views/DemoView";
 import { KronikaView } from "@/views/KronikaView";
+import type { SettingsRequest } from "@/components/layout/CommandMenu";
 
 /** Widok startowy z adresu: `?view=lab` otwiera od razu Laboratorium.
  *  Używa tego `conduit.exe --lab`, żeby okno wstało na właściwym ekranie. */
@@ -40,6 +41,7 @@ function widokZAdresu(): ViewId {
 function Router() {
   const { loggedIn, pokazLogowanieTg } = useApp();
   const [view, setView] = useState<ViewId>(widokZAdresu);
+  const [settingsRequest, setSettingsRequest] = useState<SettingsRequest>();
 
   // Ekran logowania pokazujemy w dwóch sytuacjach: przy pierwszym wejściu
   // ORAZ na żądanie z przycisku „Zaloguj się do Telegrama" w panelu bocznym.
@@ -56,11 +58,11 @@ function Router() {
 
   return (
     <>
-      <Shell view={view} onView={setView}>
+      <Shell view={view} onView={setView} onSettings={(request) => { setSettingsRequest(request); setView("settings"); }}>
         {view === "dashboard" && <DashboardView />}
         {view === "signals" && <SignalsView />}
         {view === "channels" && <ChannelsView />}
-        {view === "settings" && <SettingsView />}
+        {view === "settings" && <SettingsView request={settingsRequest} />}
         {view === "history" && <HistoryView />}
         {view === "sims" && <SimsView />}
         {view === "logs" && <LogsView />}

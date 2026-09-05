@@ -285,6 +285,9 @@ fn komorka(
         ruins: wyzerowania(daily, m, w.daily_reset, balance),
         blown: m.blown,
         units: m.trades,
+        known_entry_sources: (m.entry_source_observation_version >= 1).then_some(m.known_entry_sources),
+        known_full_entry_sources: (m.entry_source_observation_version >= 1).then_some(m.known_full_entry_sources),
+        entry_sources_first_seen_as_edit: (m.entry_source_observation_version >= 1).then_some(m.entry_sources_first_seen_as_edit),
         max_dd: m.max_dd_abs,
         max_open_risk_pct: m.max_open_risk_pct,
         end_equity: m.end_equity,
@@ -313,6 +316,9 @@ fn wiersz(name: &str, m: &Metrics, chart: &str, partial: bool) -> LabRow {
         win_days_pct: m.win_days_pct,
         win_rate: m.win_rate,
         trades: m.trades,
+        known_entry_sources: (m.entry_source_observation_version >= 1).then_some(m.known_entry_sources),
+        known_full_entry_sources: (m.entry_source_observation_version >= 1).then_some(m.known_full_entry_sources),
+        entry_sources_first_seen_as_edit: (m.entry_source_observation_version >= 1).then_some(m.entry_sources_first_seen_as_edit),
         max_open_positions: m.max_open_positions,
         blown: m.blown,
         score: score(m),
@@ -1580,5 +1586,44 @@ mod tests {
             !niepelny.survives,
             "dwie zmierzone komórki to nie „przechodzi w połowie”"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod source_telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn entry_sources_and_closed_transactions_stay_separate_in_lab_rows() {
+        let metrics = Metrics { entry_source_observation_version: 1, known_entry_sources: 7, known_full_entry_sources: 4,
+            entry_sources_first_seen_as_edit: 3, trades: 31, ..Metrics::default() };
+        let row = wiersz("synthetic", &metrics, "", false);
+        assert_eq!(row.trades, 31);
+        assert_eq!(row.known_entry_sources, Some(7));
+        assert_eq!(row.known_full_entry_sources, Some(4));
+        assert_eq!(row.entry_sources_first_seen_as_edit, Some(3));
+        let legacy = wiersz("legacy", &Metrics::default(), "", false);
+        assert_eq!(legacy.known_entry_sources, None);
+        assert_eq!(legacy.known_full_entry_sources, None);
+        assert_eq!(legacy.entry_sources_first_seen_as_edit, None);
+        let measured_zero = wiersz("measured zero", &Metrics { entry_source_observation_version: 1, ..Metrics::default() }, "", false);
+        assert_eq!(measured_zero.known_entry_sources, Some(0));
+    }
+
+    #[test]
+    fn archived_lab_rows_keep_missing_source_counts_unknown() {
+        let mut json = serde_json::to_value(LabRow::default()).unwrap();
+        for key in ["knownEntrySources", "knownFullEntrySources", "entrySourcesFirstSeenAsEdit"] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        let archived: LabRow = serde_json::from_value(json).unwrap();
+        assert_eq!(archived.known_entry_sources, None);
+        assert_eq!(archived.known_full_entry_sources, None);
+        assert_eq!(archived.entry_sources_first_seen_as_edit, None);
+        let serialized = serde_json::to_value(archived).unwrap();
+        assert!(serialized.get("knownEntrySources").is_none());
+        let cell: LabCell = serde_json::from_value(serde_json::to_value(LabCell::default()).unwrap()).unwrap();
+        assert_eq!(cell.known_entry_sources, None);
     }
 }

@@ -98,7 +98,7 @@ test('OFF leaves all confirmed-intent behavior dormant',()=>{
 test('new exposure and edit handlers reject the same closing basket before touching broker or plan',()=>{
   for(const name of ['WyslijRynek','WyslijLimit','PlaceGrid','ApplyEntryEdit']) {
     const f=extract(name);
-    assert.match(f.body,/if\(!ExitRiskAllowed\(bi\)\) return/);
+    assert.match(f.body,/if\(!ExitRiskAllowed\(bi\)(?: \|\| SourceWithdrawn\(bi\))?\) return/);
     assert.ok(f.body.indexOf('ExitRiskAllowed(bi)')<f.body.indexOf(';')+1,`${name}: first statement guard`);
   }
   const tick=extract('OnTick').body;

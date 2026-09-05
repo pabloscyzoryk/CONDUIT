@@ -17,7 +17,7 @@ import {
 } from "@/components/ui";
 import { useApp } from "@/store/AppStore";
 import { LANGUAGES, RichT, useLanguage, useT } from "@/i18n";
-import { opisPresetu } from "@/i18n/silnik";
+import { tSilnik, opisPresetu } from "@/i18n/silnik";
 import { przetlumaczGrupy } from "@/i18n/schema";
 import { PALETTES, useTheme } from "@/store/useTheme";
 import {
@@ -42,6 +42,9 @@ import { czyCzempion, grupujPoFormacie, RODZINA_Z_DYSKU } from "@/data/presets";
 import { presetDlaFormatu } from "@/data/formaty";
 import { time } from "@/lib/format";
 import { api } from "@/store/transport";
+import { matchesSearch } from "@/lib/search";
+import { PresetWriteQueue } from "@/store/presetWriteQueue";
+import type { SettingsRequest } from "@/components/layout/CommandMenu";
 import type { EmailConfig, MailCategories, Preset, SettingKey, Settings, SubjectPreview } from "@/types";
 import "./views.css";
 
@@ -71,7 +74,7 @@ const EdycjaPresetuCtx = createContext<null | {
   patch: (patch: SettingControlPatch) => void;
 }>(null);
 
-export function SettingsView() {
+export function SettingsView({ request }: { request?: SettingsRequest } = {}) {
   const app = useApp();
   const t = useT();
   const { lang } = useLanguage();
@@ -103,31 +106,30 @@ export function SettingsView() {
 
   
   const [szukaj, setSzukaj] = useState("");
+  const [pokazOpisy, setPokazOpisy] = useState(false);
   const szukanie = szukaj.trim().length > 0;
+  const searchGroups = useMemo(() => przetlumaczGrupy([...MANAGEMENT_GROUPS, ...GENERAL_GROUPS, AI_GROUP], lang), [lang]);
+  useEffect(() => {
+    if (!request) return;
+    setTab(request.raw ? "advanced" : "config");
+    setSzukaj(request.query);
+  }, [request]);
 
   const wyniki = useMemo(() => {
     if (!szukanie) return [];
-    const q = szukaj.trim().toLowerCase();
-    // spacje→podkreślenia, żeby „lot max" trafiało w klucz `lot_max`
-    const qKlucz = q.replace(/\s+/g, "_");
     const s = app.settings;
     const out: { group: GroupDef; fields: FieldDef[] }[] = [];
-    for (const g of groups) {
+    const exactKey = searchGroups.some(g => g.fields.some(f => String(f.key) === szukaj.trim()));
+    for (const g of searchGroups) {
       const trafione = g.fields.filter((f) => {
-        const klucz = String(f.key).toLowerCase();
-        if (klucz.includes(qKlucz) || klucz.includes(q)) return true;
-        if (f.label.toLowerCase().includes(q)) return true;
-        if (f.hint && f.hint.toLowerCase().includes(q)) return true;
-        // ostrzeżenie jest funkcją stanu — przeszukujemy to, co faktycznie
-        // wisi pod polem TERAZ, nie hipotetyczne teksty
+        if (exactKey) return String(f.key) === szukaj.trim();
         const w = f.warn?.(s);
-        if (w && w.toLowerCase().includes(q)) return true;
-        return false;
+        return matchesSearch(szukaj, String(f.key), f.label, f.hint, g.title, w);
       });
       if (trafione.length > 0) out.push({ group: g, fields: trafione });
     }
     return out;
-  }, [szukanie, szukaj, groups, app.settings]);
+  }, [szukanie, szukaj, searchGroups, app.settings]);
 
   // kliknięcie zakładki po lewej WYŁĄCZA tryb szukania — wybór kategorii
   // jest jednoznaczną deklaracją „chcę zwykły widok tej zakładki"
@@ -197,14 +199,26 @@ export function SettingsView() {
   // Tag the loaded document with its owner. A selector change must never
   // render/save the previous document under the newly selected preset name.
   const [presetDoc, setPresetDoc] = useState<{ nazwa: string; doc: Settings } | null>(null);
+  const [presetError, setPresetError] = useState("");
+  const [presetReload, setPresetReload] = useState(0);
+  const saveQueue = useRef(new PresetWriteQueue(async (name, patch) => {
+    const result = await api.savePresetSettings(name, patch);
+    if (!result.ok) throw new Error("Preset write was rejected");
+    return result;
+  }));
+  const reportPresetError = useCallback((name: string) => {
+    setPresetError(name);
+    setPresetDoc(current => current?.nazwa === name ? null : current);
+  }, []);
   useEffect(() => {
     if (!wielosilnik || !presetKonfig) {
       setPresetDoc(null);
       return;
     }
     let aktualne = true;
-    api
-      .presetUi(presetKonfig)
+    setPresetError("");
+    saveQueue.current.idle(presetKonfig)
+      .then(() => api.presetUi(presetKonfig))
       .then((r) => {
         // Dokument presetu bywa CZĘŚCIOWY (plik niesie tylko pola różne od
         // domyślnych) — dosypujemy domyślne, żeby `when`/`warn` miały pełen
@@ -212,27 +226,27 @@ export function SettingsView() {
         if (aktualne) setPresetDoc({ nazwa: presetKonfig, doc: { ...DEFAULT_SETTINGS, ...(r.settings as Partial<Settings>) } });
       })
       .catch(() => {
-        if (aktualne) setPresetDoc(null);
+        if (aktualne) { setPresetDoc(null); setPresetError(presetKonfig); }
       });
     return () => {
       aktualne = false;
     };
-  }, [wielosilnik, presetKonfig]);
+  }, [wielosilnik, presetKonfig, presetReload]);
 
   const zapiszPolePresetu = useCallback(
     <K extends keyof Settings>(key: K, value: Settings[K]) => {
       setPresetDoc((d) => (d?.nazwa === presetKonfig ? { ...d, doc: { ...d.doc, [key]: value } } : d));
-      void api.savePresetSettings(presetKonfig, { [key as string]: value });
+      void saveQueue.current.write(presetKonfig, { [key as string]: value }).catch(() => reportPresetError(presetKonfig));
     },
-    [presetKonfig],
+    [presetKonfig, reportPresetError],
   );
 
   const zapiszLatkePresetu = useCallback(
     (patch: SettingControlPatch) => {
       setPresetDoc((d) => (d?.nazwa === presetKonfig ? { ...d, doc: { ...d.doc, ...patch } } : d));
-      void api.savePresetSettings(presetKonfig, patch);
+      void saveQueue.current.write(presetKonfig, patch).catch(() => reportPresetError(presetKonfig));
     },
-    [presetKonfig],
+    [presetKonfig, reportPresetError],
   );
 
   const edycjaCtx =
@@ -259,7 +273,7 @@ export function SettingsView() {
     );
 
   return (
-    <div className="view">
+    <div className="view settings-view" data-descriptions={pokazOpisy}>
       <div className="view__head">
         <div className="view__headmain">
           <h1>{t("set.title")}</h1>
@@ -271,18 +285,17 @@ export function SettingsView() {
           </p>
           {/* TRZY WARSTWY, TRZY MIEJSCA. Użytkownik ma prawo wiedzieć, która
               z nich przeżyje wczytanie presetu — bo dwie z nich nie przeżyją. */}
-          <p className="hint">
-            <RichT k="set.layers" />
-          </p>
+          <details className="context-help"><summary>{t("set.help.layers")}</summary><p className="hint"><RichT k="set.layers" /></p></details>
         </div>
         <div className="row row--tight">
+          <Switch checked={pokazOpisy} onChange={setPokazOpisy} label={t("set.help.descriptions")} />
           <Button variant="ghost" icon="refresh" onClick={app.resetSettings}>
             {t("set.restoreDefaults")}
           </Button>
         </div>
       </div>
 
-      <div className="row" role="tablist">
+      <div className="row settings-tabs" role="tablist">
         {(
           [
             ["config", t("set.tab.config"), "sliders"],
@@ -337,6 +350,7 @@ export function SettingsView() {
       </div>
 
       {tab === "notify" && <NotifySection />}
+      {presetError && presetError === presetKonfig && <div className="halt" role="alert"><Icon name="alert" size={16} /><div><b>{t("set.save.failed", { name: presetError })}</b><span>{t("set.save.recover")}</span></div><Button variant="outline" size="sm" icon="refresh" onClick={() => setPresetReload(value => value + 1)}>{t("set.save.reload")}</Button></div>}
 
       {tab === "appearance" && <AppearanceSection />}
 
@@ -349,7 +363,7 @@ export function SettingsView() {
 
       {tab === "advanced" && (
         <EdycjaPresetuCtx.Provider key={presetKonfig || "global"} value={edycjaCtx}>
-          <AdvancedSection zablokowane={wielosilnik && !edycjaCtx} />
+          <AdvancedSection zablokowane={wielosilnik && !edycjaCtx} request={request?.raw ? request : undefined} />
         </EdycjaPresetuCtx.Provider>
       )}
 
@@ -374,7 +388,7 @@ export function SettingsView() {
 
           <div className="settings">
             {}
-            <nav className="settings__nav">
+            <nav className="settings__nav" data-searching={szukanie}>
               {/* SZUKAJKA nad kategoriami. Esc czyści; w trybie szukania
                   ŻADNA zakładka nie jest zaznaczona, a klik w zakładkę
                   wychodzi z szukania. */}
@@ -387,6 +401,7 @@ export function SettingsView() {
                     if (e.key === "Escape") setSzukaj("");
                   }}
                   placeholder={t("set.search.placeholder")}
+                  aria-label={t("set.search.placeholder")}
                   spellCheck={false}
                 />
                 {szukanie && (
@@ -422,6 +437,7 @@ export function SettingsView() {
             </nav>
 
             <div className="settings__groups">
+              {szukanie && <div className="settings__result-summary" role="status"><Icon name="search" size={14} />{t("set.search.total", { n: wyniki.reduce((sum, row) => sum + row.fields.length, 0) })}<Badge tone="muted">{t("set.search.allModes")}</Badge></div>}
               {szukanie ? (
                 wyniki.length === 0 ? (
                   <Empty
@@ -529,6 +545,7 @@ function GroupCard({ group }: { group: GroupDef }) {
   const app = useApp();
   const t = useT();
   const edycja = useContext(EdycjaPresetuCtx);
+  const [showInactive, setShowInactive] = useState(false);
   /* Warunki `when`/`warn`/martwe gałęzie liczą się na TYM dokumencie,
      który kontrolki edytują — inaczej pola zwijałyby się według panelu,
      a edytowały preset.
@@ -542,7 +559,8 @@ function GroupCard({ group }: { group: GroupDef }) {
   const nogiBezPliku = (app.stats.lotNogi ?? []).filter(
     (n) => !n.zPliku && (n.handluje ?? !n.zamrozona) && n.format,
   );
-  const visible = group.fields.filter((f) => !f.when || f.when(s));
+  const visible = group.fields.filter((f) => showInactive || !f.when || f.when(s));
+  const inactiveCount = group.fields.filter((f) => f.when && !f.when(s)).length;
 
   
   const martwe = group.fields.filter((f) => {
@@ -571,6 +589,8 @@ function GroupCard({ group }: { group: GroupDef }) {
       {/* ZAKRES NAD POLAMI, nie tylko w plakietce: to jest odpowiedź na
           pytanie „czy wczytanie presetu mi to skasuje", a pada ono dokładnie
           w chwili, gdy ktoś tu coś zmienia. */}
+      <details className="context-help group-help">
+        <summary>{t("set.help.section")}</summary>
       <div className="scopenote">
         <Icon name={group.zakres === "rachunek" ? "wallet" : "clipboard"} size={14} style={{ flex: "none", marginTop: 1 }} />
         <div>
@@ -587,6 +607,7 @@ function GroupCard({ group }: { group: GroupDef }) {
       <p className="hint" style={{ marginBottom: "var(--sp-3)" }}>
         {group.desc}
       </p>
+      </details>
 
       {martwe.length > 0 && (
         <div className="deadbranch">
@@ -607,6 +628,7 @@ function GroupCard({ group }: { group: GroupDef }) {
           <SettingField key={String(f.key)} field={f} grupa={group} />
         ))}
       </div>
+      {inactiveCount > 0 && <div className="settings__inactive"><Switch checked={showInactive} onChange={setShowInactive} label={t("set.help.inactive", { n: inactiveCount })} /></div>}
     </Card>
   );
 }
@@ -667,9 +689,9 @@ function SettingField({ field, grupa }: { field: FieldDef; grupa: GroupDef }) {
 
   if (field.type === "bool") {
     return (
-      <div className={`setfield setfield--bool ${field.wide ? "setfield--wide" : ""}`} data-on={!!value}>
+      <div className={`setfield setfield--bool ${field.wide ? "setfield--wide" : ""}`} data-on={!!value} data-axis={field.key} data-inactive={!!field.when && !field.when(s)} title={String(field.key)}>
         <Switch checked={!!value} onChange={set} label={<span className="setfield__label">{field.label}</span>} />
-        {field.hint && <span className="setfield__hint">{field.hint}</span>}
+        {field.hint && <><details className="field-help"><summary><Icon name="info" size={13} />{t("set.help.field")}</summary><span className="setfield__hint">{field.hint}</span><code>{String(field.key)}</code></details><span className="setfield__hint field-help-expanded">{field.hint}</span></>}
         {aliasHint && <span className="setfield__hint">{aliasHint}</span>}
         {notkaWarstwy && <span className="setfield__warstwa">{notkaWarstwy}</span>}
         <PodgladNog pole={field.key} warstwa={warstwa} />
@@ -684,8 +706,8 @@ function SettingField({ field, grupa }: { field: FieldDef; grupa: GroupDef }) {
   }
 
   return (
-    <div className={`setfield ${field.wide ? "setfield--wide" : ""}`}>
-      <label className="setfield__label">
+    <div className={`setfield ${field.wide ? "setfield--wide" : ""}`} data-axis={field.key} data-inactive={!!field.when && !field.when(s)} title={String(field.key)}>
+      <label className="setfield__label" htmlFor={`axis-${String(field.key)}`}>
         {field.label}
         {changed && (
           <Tooltip content={t("set.defaultValue", { v: String(DEFAULT_SETTINGS[field.key]) })}>
@@ -696,6 +718,7 @@ function SettingField({ field, grupa }: { field: FieldDef; grupa: GroupDef }) {
 
       {field.type === "num" && (
         <NumberInput
+          id={`axis-${String(field.key)}`}
           value={Number(value)}
           onChange={set}
           step={field.step ?? 1}
@@ -709,12 +732,12 @@ function SettingField({ field, grupa }: { field: FieldDef; grupa: GroupDef }) {
           }
         />
       )}
-      {field.type === "text" && <TextInput value={String(value ?? "")} onChange={set} />}
+      {field.type === "text" && <TextInput id={`axis-${String(field.key)}`} value={String(value ?? "")} onChange={set} />}
       {field.type === "select" && (
-        <Select value={String(value)} onChange={set} options={field.options ?? []} />
+        <Select id={`axis-${String(field.key)}`} value={String(value)} onChange={set} options={field.options ?? []} />
       )}
 
-      {field.hint && <span className="setfield__hint">{field.hint}</span>}
+      {field.hint && <><details className="field-help"><summary><Icon name="info" size={13} />{t("set.help.field")}</summary><span className="setfield__hint">{field.hint}</span><code>{String(field.key)}</code></details><span className="setfield__hint field-help-expanded">{field.hint}</span></>}
       {notkaWarstwy && <span className="setfield__warstwa">{notkaWarstwy}</span>}
       <PodgladNog pole={field.key} warstwa={warstwa} />
       {warn && (
@@ -991,7 +1014,7 @@ function TematMaila({
               },
               ...zmienne.map((v) => ({
                 value: v.name,
-                label: `${v.label}: \${${v.name}} = ${v.value}`,
+                label: `${tSilnik(v.label)}: \${${v.name}} = ${v.value}`,
               })),
             ]}
           />
@@ -1015,7 +1038,7 @@ function TematMaila({
               wordBreak: "break-word",
             }}
           >
-            {blad ? <span className="setfield__warn">{blad}</span> : (podglad?.preview ?? "…")}
+            {blad ? <span className="setfield__warn">{tSilnik(blad)}</span> : (podglad?.preview ?? "…")}
           </div>
           <span className="setfield__hint">
             {blad ? t("mail.preview.err") : podglad?.pusty ? t("mail.preview.system") : t("mail.preview.exact")}
@@ -1679,7 +1702,7 @@ function DrabinkaPresetow() {
           style={{ marginTop: "var(--sp-2)", color: "var(--warn-text)" }}
           role="alert"
         >
-          {t("drab.err.badge")} {bladSzczebli}
+          {t("drab.err.badge")} {tSilnik(bladSzczebli)}
         </p>
       )}
 
@@ -1892,18 +1915,19 @@ function PresetGallery() {
 /* ============================================================
    ZAAWANSOWANE — auto-generowane z listy kluczy
    ============================================================ */
-function AdvancedSection({ zablokowane = false }: { zablokowane?: boolean } = {}) {
+function AdvancedSection({ zablokowane = false, request }: { zablokowane?: boolean; request?: SettingsRequest } = {}) {
   const app = useApp();
   const t = useT();
   const edycja = useContext(EdycjaPresetuCtx);
   const [q, setQ] = useState("");
+  useEffect(() => { if (request) setQ(request.query); }, [request]);
 
   const keys = useMemo(() => {
     const all = Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[];
     return all
       .filter((k) => k !== "merge_config")
       .filter((k) => !COVERED_KEYS.has(k))
-      .filter((k) => k.toLowerCase().includes(q.toLowerCase()));
+      .filter((k) => matchesSearch(q, k));
   }, [q]);
 
   const covered = useMemo(() => {

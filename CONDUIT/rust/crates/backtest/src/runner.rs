@@ -1090,7 +1090,8 @@ pub fn run_with_progress(
                     let engine = &mut s.engine;
                     narosle[idx].0 += engine.stats.signals;
                     narosle[idx].1 += engine.stats.messages;
-                    narosle[idx].2 += engine.baskets.len() as u32;
+                    narosle[idx].2 += engine.created_baskets_count();
+                    let entry_observations=engine.take_entry_source_observations();
                     let hist = engine.market_history();
                     // DIAGNOSTYKA: liczniki odrzuceń są własnością PRZEBIEGU,
                     // nie doby. Bez przeniesienia zrzut pokazywałby wyłącznie
@@ -1167,6 +1168,7 @@ pub fn run_with_progress(
                     // jest modelem restartu, a N19 każe odtworzyć stan.)
                     let auto_ea = engine.tryb_auto_ea;
                     *engine = Engine::new(ust, cfg.start_balance);
+                    engine.restore_entry_source_observations(entry_observations);
                     engine.przypisz_slot(slot);
                     engine.pulapy = pulapy;
                     engine.tryb_auto_ea = auto_ea;
@@ -1711,6 +1713,7 @@ pub fn run_with_progress(
         broker.blown,
         cfg.settings.stat_be_prog_usd,
     );
+    metrics.qualify_fixed_lot_daily_exclusion(&daily, cfg.settings.lot_max);
     if reporting_credit > 0.0 {
         metrics.reporting_equity_basis = Some("own_equity_excluding_constant_credit".into());
         metrics.initial_credit = Some(reporting_credit);
@@ -1774,12 +1777,24 @@ pub fn run_with_progress(
             .sum::<u64>()) as u32;
     metrics.signals_taken =
         (narosle.iter().map(|n| n.0).sum::<u64>() + przyjete_sygnaly(&zespol)) as u32;
+    // Count all accepted creations, including unfilled baskets and pruned history.
     metrics.baskets = narosle.iter().map(|n| n.2).sum::<u32>()
         + zespol
             .lista
             .iter()
-            .map(|s| s.engine.baskets.len())
-            .sum::<usize>() as u32;
+            .map(|s| s.engine.created_baskets_count())
+            .sum::<u32>();
+    let mut known_sources:std::collections::HashMap<_,conduit_core::engine::EntrySourceObservation>=Default::default();
+    for engine in zespol.lista.iter().map(|s|&s.engine) {
+        for (key,observation) in engine.entry_source_observations() {
+            known_sources.entry(key.clone()).and_modify(|old|old.has_full_entry|=observation.has_full_entry)
+                .or_insert(*observation);
+        }
+    }
+    metrics.entry_source_observation_version=1;
+    metrics.known_entry_sources=known_sources.len().min(u32::MAX as usize) as u32;
+    metrics.known_full_entry_sources=known_sources.values().filter(|o|o.has_full_entry).count().min(u32::MAX as usize) as u32;
+    metrics.entry_sources_first_seen_as_edit=known_sources.values().filter(|o|o.first_seen_as_edit).count().min(u32::MAX as usize) as u32;
     metrics.rejected_stops = broker.rejected_stops;
     metrics.market_instead_of_limit = broker.market_instead_of_limit;
     metrics.rejected_no_money = broker.rejected_no_money;
@@ -2097,7 +2112,7 @@ pub fn run_with_progress(
                     trejdy,
                     sygnaly: narosle[idx].0 + s.engine.stats.signals,
                     wiadomosci: narosle[idx].1 + s.engine.stats.messages,
-                    koszyki: narosle[idx].2 + s.engine.baskets.len() as u32,
+                    koszyki: narosle[idx].2 + s.engine.created_baskets_count(),
                 }
             })
             .collect()
@@ -2641,9 +2656,9 @@ fn przelacz_szczebel(
                 }
                 narosle[idx].0 += engine.stats.signals;
                 narosle[idx].1 += engine.stats.messages;
-                // koszyki NIE wchodzą do narosłych: przechodzą do nowego
-                // silnika w całości i policzą się w rozbiciu na końcu —
-                // dopisanie ich tutaj liczyłoby je drugi raz
+                // New creation count excludes adopted baskets, so accumulate before replacement.
+                narosle[idx].2 += engine.created_baskets_count();
+                let entry_observations=engine.take_entry_source_observations();
                 let hist = engine.market_history();
                 let odrz = std::mem::take(&mut engine.odrzuty);
                 // …i rejestr odrzuconych wejść (Pakiet E3) — patrz bliźniacze
@@ -2691,6 +2706,7 @@ fn przelacz_szczebel(
                 // saldo bieżące, nie startowe: nowy silnik ma liczyć lot od
                 // stanu konta, który zastał — dokładnie jak bot włączony dziś
                 *engine = Engine::new(ust, saldo);
+                engine.restore_entry_source_observations(entry_observations);
                 engine.przypisz_slot(slot);
                 engine.pulapy = sz.pulapy.clone();
                 engine.tryb_auto_ea = auto_ea;
@@ -2958,6 +2974,43 @@ mod tests {
         assert_eq!(info.raw_rows,24);
         assert!(info.observed_rows < info.raw_rows && info.extrema_preserved);
         assert!(!info.coronation_eligible && !q.coronation_eligible());
+        drop(ticks);std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn basket_count_survives_history_pruning_and_matches_full_ledger() {
+        let path=std::env::temp_dir().join(format!("conduit_count_prune_{}.bin",std::process::id()));
+        let t0=1_700_006_400_000i64;
+        let mut rows=Vec::new(); let mut messages=Vec::new();
+        // 600 independently accepted sources become Done, then the real seven-day
+        // engine pruning path runs. A later source proves the final tail is partial.
+        for i in 0..600i64 {
+            let ts=t0+i*120_000;
+            rows.extend([(ts,4100.0,4100.2),(ts+90_000,4100.0,4100.2)]);
+            messages.push(ReplayMessage { ts, telegram_published_ts:None,msg_id:i+1,
+                reply_to:None,edit_of:None,kanal:String::new(),
+                text:"BUY LIMIT GOLD @ 4000/3995\nSL 3990\nTP 4020".into() });
+        }
+        for day in 1..=10 {rows.push((t0+day*86_400_000,4100.0,4100.2));}
+        rows.sort_by_key(|r|r.0); rows.dedup_by_key(|r|r.0);
+        zapisz_ticki(&path,&rows); let ticks=TickData::open(&path).unwrap();
+        let mut cfg=RunConfig {from:t0,to:t0+10*86_400_000+1,start_balance:600.0,..Default::default()};
+        cfg.settings.server_tz_offset_ms=0; cfg.settings.exec_latency_ms=0;
+        cfg.settings.pending_ttl_h=0.01; cfg.settings.max_open_baskets=0;
+        cfg.settings.max_open_positions=0; cfg.settings.lot_fixed=0.01;
+        cfg.settings.lot_max=0.01;
+        cfg.settings.pending_lifetime=conduit_core::settings::PendingLifetime::Never;
+        for reset in [false,true] {
+            cfg.daily_reset=reset;
+            let r=run(&ticks,&messages,&cfg);
+            assert_eq!(r.baskets_dump.len(),600,"full ledger must retain every accepted source");
+            assert_eq!(r.metrics.baskets,600,"retained tail is not cumulative activity");
+            assert_eq!(r.metrics.baskets as usize,r.baskets_dump.len());
+            assert_eq!(r.metrics.known_entry_sources,600);
+            assert_eq!(r.metrics.known_full_entry_sources,600);
+            assert_eq!(r.metrics.entry_sources_first_seen_as_edit,0);
+            assert!(r.trades.is_empty(),"count also includes valid unfilled baskets");
+        }
         drop(ticks);std::fs::remove_file(path).unwrap();
     }
 

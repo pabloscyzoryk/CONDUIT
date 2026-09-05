@@ -12,6 +12,9 @@ import { AI_MODELS } from "@/data/telegram";
  */
 export function aiEffectiveSettings(base: Settings, modelId: string): Settings {
   const m = AI_MODELS.find((x) => x.id === modelId) ?? AI_MODELS[0];
+  // Public builds may have no bundled model. Preserve the actual document;
+  // inventing a fallback policy would misrepresent a backend-loaded model.
+  if (!m) return { ...base };
 
   // kadencja modelu -> jak czesto AI ocenia pozycje (wirtualny SL)
   const cadenceS = m.cadence.includes("min") ? parseFloat(m.cadence) * 60 : parseFloat(m.cadence) || 2;

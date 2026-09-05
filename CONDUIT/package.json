@@ -8,7 +8,7 @@
     "dev": "vite",
     "i18n": "node narzedzia/i18n_kanarek.mjs",
     "ikony": "node narzedzia/ikony_kanarek.mjs",
-    "build": "node narzedzia/i18n_kanarek.mjs && node narzedzia/ikony_kanarek.mjs && tsc -b && vite build && node narzedzia/panel_do_exe.mjs",
+    "build": "node narzedzia/i18n_kanarek.mjs && node narzedzia/ikony_kanarek.mjs && node narzedzia/engine_i18n.mjs && tsc -b && vite build && node narzedzia/panel_do_exe.mjs",
     "panel:do-exe": "node narzedzia/panel_do_exe.mjs",
     "build:wiz": "tsc -b && vite build --config vite.wizualizacja.config.ts",
     "build:kronika": "tsc -b && vite build --config vite.kronika.config.ts",

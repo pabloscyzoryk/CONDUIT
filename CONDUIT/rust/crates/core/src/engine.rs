@@ -458,6 +458,10 @@ struct QueuedExit {
     market_at_decision: Px,
 }
 
+/// Reporting-only observations of the configured parser, never entry authority.
+#[derive(Clone,Copy,Debug)]
+pub struct EntrySourceObservation {pub has_full_entry:bool,pub first_seen_as_edit:bool}
+
 pub struct Engine {
     pub cfg: Settings,
     pending_sources: std::collections::BTreeMap<u32, PendingSourceRecord>,
@@ -478,6 +482,8 @@ pub struct Engine {
     halt_prev_ts: Ts,
     halt_min_zapisane: i64,
     next_basket_id: u32,
+    created_baskets_count: u32,
+    entry_source_observations: HashMap<(SourceKey,i64),EntrySourceObservation>,
     loss_streak: u32,
     paused_until: Ts,
     day_stop: i64,
@@ -548,6 +554,8 @@ impl Engine {
             halt_prev_ts: 0,
             halt_min_zapisane: 0,
             next_basket_id: 1,
+            created_baskets_count: 0,
+            entry_source_observations: HashMap::new(),
             loss_streak: 0,
             paused_until: 0,
             day_stop: i64::MIN,
@@ -1201,6 +1209,21 @@ impl Engine {
         }
     }
 
+    pub fn entry_source_observations(&self)->&HashMap<(SourceKey,i64),EntrySourceObservation> {
+        &self.entry_source_observations
+    }
+    pub fn take_entry_source_observations(&mut self)->HashMap<(SourceKey,i64),EntrySourceObservation> {
+        std::mem::take(&mut self.entry_source_observations)
+    }
+    pub fn restore_entry_source_observations(&mut self,records:HashMap<(SourceKey,i64),EntrySourceObservation>) {
+        self.entry_source_observations=records;
+    }
+
+    /// Cumulative newly created baskets; pruning retained history cannot reduce it.
+    pub fn created_baskets_count(&self) -> u32 {
+        self.created_baskets_count
+    }
+
     pub fn next_basket_id(&self) -> u32 {
         self.next_basket_id
     }
@@ -1555,6 +1578,32 @@ impl Engine {
         b.report_cost_consumer_fault(&reason);
     }
 
+    fn profit_budget_volume<B: Broker>(&mut self, b:&B, basket:Option<u32>, side:Side,
+        entry:Px, sl:Option<Px>, requested:f64)->BResult<f64> {
+        if self.cfg.profit_budget_arm_pct!=0.0 && self.stats.day==day_of(b.quote().ts,self.cfg.session_offset()) {
+            let equity=b.account().equity;
+            if equity.is_finite(){self.stats.day_peak_equity=self.stats.day_peak_equity.max(equity);}
+        }
+        match crate::profit_budget::limit_open_volume(&self.cfg,(&self.stats).into(),b,side,entry,sl,requested) {
+            Ok(volume)=>Ok(volume),
+            Err(reason)=>{
+                let code=format!("ProfitBudget::{reason:?}");
+                *self.odrzuty.entry(code.clone()).or_insert(0)+=1;
+                self.log(b.quote().ts,1,format!("PROFIT BUDGET: {reason:?}; new order withheld"));
+                if self.journal.wants(EventLevel::Info) {
+                    let snap=self.jsnap(b);
+                    let mut ev=Ev::new(b.quote().ts,EventLevel::Warn,EventCategory::Risk,EventKind::OrderRejected)
+                        .text(format!("PROFIT BUDGET: {reason:?}; new order withheld"))
+                        .reason(RejectCode::RiskBudgetExhausted).market(snap).put("code",code)
+                        .put_f("requested_volume",requested).put_f("entry",entry);
+                    if let Some(id)=basket {ev=ev.basket(id);}
+                    self.journal.push(ev.build());
+                }
+                Err(BrokerError::Rejected)
+            }
+        }
+    }
+
     fn open_market_order<B: Broker>(&mut self, b: &mut B, mut r: OrderReq) -> BResult<Ticket> {
         if self.continuation_entry_blocked() {
             return Err(BrokerError::Rejected);
@@ -1573,6 +1622,7 @@ impl Engine {
             return Err(BrokerError::Rejected);
         }
         r.volume = self.final_open_volume(b, r.volume)?;
+        r.volume = self.profit_budget_volume(b,r.basket,r.side,b.quote().entry(r.side),r.sl,r.volume)?;
         b.open_market(r)
     }
 
@@ -1594,6 +1644,7 @@ impl Engine {
             return Err(BrokerError::Rejected);
         }
         r.volume = self.final_open_volume(b, r.volume)?;
+        r.volume = self.profit_budget_volume(b,r.basket,r.kind.side(),r.price,r.sl,r.volume)?;
         b.place_pending(r)
     }
 
@@ -1683,6 +1734,8 @@ impl Engine {
 
 
     pub fn on_message<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage) {
+        // A rejection may occur before handle_entry; never reuse the previous payload.
+        self.wejscie_w_obrobce=None;
         self.continuation_observe(b);
         self.refresh_basket_slots();
         let deferred_replay = self.deferred_entries.is_replay(m);
@@ -1714,6 +1767,18 @@ impl Engine {
                     "AT TP telemetry: pominięto {telemetry_tp_suppressed} wykonawczą akcję TP, zachowano pozostałe intencje"
                 ),
             );
+        }
+        let full_entry=signals.iter().any(|s|matches!(s,Signal::Entry(_)));
+        if full_entry || signals.iter().any(|s|matches!(s,Signal::MarketOpen{..})) {
+            let observed=self.entry_source_observations.entry((m.source.clone(),m.edit_of.unwrap_or(m.msg_id)))
+                .or_insert(EntrySourceObservation{has_full_entry:false,first_seen_as_edit:m.edit_of.is_some()});
+            observed.has_full_entry|=full_entry;
+        }
+        // Every early entry gate uses this CURRENT parsed geometry, including
+        // EditOrphan before dispatch. This is diagnostic state only.
+        if let Some(e)=signals.iter().find_map(|s|if let Signal::Entry(e)=s{Some(e)}else{None}) {
+            self.wejscie_w_obrobce=Some(OdrzuconeWejscie{ts:m.ts,msg_id:m.msg_id,kod:String::new(),
+                side:e.side,lo:e.lo,hi:e.hi,sl:e.sl,tp1:e.tps.first().copied()});
         }
         let actionable = !signals.iter().all(|s| matches!(s, Signal::Info));
         if actionable && !deferred_replay {
@@ -2610,6 +2675,7 @@ impl Engine {
 
         let id = self.next_basket_id;
         self.next_basket_id += 1;
+        self.created_baskets_count += 1;
         let mut bk = new_basket(id, m, side, false, px, px, px, px, sl, tps.clone(), m.ts);
         bk.events.push(BasketEvent {
             ts: m.ts,
@@ -3277,6 +3343,7 @@ impl Engine {
 
         let id = self.next_basket_id;
         self.next_basket_id += 1;
+        self.created_baskets_count += 1;
         let mut bk = new_basket(
             id,
             m,
@@ -4062,6 +4129,11 @@ impl Engine {
     }
 
     fn wolny_budzet_portfela<B: Broker>(&self, b: &B) -> Option<f64> {
+        match crate::profit_budget::available(&self.cfg,(&self.stats).into(),b,None) {
+            Ok(Some(v))=>return Some(v.remaining),
+            Err(_)=>return Some(0.0),
+            Ok(None)=>{}
+        }
         let pct = self.cfg.max_portfolio_risk_pct;
         if pct <= 0.0 {
             return None;
@@ -4250,18 +4322,25 @@ impl Engine {
             self.ea_a.sciete_jednostki += sciete_ea as u64;
         }
         if plan.is_empty() {
+            let profit_block=match crate::profit_budget::available(&self.cfg,(&self.stats).into(),b,None) {
+                Err(reason)=>Some(reason), Ok(Some(_))=>Some(crate::profit_budget::BudgetError::Exhausted),
+                Ok(None)=>None,
+            };
             let (licznik, kod, opis) = if pusty_przez_stops {
                 (
-                    "StopsLevel",
+                    "StopsLevel".to_string(),
                     RejectCode::InvalidStops,
                     format!(
                         "odrzucony — wszystkie szczeble bliżej SL niż stops_level {:.2}",
                         self.cfg.stops_level
                     ),
                 )
+            } else if let Some(reason)=profit_block {
+                (format!("ProfitBudget::{reason:?}"),RejectCode::RiskBudgetExhausted,
+                    format!("PROFIT BUDGET: {reason:?}; no legal grid fits the current reserve"))
             } else {
                 (
-                    "BudzetRyzyka",
+                    "BudzetRyzyka".to_string(),
                     RejectCode::RiskBudgetExhausted,
                     format!(
                         "odrzucony — nie mieści się w limicie ryzyka {:.2}% kapitału",
@@ -6781,13 +6860,16 @@ impl Engine {
         }
         self.ea
             .set_continuation_entry_hold(self.continuation_entry_blocked());
-        self.ea.puls(
+        self.ea.set_profit_budget_anchor((&self.stats).into());
+        let pulsed=self.ea.puls(
             &self.cfg,
             &mut self.baskets,
             b,
             ts,
             crate::ea::ZrodloPulsu::Zegar,
-        )
+        );
+        self.stats.day_peak_equity=self.stats.day_peak_equity.max(self.ea.profit_budget_peak());
+        pulsed
     }
 
     pub fn on_tick<B: Broker>(&mut self, b: &mut B, q: &Quote) {
@@ -7193,6 +7275,7 @@ impl Engine {
         if self.cfg.ea_enabled {
             self.ea
                 .set_continuation_entry_hold(self.continuation_entry_blocked());
+            self.ea.set_profit_budget_anchor((&self.stats).into());
             self.ea.puls(
                 &self.cfg,
                 &mut self.baskets,
@@ -7200,6 +7283,7 @@ impl Engine {
                 ts,
                 crate::ea::ZrodloPulsu::Tick,
             );
+            self.stats.day_peak_equity=self.stats.day_peak_equity.max(self.ea.profit_budget_peak());
         }
 
         self.check_guards(b, q);
@@ -11500,7 +11584,9 @@ impl Engine {
         let r = self.halted.take().unwrap_or_default();
         self.risk_override = true;
         self.stats.peak_equity = self.stats.equity;
-        self.stats.day_peak_equity = self.stats.equity;
+        if self.cfg.profit_budget_arm_pct==0.0 {
+            self.stats.day_peak_equity = self.stats.equity;
+        }
         self.log(
             ts,
             2,
@@ -16310,4 +16396,81 @@ pub fn odsiew_sita() -> (u64, u64) {
         ODSIANE_SZCZEBLE.load(std::sync::atomic::Ordering::Relaxed),
         KOSZYKI_Z_ODSIEWEM.load(std::sync::atomic::Ordering::Relaxed),
     )
+}
+
+#[cfg(test)]
+mod profit_budget_send_tests {
+    use super::*;
+    use crate::profit_budget::tests::{broker,cfg,anchor};
+    fn rig()->(Engine,crate::profit_budget::tests::TestBroker) {
+        let c=cfg();let b=broker();let a=anchor(&b,&c);let mut e=Engine::new(c,600.0);
+        e.stats.day=a.day;e.stats.day_start_equity=a.start;e.stats.day_peak_equity=a.peak;
+        e.stats.equity=b.account().equity;(e,b)
+    }
+    fn market(level:i32)->OrderReq {OrderReq{side:Side::Buy,volume:1.0,sl:Some(3990.0),tp:Some(4100.0),
+        basket:Some(1),level,is_toucher:false,comment:"synthetic-profit-budget".into()}}
+    fn pending_req(level:i32)->PendingReq {PendingReq {kind:PendingKind::BuyLimit,price:3990.0,
+        volume:1.0,sl:Some(3980.0),tp:Some(4100.0),basket:Some(1),level,
+        is_toucher:false,is_topup:false,comment:"synthetic-profit-budget".into()}}
+    #[test]
+    fn profit_budget_every_market_send_remeasures_budget_including_reentry_levels() {
+        for level in [0,-2,-6] {
+            let (mut e,mut b)=rig();
+            e.open_market_order(&mut b,market(level)).unwrap();
+            assert_eq!(b.positions[0].volume,0.04);
+            assert!(e.open_market_order(&mut b,market(level)).is_err());
+            assert_eq!(b.sends,1,"second send cannot reuse the first order's budget");
+            assert_eq!(e.odrzuty.get("ProfitBudget::Exhausted"),Some(&1));
+        }
+    }
+    #[test]
+    fn profit_budget_pending_rearm_topup_and_market_cannot_bypass_live_exposure() {
+        for level in [0,2,-2] {
+            let (mut e,mut b)=rig();e.place_pending_order(&mut b,pending_req(level)).unwrap();
+            assert_eq!(b.pendings[0].volume,0.05);
+            assert!(e.place_pending_order(&mut b,pending_req(level)).is_err());
+            assert!(e.open_market_order(&mut b,market(level)).is_err());
+            assert_eq!(b.sends,1);
+            // Only actual disappearance of the old order releases its budget.
+            b.cancel_pending(1).unwrap();e.place_pending_order(&mut b,pending_req(level)).unwrap();
+            assert_eq!(b.sends,2);
+        }
+    }
+    #[test]
+    fn profit_budget_manual_risk_resume_keeps_the_daily_profit_anchor() {
+        let (mut e,mut b)=rig();e.stats.day_peak_equity=800.0;e.stats.equity=700.0;
+        e.halted=Some("synthetic guard".into());e.resume_trading(b.q.ts);
+        assert!(e.risk_override);assert_eq!(e.stats.day_peak_equity,800.0);
+        assert!(e.open_market_order(&mut b,market(0)).is_err(),"manual guard override erased the profit reserve");
+        e.cfg.profit_budget_arm_pct=0.0;e.resume_trading(b.q.ts);
+        assert_eq!(e.stats.day_peak_equity,700.0,"OFF keeps legacy resume behavior");
+    }
+}
+
+#[cfg(test)]
+mod entry_observation_tests {
+    use super::*;
+    use crate::profit_budget::tests::broker;
+    fn msg(chat:i64,id:i64,edit:bool,text:&str)->IncomingMessage {IncomingMessage{ts:1_700_000_000_000,
+        source:SourceKey::new(chat,None),source_name:"synthetic-observation".into(),msg_id:id,
+        reply_to:None,edit_of:edit.then_some(id),text:text.into()}}
+    #[test]
+    fn early_orphan_rejections_record_current_geometry_and_never_leak_previous_entry_context() {
+        let mut e=Engine::new(Settings{edycja_sieroty_nie_otwiera:true,..Settings::default()},600.0);let mut b=broker();
+        e.on_message(&mut b,&msg(-900001,10,false,"BUY LIMIT GOLD @ 3990/3985\nSL 3980\nTP 4050"));
+        let created=e.created_baskets_count();
+        e.on_message(&mut b,&msg(-900002,10,true,"SELL LIMIT GOLD @ 4020/4025\nSL 4030\nTP 3990"));
+        let w=e.odrzucone_wejscia.last().expect("complete orphan has measurable rejection geometry");
+        assert_eq!(w.kod,"EditOrphan");assert_eq!(w.side,Side::Sell);assert_eq!(w.lo,4020.0);
+        assert_eq!(w.hi,4025.0);assert_eq!(w.sl,Some(4030.0));assert_eq!(e.created_baskets_count(),created);
+        let rows=e.odrzucone_wejscia.len();
+        // Same ID on another source must not borrow the prior Entry's geometry.
+        e.on_message(&mut b,&msg(-900003,10,true,"BUY NOW"));
+        assert_eq!(e.odrzucone_wejscia.len(),rows);
+        assert_eq!(e.entry_source_observations().len(),3,"source identity includes the channel");
+        assert_eq!(e.entry_source_observations().values().filter(|o|o.has_full_entry).count(),2);
+        assert_eq!(e.entry_source_observations().values().filter(|o|o.first_seen_as_edit).count(),2);
+        e.on_message(&mut b,&msg(-900002,10,true,"SELL LIMIT GOLD @ 4021/4026\nSL 4031\nTP 3990"));
+        assert_eq!(e.entry_source_observations().len(),3,"material revisions are not new source IDs");
+    }
 }

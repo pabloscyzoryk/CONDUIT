@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[path = "mailer_i18n.rs"]
+pub mod i18n;
+
 // ============================================================
 //  KATEGORIE ZDARZEŃ
 // ============================================================

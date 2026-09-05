@@ -125,6 +125,13 @@ pub struct LabRow {
     pub win_days_pct: f64,
     pub win_rate: f64,
     pub trades: u32,
+    /// Unique parsed entry sources; absent in archived results made before this telemetry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_entry_sources: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_full_entry_sources: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_sources_first_seen_as_edit: Option<u32>,
     pub max_open_positions: u32,
     pub blown: bool,
     /// ocena wg tej samej reguły co w CLI `bt.exe`
@@ -185,6 +192,13 @@ pub struct LabCell {
     pub blown: bool,
     /// liczba WYPEŁNIONYCH jednostek (§3C — kontrola ekspozycji)
     pub units: u32,
+    /// Unique parsed entry sources; absent in archived results made before this telemetry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_entry_sources: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_full_entry_sources: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_sources_first_seen_as_edit: Option<u32>,
     /// maxDD — INFORMACYJNIE. Nie rangujemy po nim i nie odrzucamy po nim.
     pub max_dd: f64,
     pub max_open_risk_pct: f64,
@@ -349,7 +363,8 @@ impl JobCtx {
         // Okno podnosimy PRZED pierwszym meldunkiem: `Raport::nowy` sam wywołuje
         // `uruchom_okno_jesli_trzeba`, ale jego wyszukiwarka `postep.exe` nie
         // zna układu tego repozytorium (patrz `podnies_okno`).
-        podnies_okno();
+        let language = st.read(|snapshot| snapshot.language.clone());
+        podnies_okno(&language);
         let raport = conduit_monitor::Raport::nowy(
             job.title.clone(),
             if job.kind == "train" {
@@ -643,7 +658,7 @@ fn spawn_job(
 //  OSOBNE OKIENKO POSTĘPU
 // ============================================================
 
-fn podnies_okno() {
+fn podnies_okno(language: &str) {
     if std::env::var_os("CONDUIT_BEZ_OKNA").is_some() || conduit_monitor::okno_dziala() {
         return;
     }
@@ -677,6 +692,7 @@ fn podnies_okno() {
     if let Some(p) = kandydaci.into_iter().find(|p| p.is_file()) {
         let mut c = std::process::Command::new(p);
         c.arg("--auto")
+            .env("CONDUIT_LANGUAGE", if language == "en" { "en" } else { "pl" })
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -691,7 +707,7 @@ fn podnies_okno() {
             return;
         }
     }
-    conduit_monitor::uruchom_okno_jesli_trzeba();
+    conduit_monitor::uruchom_okno_z_jezykiem(Some(language));
 }
 
 // ============================================================

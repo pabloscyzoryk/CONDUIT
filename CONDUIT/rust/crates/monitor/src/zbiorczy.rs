@@ -1,5 +1,4 @@
-
-use crate::{pl_duza, Postep};
+use crate::Postep;
 
 /// Sufit szacunku, jak w [`crate::Raport`]: 30 dni. Wyżej to i tak znaczy
 /// „nie wiadomo", a nie „za 4 lata".
@@ -68,9 +67,19 @@ impl Zbiorczy {
     /// „12,4 mln ticków/s · 30 ocen/s" — każda jednostka osobno, bo dodanie
     /// ticków do ocen nie znaczy nic.
     pub fn opis_szybkosci(&self) -> String {
+        self.opis_szybkosci_w_jezyku(crate::language::Language::Pl)
+    }
+
+    pub fn opis_szybkosci_w_jezyku(&self, language: crate::language::Language) -> String {
         self.szybkosci
             .iter()
-            .map(|(j, v)| format!("{} {}", pl_duza(*v), j))
+            .map(|(j, v)| {
+                format!(
+                    "{} {}",
+                    language.large(*v),
+                    crate::language::unit_in(language, j)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" · ")
     }

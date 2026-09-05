@@ -47,7 +47,9 @@
 // Poczekalnia i zestawienie zbiorcze są tu, a nie w binarce okna, z tego
 // samego powodu, co reszta protokołu: to są reguły, które muszą mieć testy.
 // Okno ma je tylko rysować.
+pub mod badanie;
 pub mod kolejka;
+pub mod language;
 /// Przeglądarka presetów już policzonych w trwającym przemiataniu.
 pub mod przesiane;
 pub mod zbiorczy;
@@ -533,6 +535,12 @@ pub fn znajdz_okno() -> Option<PathBuf> {
 ///
 /// `CONDUIT_BEZ_OKNA=1` wyłącza całą mechanikę (skrypty wsadowe, CI).
 pub fn uruchom_okno_jesli_trzeba() {
+    uruchom_okno_z_jezykiem(None);
+}
+
+/// Optional presentation language from a caller's already loaded settings.
+/// The monitor does not read account settings or secrets to discover it.
+pub fn uruchom_okno_z_jezykiem(jezyk: Option<&str>) {
     if std::env::var_os("CONDUIT_BEZ_OKNA").is_some() {
         return;
     }
@@ -543,6 +551,9 @@ pub fn uruchom_okno_jesli_trzeba() {
         return;
     };
     let mut c = std::process::Command::new(exe);
+    if let Some(language) = jezyk.and_then(language::Language::parse) {
+        c.env("CONDUIT_LANGUAGE", language.code());
+    }
     // `--auto` mówi oknu, że podniosło się SAMO. Okno uruchomione ręcznie
     // (dwuklik w `LAB\postep.exe`) czeka na zadania i nie zamyka się z nudów —
     // skoro człowiek je otworzył, to znaczy, że chce patrzeć.

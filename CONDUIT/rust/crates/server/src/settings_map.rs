@@ -1471,6 +1471,9 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     if let Some(v) = f(doc, "day_target_pct") {
         c.day_target_pct = v;
     }
+    if let Some(v) = f(doc, "profit_budget_arm_pct") { c.profit_budget_arm_pct = v; }
+    if let Some(v) = f(doc, "profit_budget_keep_pct") { c.profit_budget_keep_pct = v; }
+    if let Some(v) = f(doc, "profit_budget_deploy_pct") { c.profit_budget_deploy_pct = v; }
     if let Some(v) = f(doc, "day_trail_stop_pct") {
         c.day_trail_stop_pct = v;
     }
@@ -2816,6 +2819,9 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         "day_trail_stop_pct",
         "day_trail_arm_pct",
         "day_trail_basis",
+        "profit_budget_arm_pct",
+        "profit_budget_keep_pct",
+        "profit_budget_deploy_pct",
         // --- budżet transakcji ---
         "daily_signal_budget",
         "signal_min_rr",
@@ -3387,6 +3393,22 @@ mod tests {
             assert_eq!(doc["explicit_pending_until_cancel"],enabled);
             assert_eq!(core_from_ui(&doc).explicit_pending_until_cancel,enabled);
         }
+    }
+
+    #[test]
+    fn profit_budget_fields_roundtrip_without_changing_other_strategy_axes() {
+        let original=serde_json::json!({"profit_budget_arm_pct":12.0,"profit_budget_keep_pct":75.0,
+            "profit_budget_deploy_pct":40.0});
+        let c=core_from_ui(&original);assert_eq!(c.profit_budget_arm_pct,12.0);
+        assert_eq!(c.profit_budget_keep_pct,75.0);assert_eq!(c.profit_budget_deploy_pct,40.0);
+        let ui=preset_to_ui(&serde_json::to_value(&c).unwrap());
+        for name in ["profit_budget_arm_pct","profit_budget_keep_pct","profit_budget_deploy_pct"] {
+            assert_eq!(ui[name],original[name]);
+        }
+        let restored=core_from_ui(&ui);assert_eq!(restored.profit_budget_arm_pct,12.0);
+        assert_eq!(restored.day_trail_stop_pct,Settings::default().day_trail_stop_pct);
+        let defaults=core_from_ui(&serde_json::json!({}));
+        assert_eq!((defaults.profit_budget_arm_pct,defaults.profit_budget_keep_pct,defaults.profit_budget_deploy_pct),(0.0,50.0,100.0));
     }
 
     #[test]

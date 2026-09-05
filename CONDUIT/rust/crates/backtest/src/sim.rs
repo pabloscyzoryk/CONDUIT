@@ -962,6 +962,7 @@ impl Broker for SimBroker {
     }
 
     fn volume_max(&self) -> f64 { self.volume_max }
+    fn normalize_order_price(&self, price:f64)->f64 { self.norm_price(price) }
     fn pending_cancel_snapshot_authoritative(&self) -> bool { true }
     // In this model tickets are the immutable synthetic position IDs. This is
     // explicitly NOT the live MT5 alias-to-POSITION_IDENTIFIER convention.

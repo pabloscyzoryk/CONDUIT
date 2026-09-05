@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Candle, Drawing, DrawTool, PendingOrder, Position, Timeframe } from "@/types";
@@ -1101,7 +1102,7 @@ export function TradingChart({
         {fullscreen && (
           <span className="chart__fstitle">
             <b>{symbol}</b>
-            <span className="hint">{meta.name}</span>
+            <span className="hint">{tSilnik(meta.name)}</span>
           </span>
         )}
 
@@ -1155,7 +1156,7 @@ export function TradingChart({
                     data-active={color === c}
                     style={{ background: c }}
                     onClick={() => setColor(c)}
-                    title="kolor rysowania"
+                    title={t("chart.draw.color")}
                   />
                 ))}
               </div>
@@ -1208,7 +1209,7 @@ export function TradingChart({
           </>
         )}
 
-        <Button variant="ghost" size="sm" icon="refresh" onClick={resetView} title="Reset widoku" />
+        <Button variant="ghost" size="sm" icon="refresh" onClick={resetView} title={t("chart.reset")} />
 
         <span className="chart__export">
           <Button variant="ghost" size="sm" icon="download" onClick={exportChart} title={`Pobierz wykres jako ${format}`} />
@@ -1252,7 +1253,7 @@ export function TradingChart({
         <div className="chart__watermark">
           <span>{symbol}</span>
           <small>
-            {meta.name} · {tf}
+            {tSilnik(meta.name)} · {tf}
           </small>
         </div>
 
@@ -1291,7 +1292,7 @@ export function TradingChart({
           {zGeneratora && (
             <span
               className="chart__flag chart__flag--warn"
-              title={feed.error ? t("chart.synth.title", { e: feed.error }) : t("chart.synth.titleNoErr")}
+              title={feed.error ? t("chart.synth.title", { e: tSilnik(feed.error) }) : t("chart.synth.titleNoErr")}
             >
               <Icon name="info" size={11} /> {t("chart.synth")}
             </span>
@@ -1302,7 +1303,7 @@ export function TradingChart({
               zaglądania do dziennika. */}
           {feed.error && (
             <span className="chart__flag chart__flag--warn" title={feed.error}>
-              {feed.error.length > 72 ? `${feed.error.slice(0, 69)}…` : feed.error}
+              {tSilnik(feed.error).length > 72 ? `${tSilnik(feed.error).slice(0, 69)}…` : tSilnik(feed.error)}
             </span>
           )}
 
@@ -1365,7 +1366,7 @@ export function TradingChart({
                 value={ask.text}
                 inputMode="decimal"
                 spellCheck={false}
-                aria-label="nowy poziom"
+                aria-label={t("chart.newLevel")}
                 onChange={(e) => {
                   const text = e.target.value;
                   const v = parsePrice(text);
@@ -1404,7 +1405,7 @@ export function TradingChart({
               {t("chart.confirm")}
             </Button>
             <Button size="sm" variant="ghost" icon="x" onClick={() => setAsk(null)}>
-              Anuluj
+              {t("common.cancel")}
             </Button>
           </div>
         )}

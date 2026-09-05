@@ -92,6 +92,10 @@ pub trait Broker {
         f64::NAN
     }
 
+    /// Read-only price normalization used by this adapter's actual send path.
+    /// Strategy budgeting must value the requested broker stop after rounding.
+    fn normalize_order_price(&self, price: f64) -> f64 { price }
+
     /// Czy broker wymaga potwierdzonego rozliczenia przed kolejnym wejściem.
     /// Capability, nie osobna oś strategii. Opakowania muszą ją przekazywać.
     fn close_receipt_reconciliation_active(&self) -> bool {

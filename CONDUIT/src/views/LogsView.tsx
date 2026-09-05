@@ -1,3 +1,4 @@
+import { tSilnik, maKlucz } from "@/i18n/silnik";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, Checkbox, Empty, Field, Icon, NumberInput, Select, Switch, TextInput } from "@/components/ui";
 import { EksportPelny } from "@/components/panels/ExportPanel";
@@ -5,7 +6,7 @@ import { useApp } from "@/store/AppStore";
 import { api } from "@/store/transport";
 import { MERGE_KEYS } from "@/data/defaultSettings";
 import { duration, time } from "@/lib/format";
-import { RichT, t, useT } from "@/i18n";
+import { RichT, t, useT, useLanguage } from "@/i18n";
 import type { LogCategory } from "@/types";
 import "./views.css";
 
@@ -53,10 +54,10 @@ function PostepScalaniaPasek() {
           {s.faza === "blad"
             ? /* powód z silnika przychodzi w jego brzmieniu — tłumaczymy tylko
                  zastępnik, gdy go nie podał */
-              (s.blad ?? tt("logs.merge.failed"))
+              (tSilnik(s.blad) || tt("logs.merge.failed"))
             : s.faza === "anulowane"
               ? tt("logs.merge.cancelled")
-              : s.etap}
+              : tSilnik(s.etap)}
         </span>
         {s.aktywne && (
           <Button
@@ -160,7 +161,7 @@ function WyborKatalogu({ onWybierz, onZamknij }: { onWybierz: (p: string) => voi
           <span className="spacer" />
           <Button size="sm" variant="ghost" icon="x" onClick={onZamknij} />
         </div>
-        {blad && <p className="hint" style={{ color: "var(--short-text)" }}>{blad}</p>}
+        {blad && <p className="hint" style={{ color: "var(--short-text)" }}>{tSilnik(blad)}</p>}
         {dane && (
           <>
             <p className="hint truncate" style={{ marginBottom: "var(--sp-2)" }}>
@@ -333,6 +334,7 @@ function useChmurkaPoScaleniu() {
 }
 
 export function LogsView() {
+  const { lang } = useLanguage();
   const app = useApp();
   const tt = useT();
   const [q, setQ] = useState("");
@@ -348,9 +350,9 @@ export function LogsView() {
       app.logs.filter(
         (l) =>
           (cat === "all" || l.category === cat) &&
-          (q === "" || (l.title + l.content).toLowerCase().includes(q.toLowerCase())),
+          (q === "" || (l.title + l.content + tSilnik(l.title) + (["messages", "wiadomosci"].includes(l.category) ? "" : tSilnik(l.content))).toLowerCase().includes(q.toLowerCase())),
       ),
-    [app.logs, q, cat],
+    [app.logs, q, cat, lang],
   );
 
   const setMerge = (k: LogCategory, v: boolean) =>
@@ -384,7 +386,7 @@ export function LogsView() {
                 /* etykiety kategorii przychodzą z `data/defaultSettings.ts`
                    (MERGE_KEYS) i są tam na razie po polsku — to plik danych
                    poza tym widokiem */
-                ...MERGE_KEYS.map((k) => ({ value: k.key, label: k.label })),
+                ...MERGE_KEYS.map((k) => ({ value: k.key, label: tt(`logs.source.${k.key}.label`) })),
               ]}
             />
             <Button size="sm" variant="danger" icon="trash" onClick={app.clearLogs}>
@@ -405,11 +407,11 @@ export function LogsView() {
                       kategoriami, których panel nie zna (`telegram`,
                       `kronika`, `backtests`…), a brak wpisu w mapie dawał
                       `tone={undefined}` i kategorię bez tła. */}
-                  <Badge tone={CAT_TONE[l.category] ?? "muted"}>{l.category}</Badge>
+                  <Badge tone={CAT_TONE[l.category] ?? "muted"} title={l.category}>{maKlucz(`logs.source.${l.category}.label`) ? tt(`logs.source.${l.category}.label`) : maKlucz(`logs.category.${l.category}`) ? tt(`logs.category.${l.category}`) : l.category}</Badge>
                 </span>
                 <div className="logrow__body">
-                  <span className="logrow__title">{l.title}</span>
-                  {l.content && <span className="logrow__content">{l.content}</span>}
+                  <span className="logrow__title" title={l.title}>{tSilnik(l.title)}</span>
+                  {l.content && <span className="logrow__content" title={l.content}>{["messages", "wiadomosci"].includes(l.category) ? l.content : tSilnik(l.content)}</span>}
                 </div>
               </div>
             ))}
@@ -450,7 +452,7 @@ export function LogsView() {
         {[...new Set(MERGE_KEYS.map((k) => k.grupa ?? GRUPA_INNE))].map((grupa) => (
           <div key={grupa} style={{ marginBottom: "var(--sp-3)" }}>
             <p className="hint" style={{ marginBottom: "var(--sp-1)", fontWeight: 600 }}>
-              {grupa === GRUPA_INNE ? tt("logs.merge.groupOther") : grupa}
+              {grupa === GRUPA_INNE ? tt("logs.merge.groupOther") : tSilnik(grupa)}
             </p>
             <div className="mergegrid">
               {MERGE_KEYS.filter((k) => (k.grupa ?? GRUPA_INNE) === grupa).map((k) => (
@@ -468,10 +470,10 @@ export function LogsView() {
                   />
                   <span className="mergeitem__body">
                     <span className="mergeitem__name">
-                      {k.label}
+                      {tt(`logs.source.${k.key}.label`)}
                       {k.sensitive && " ⚠️"}
                     </span>
-                    <span className="mergeitem__note">{k.note}</span>
+                    <span className="mergeitem__note">{tt(`logs.source.${k.key}.note`)}</span>
                   </span>
                 </label>
               ))}

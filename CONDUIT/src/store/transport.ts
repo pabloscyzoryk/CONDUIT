@@ -95,7 +95,14 @@ export interface SecretsSummary {
 
 export type LabPhase = "running" | "done" | "cancelled" | "failed";
 
-export interface LabRow {
+export interface LabSourceCounts {
+  /** Unique parsed entry sources; missing in older archived results. */
+  knownEntrySources?: number | null;
+  knownFullEntrySources?: number | null;
+  entrySourcesFirstSeenAsEdit?: number | null;
+}
+
+export interface LabRow extends LabSourceCounts {
   name: string;
   profit: number;
   perDay: number;

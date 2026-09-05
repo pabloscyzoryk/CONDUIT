@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { QrCode } from "@/components/auth/QrCode";
 import { Button, Icon } from "@/components/ui";
@@ -385,7 +386,7 @@ function AuthPrawdziwe() {
 
       {stage === "error" && (
         <div className="twofa__err" style={{ marginTop: 10 }}>
-          <Icon name="alert" size={12} /> {stan.error ?? t("login.failed")}
+          <Icon name="alert" size={12} /> {tSilnik(stan.error) || t("login.failed")}
         </div>
       )}
 
@@ -420,7 +421,7 @@ function AuthPrawdziwe() {
             </span>
             <div>
               <b>{t("login.noClient")}</b>
-              <span>{stan.error}</span>
+              <span>{tSilnik(stan.error)}</span>
             </div>
           </div>
           <span className="hint">{t("login.noClient.text")}</span>
@@ -595,7 +596,7 @@ function FormularzPoswiadczen({
 
       {stan.error && (
         <div className="twofa__err" style={{ marginTop: 10 }}>
-          <Icon name="alert" size={12} /> {stan.error}
+          <Icon name="alert" size={12} /> {tSilnik(stan.error)}
         </div>
       )}
     </section>

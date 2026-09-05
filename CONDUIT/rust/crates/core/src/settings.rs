@@ -889,6 +889,10 @@ pub struct Settings {
     pub day_trail_arm_pct: f64,
     #[serde(default)]
     pub day_trail_basis: DayTrailBasis,
+    /// Daily equity-peak reserve for new risk; arm=0 preserves legacy behavior.
+    pub profit_budget_arm_pct: f64,
+    pub profit_budget_keep_pct: f64,
+    pub profit_budget_deploy_pct: f64,
 
     pub daily_signal_budget: u32,
     pub signal_min_rr: f64,
@@ -1544,6 +1548,9 @@ impl Default for Settings {
             day_trail_stop_pct: 0.0,
             day_trail_arm_pct: 0.0,
             day_trail_basis: DayTrailBasis::EquityPeak,
+            profit_budget_arm_pct: 0.0,
+            profit_budget_keep_pct: 50.0,
+            profit_budget_deploy_pct: 100.0,
 
             daily_signal_budget: 0,
             signal_min_rr: 0.0,

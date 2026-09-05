@@ -955,6 +955,7 @@ impl Broker for Recording {
     fn volume_max(&self) -> f64 {
         self.inner.volume_max()
     }
+    fn normalize_order_price(&self, price:f64)->f64 { self.inner.normalize_order_price(price) }
     fn close_receipt_reconciliation_active(&self) -> bool {
         self.inner.close_receipt_reconciliation_active()
     }
@@ -2337,6 +2338,8 @@ struct TrwalySilnik {
     closed_today: Vec<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stopped_trading_day: Option<i64>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    profit_budget_anchor: Option<conduit_core::profit_budget::BudgetAnchorBits>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_sources: Vec<conduit_core::engine::PendingSourceRecord>,
     #[serde(default,skip_serializing_if="Option::is_none")]
@@ -2420,6 +2423,8 @@ fn sygnatura_ryzyka(silniki: &routing::Silniki) -> String {
     serde_json::to_string(&silniki.lista.iter().map(|s| (
         &s.format, &s.engine.halted, s.engine.risk_override,
         s.engine.stopped_trading_day(), s.engine.pending_source_memory_revision(),
+        (s.engine.cfg.profit_budget_arm_pct!=0.0).then_some((s.engine.stats.day,
+            s.engine.stats.day_start_equity.to_bits(),s.engine.stats.day_peak_equity.to_bits())),
     )).collect::<Vec<_>>()).expect("risk signature contains only JSON-safe scalars")
 }
 
@@ -2435,6 +2440,7 @@ fn save_follow_memory(st: &StateHandle, silniki: &routing::Silniki, toz: &condui
         (s.format.clone(),TrwalySilnik{stats:Some(s.engine.stats.clone()),halted,
             risk_override:s.engine.risk_override,closed_today:s.engine.closed_today.clone(),
             stopped_trading_day:s.engine.stopped_trading_day(),
+            profit_budget_anchor:(s.engine.cfg.profit_budget_arm_pct!=0.0).then(|| (&s.engine.stats).into()),
             pending_sources:s.engine.export_pending_source_memory(),
             continuation:s.engine.export_strategy_continuation()})
     }).collect();
@@ -3616,6 +3622,7 @@ fn przenies_pamiec(
             continue;
         };
         s.engine.stats = stats;
+        if let Some(anchor)=t.profit_budget_anchor {anchor.restore(&mut s.engine.stats);}
         s.engine.stats.balance = saldo;
         s.engine.stats.credit = credit;
         s.engine.closed_today = std::mem::take(&mut t.closed_today);
@@ -4017,6 +4024,7 @@ fn zapamietaj_silniki(
                 risk_override: s.engine.risk_override,
                 closed_today: std::mem::take(&mut s.engine.closed_today),
                 stopped_trading_day: s.engine.stopped_trading_day(),
+                profit_budget_anchor:(s.engine.cfg.profit_budget_arm_pct!=0.0).then(|| (&s.engine.stats).into()),
                 pending_sources: s.engine.export_pending_source_memory(),
                 continuation: s.engine.export_strategy_continuation(),
             },
@@ -5022,6 +5030,28 @@ fn wznow_handel(
     Ok("handel wznowiony (STRAŻNIK WYŁĄCZONY)".to_string())
 }
 
+/// Explicit panel volume is never silently resized. All active strategy
+/// reserves constrain account-wide manual new exposure as well.
+fn manual_profit_budget_allowed<B:Broker>(silniki:&mut routing::Silniki,b:&B,side:Side,entry:Px,
+    sl:Option<Px>,requested:f64)->Result<(),String> {
+    let mut maximum=requested;
+    for engine in silniki.lista.iter_mut().filter(|s|!s.tylko_zarzadzanie).map(|s|&mut s.engine) {
+        if engine.cfg.profit_budget_arm_pct!=0.0 && engine.stats.day==conduit_core::day_of(b.quote().ts,engine.cfg.session_offset()) {
+            let equity=b.account().equity;
+            if equity.is_finite(){engine.stats.day_peak_equity=engine.stats.day_peak_equity.max(equity);}
+        }
+        match conduit_core::profit_budget::limit_open_volume(&engine.cfg,(&engine.stats).into(),b,
+            side,entry,sl,requested) {
+            Ok(v)=>maximum=maximum.min(v),
+            Err(reason)=>return Err(format!("PROFIT BUDGET: manual order rejected ({reason:?}); maximum allowed volume: 0.00000000")),
+        }
+    }
+    let tolerance=16.0*f64::EPSILON*requested.abs().max(1.0);
+    if maximum+tolerance<requested {
+        Err(format!("PROFIT BUDGET: manual order rejected; maximum allowed volume: {maximum:.8}; requested volume is unchanged"))
+    } else {Ok(())}
+}
+
 fn wykonaj_panel(
     st: &StateHandle,
     silniki: &mut routing::Silniki,
@@ -5271,6 +5301,10 @@ fn wykonaj_panel(
                 Side::Sell
             };
             let (sl, tp, cena) = (poziom(*sl), poziom(*tp), poziom(*price));
+            let budget_entry=if matches!(kind.as_str(),"limit"|"stop") {cena.unwrap_or(f64::NAN)} else {broker.quote().entry(side)};
+            if let Err(reason)=manual_profit_budget_allowed(silniki,broker,side,budget_entry,sl,*volume) {
+                return zglos(st,Err(reason));
+            }
             match kind.as_str() {
                 "limit" | "stop" => {
                     let Some(p) = cena else {
@@ -6517,12 +6551,19 @@ mod tests {
         let mut ea=jeden(silnik());
         ea.glowny_mut().engine.halted=Some("config diagnosis · DD reached".into());
         ea.glowny_mut().engine.stats.realized_today=-100.0;
+        ea.glowny_mut().engine.cfg.profit_budget_arm_pct=10.0;
+        ea.glowny_mut().engine.stats.day=12345;
+        ea.glowny_mut().engine.stats.day_start_equity=600.0;
+        ea.glowny_mut().engine.stats.day_peak_equity=900.0;
         ea.glowny_mut().engine.closed_today=vec![-50.0,-50.0];
         ea.glowny_mut().engine.restore_stopped_trading_day(Some(12345));
         st.update(Sections::all(),|s|s.stats.pnl_today=-100.0);
         save_follow_memory(&st,&ea,&a,77,"XAUUSD",900.0,"config diagnosis").unwrap();
         let mut eb=jeden(silnik());
         eb.glowny_mut().engine.stats.realized_today=22.0;
+        eb.glowny_mut().engine.stats.day=12345;
+        eb.glowny_mut().engine.stats.day_start_equity=200.0;
+        eb.glowny_mut().engine.stats.day_peak_equity=700.0;
         save_follow_memory(&st,&eb,&b,77,"XAUUSD",700.0,"").unwrap();
         let restored=read_follow_memory(&st,&a,77,"XAUUSD").unwrap().unwrap();
         let mut memory=Trwale::default();
@@ -6533,6 +6574,8 @@ mod tests {
         assert_eq!(new_a.glowny().engine.stats.realized_today,-100.0);
         assert_eq!(new_a.glowny().engine.closed_today,vec![-50.0,-50.0]);
         assert_eq!(new_a.glowny().engine.stopped_trading_day(),Some(12345));
+        assert_eq!(new_a.glowny().engine.stats.day_start_equity,600.0);
+        assert_eq!(new_a.glowny().engine.stats.day_peak_equity,900.0);
         assert_eq!(memory.szczyt_equity,900.0);
         assert!(memory.czekajace.is_empty());
         assert_eq!(st.read(|s|s.stats.pnl_today),-100.0);
@@ -6545,6 +6588,8 @@ mod tests {
         let mut new_b=jeden(silnik());
         przenies_pamiec(&mut new_b,&mut memory_b,500.0,0.0);
         assert_eq!(new_b.glowny().engine.stopped_trading_day(),None);
+        assert_eq!(new_b.glowny().engine.stats.day_start_equity,200.0);
+        assert_eq!(new_b.glowny().engine.stats.day_peak_equity,700.0);
         sprzataj(&st);
     }
 

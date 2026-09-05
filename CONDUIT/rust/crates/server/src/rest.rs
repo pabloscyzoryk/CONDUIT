@@ -1135,27 +1135,24 @@ async fn email_subject(
     State(st): State<StateHandle>,
     Query(q): Query<SubjectQuery>,
 ) -> Json<serde_json::Value> {
-    use crate::mailer::{render_subject, zmienne_tematu, MailCategory};
+    use crate::mailer::{i18n as mail_i18n, MailCategory};
 
     const PRZYKLAD_KAT: MailCategory = MailCategory::Summary;
     const PRZYKLAD_ZDARZENIE: &str = "Podsumowanie dnia";
 
     let now = crate::now_ms();
-    let (vars, zapisany) = st.read(|s| {
+    let (vars, zapisany, systemowy, podglad) = st.read(|s| {
         (
-            zmienne_tematu(s, PRZYKLAD_KAT, PRZYKLAD_ZDARZENIE, now),
+            mail_i18n::variables(s, PRZYKLAD_KAT, PRZYKLAD_ZDARZENIE, now),
             s.email.subject.clone(),
+            mail_i18n::system_subject(mail_i18n::Language::from_app(&s.language), PRZYKLAD_KAT, PRZYKLAD_ZDARZENIE),
+            mail_i18n::subject(s, PRZYKLAD_KAT, PRZYKLAD_ZDARZENIE, q.tpl.as_deref().unwrap_or(&s.email.subject), now),
         )
     });
 
     let tpl = q.tpl.unwrap_or_else(|| zapisany.clone());
-    let systemowy = crate::notify::temat_systemowy(PRZYKLAD_KAT, PRZYKLAD_ZDARZENIE);
     let pusty = tpl.trim().is_empty();
-    let podglad = if pusty {
-        systemowy.clone()
-    } else {
-        render_subject(&tpl, &vars)
-    };
+
 
     Json(serde_json::json!({
         "ok": true,

@@ -2,7 +2,7 @@
 #property version   "2.00"
 #property strict
 
-#define XT_WERSJA "XT-2026.08.31-BE-RETARGET"
+#define XT_WERSJA "XT-2026.09.05-CONTRACT"
 
 //====================================================================
 //  WEJŚCIA — mapowanie 1:1 z polami presetu
@@ -10,6 +10,8 @@
 input string  In_Plik              = "conduit_most.csv"; // most poleceń
 input long    In_Magic             = 770077;
 input bool    In_MostRequireSchema2= false;    // harness: odmowa starego mostu
+input long    In_DiagDetailFromMs = 0;         // tester-only bounded raw request evidence
+input long    In_DiagDetailToMs = 0;
 
 // --- zegar / wykonanie ---
 input int     In_ExecLatencyMs     = 250;      // exec_latency_ms
@@ -72,6 +74,9 @@ input bool    In_AutoLimit         = true;     // auto_limit
 input int     In_MarketEntryMode   = 0;        // market_entry_mode: 0=GridAtOnce 1=Single 2=Laddered
 input int     In_MarketEntryUnits  = 0;        // market_entry_units (0 = OFF)
 input double  In_MaxPortfolioRisk  = 0.0;      // max_portfolio_risk_pct (pozycje+pendingi)
+input double  In_ProfitBudgetArmPct = 0.0;     // profit_budget_arm_pct: 0 preserves legacy
+input double  In_ProfitBudgetKeepPct = 50.0;   // profit_budget_keep_pct
+input double  In_ProfitBudgetDeployPct = 100.0; // profit_budget_deploy_pct
 input double  In_VolWindowMin      = 0.0;      // vol_window_min (0=reguła wyłączona)
 input double  In_VolRangeUsd       = 15.0;      // vol_range_usd
 input double  In_VolUnitsMult      = 0.7;      // vol_units_mult
@@ -156,6 +161,7 @@ input double  In_OaeProfitMin      = 0.5;      // oae_profit_min
 input int     In_SlHitMode         = 1;        // 0=Ignore 1=CancelPendings 2=CloseAll 3=VerifyByPrice
 input double  In_SlHitVerifyTol    = 0.0;      // sl_hit_verify_tol
 input bool    In_HonorCancel       = true;     // honor_cancel
+input bool    In_ExplicitPendingUntilCancel = false; // publisher validity for explicit LIMIT/STOP
 input bool    In_HonorCloseAll     = true;     // honor_close_all
 input bool    In_HonorMarketOpen   = false;    // honor_market_open
 input bool    In_HonorStopOrders   = false;    // honor_stop_orders
@@ -182,7 +188,7 @@ input int     In_BeMinPozycji      = 0;        // be_min_pozycji
 input bool    In_BeCoversLateFills = false;    // be_covers_late_fills
 input bool    In_BeNeverLoosen    = false;    // be_never_loosen
 input bool    In_ConfirmedExitRetry = false; // confirmed_exit_retry: Done only after broker-flat
-input int     In_TestExitScenario = 0; // TESTER ONLY: 0=OFF, 1=close refusal, 2=cancel/fill/partial, 3=cancel refusal, 4=legacy refusal, 5=no-fault golden
+input int     In_TestExitScenario = 0; // TESTER ONLY: 0=OFF, 1..5=confirmed exits, 6=partial receipts, 7/8=edit refusal/golden
 input bool    In_SlPoTp1Krawedz    = false;    // sl_po_tp1_na_krawedz
 input int     In_NoTpAfterStage    = 0;        // no_tp_after_stage (0 = OFF)
 
@@ -215,6 +221,23 @@ input double  In_BeLockPts         = 0.0;      // be_lock_pts
 input int     In_TrailMode         = 0;        // trail_mode: 0=Off 1=Gap 2=LockPct 3=Tiered 4=Atr 5=Chandelier
 input double  In_TrailStart        = 25.0;     // trail_start
 input double  In_TrailGap          = 20.0;     // trail_gap
+input bool    In_TrailAdaptiveEnabled = false;
+input bool    In_TrailAdaptiveRunnersOnly = true;
+input double  In_TrailAdaptiveWindowS = 90.0;
+input int     In_TrailAdaptiveMinSamples = 8;
+input double  In_TrailAdaptiveTrendEr = 0.55;
+input double  In_TrailAdaptiveReversalEr = 0.45;
+input double  In_TrailAdaptiveTrendGapMult = 1.6;
+input double  In_TrailAdaptiveChopGapMult = 0.85;
+input double  In_TrailAdaptiveReversalGapMult = 0.45;
+input double  In_TrailAdaptiveFastVolS = 20.0;
+input double  In_TrailAdaptiveSlowVolS = 120.0;
+input double  In_TrailAdaptiveVolRatio = 1.8;
+input double  In_TrailAdaptiveVolFavorableMult = 1.25;
+input double  In_TrailAdaptiveVolAdverseMult = 0.65;
+input double  In_TrailAdaptiveMinPeak = 0.0;
+input double  In_TrailAdaptiveMinGap = 0.0;
+input double  In_TrailAdaptiveMaxGap = 0.0;
 input double  In_TrailLockPct      = 50.0;     // trail_lock_pct
 input string  In_TrailTiers        = "5:1,10:5,15:9,20:14,30:23,50:42";       // trail_tiers "prog:blokada,..."
 input int     In_TrailRunnerMode   = 3;        // trail_runner_mode (domyślna silnika: Tiered)
@@ -348,6 +371,7 @@ input bool    In_DayTargetScaleLot = false;    // day_target_scale_lot
 input double  In_DayTrailStopUsd   = 0.0;      // day_trail_stop_usd
 input double  In_DayTrailStopPct   = 0.0;      // day_trail_stop_pct
 input double  In_DayTrailArmPct    = 0.0;      // day_trail_arm_pct
+input int     In_DayTrailBasis     = 0;        // 0=EquityPeak, 1=ProfitPeak
 input double  In_EodFlatHour       = 0.0;      // eod_flat_hour
 input bool    In_FlatWeekend       = false;    // flat_weekend
 input double  In_FlatWeekendHour   = 20.0;      // flat_weekend_hour
@@ -447,6 +471,7 @@ input double  In_LotPercentSmallM  = 0.0;      // lot_percent_small_mult
 input string  In_DzienOd           = "";       // RRRR.MM.DD HH:MM (puste = bez ograniczen)
 input string  In_DzienDo           = "";       // RRRR.MM.DD HH:MM
 input bool    In_Diag              = false;    // zrzut śladu do pliku
+input string  In_DiagFile          = "conduit_xt_diag.csv"; // relative Common/Files path; isolate parallel experiments
 
 
 //====================================================================
@@ -494,6 +519,10 @@ struct Basket
    int      side;          // 0 = BUY, 1 = SELL
    bool     is_limit;
    bool     is_stop;
+   bool     source_explicit;
+   bool     source_withdrawn;
+   bool     entry_review; // session-retained: unresolved legacy edit may not add risk
+   double   review_requested_lo, review_requested_hi;
    double   entry_lo, entry_hi;   // strefa Z SYGNAŁU (przed offsetami)
    double   zone_lo,  zone_hi;    // strefa po offsetach
    double   sl;
@@ -506,6 +535,7 @@ struct Basket
    long     created_ts;
    int      state;
    int      tp_stage;
+   int      plan_observed_stage; // target touched without a filled position; never consumes a future partial
    bool     had_positions;
    bool     zone_touched;
    bool     drop_armed;
@@ -642,6 +672,7 @@ int      g_nmap = 0;
 ulong    g_rej_tk[MAXREJ];
 int      g_rej_bid[MAXREJ];
 long     g_rej_msg[MAXREJ];
+double   g_rej_booked[MAXREJ]; // confirmed cumulative OUT PnL, including partials
 int      g_nrej = 0;
 
 // ---- STAN PER POZYCJA (odpowiednik pól Position silnika) ----
@@ -654,6 +685,7 @@ long     g_ps_peak_ts[MAXPS];
 double   g_ps_vsl[MAXPS];      // 0 = brak
 bool     g_ps_isrunner[MAXPS];
 double   g_ps_wol0[MAXPS];     // wolumen pierwotny (TYLER); 0 = niezapisany
+double   g_ps_last_vol[MAXPS]; // last reconciled broker volume
 int      g_nps = 0;
 
 int PsIdx(ulong t)
@@ -671,13 +703,15 @@ int PsEnsure(ulong t)
       for(int j = 0; j < g_nps; j++)
          if(PositionSelectByTicket(g_ps_tk[j]))
            { g_ps_tk[w]=g_ps_tk[j]; g_ps_peak[w]=g_ps_peak[j]; g_ps_peak_ts[w]=g_ps_peak_ts[j];
-             g_ps_vsl[w]=g_ps_vsl[j]; g_ps_isrunner[w]=g_ps_isrunner[j]; g_ps_wol0[w]=g_ps_wol0[j]; w++; }
+             g_ps_vsl[w]=g_ps_vsl[j]; g_ps_isrunner[w]=g_ps_isrunner[j]; g_ps_wol0[w]=g_ps_wol0[j];
+             g_ps_last_vol[w]=g_ps_last_vol[j]; w++; }
       g_nps = w;
       if(g_nps >= MAXPS) return -1;
      }
    i = g_nps; g_nps++;
    g_ps_tk[i] = t; g_ps_peak[i] = 0.0; g_ps_peak_ts[i] = g_now;
    g_ps_vsl[i] = 0.0; g_ps_isrunner[i] = false; g_ps_wol0[i] = 0.0;
+   g_ps_last_vol[i] = PositionSelectByTicket(t) ? PositionGetDouble(POSITION_VOLUME) : 0.0;
    return i;
   }
 void PsForget(ulong t)
@@ -686,7 +720,8 @@ void PsForget(ulong t)
    if(i < 0) return;
    for(int j = i; j < g_nps - 1; j++)
      { g_ps_tk[j]=g_ps_tk[j+1]; g_ps_peak[j]=g_ps_peak[j+1]; g_ps_peak_ts[j]=g_ps_peak_ts[j+1];
-       g_ps_vsl[j]=g_ps_vsl[j+1]; g_ps_isrunner[j]=g_ps_isrunner[j+1]; g_ps_wol0[j]=g_ps_wol0[j+1]; }
+       g_ps_vsl[j]=g_ps_vsl[j+1]; g_ps_isrunner[j]=g_ps_isrunner[j+1]; g_ps_wol0[j]=g_ps_wol0[j+1];
+       g_ps_last_vol[j]=g_ps_last_vol[j+1]; }
    g_nps--;
   }
 
@@ -807,7 +842,13 @@ double PartialCloseVolume(double current, double desired)
    return cut;
   }
 
-double NormPx(double p) { return NormalizeDouble(p, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)); }
+// Live Rust's SymbolInfo::round_price executes before the Python MT5 request.
+// NormalizeDouble has different half-cent behavior and can move a stop one tick.
+double NormPx(double p)
+  {
+   double factor = MathPow(10.0, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+   return MathRound(p * factor) / factor;
+  }
 
 int    SideSign(int side) { return side == 0 ? 1 : -1; }
 double EntryPx(int side)  { return side == 0 ? g_ask : g_bid; }
@@ -860,9 +901,46 @@ void DiagKoszyk(int bi, string co)
 
 void ZapiszWlasciciela(ulong t, int bi)
   {
+   // Reconciliation may rediscover a known ticket on every tick. Registration
+   // must be idempotent or it exhausts the ledger and duplicates result rows.
+   for(int i = g_nrej - 1; i >= 0; i--)
+      if(g_rej_tk[i] == t && g_rej_bid[i] == g_b[bi].id) return;
    if(g_nrej >= MAXREJ) return;
    g_rej_tk[g_nrej] = t; g_rej_bid[g_nrej] = g_b[bi].id; g_rej_msg[g_nrej] = g_b[bi].msg_id;
+   g_rej_booked[g_nrej] = 0.0;
    g_nrej++;
+  }
+
+// Book only the new broker-confirmed amount. A losing partial belongs to the
+// basket while the residual position is still alive; its later final close
+// must not book that partial a second time. This runs at receipt reconciliation
+// before management/re-entry, matching the engine's drain_closed boundary.
+bool ReconcilePositionRealized(int bi, ulong t, double &last_price, bool &was_tp)
+  {
+   int ri = -1;
+   for(int i = g_nrej - 1; i >= 0; i--)
+      if(g_rej_tk[i] == t && g_rej_bid[i] == g_b[bi].id) { ri = i; break; }
+   if(ri < 0 || !HistorySelectByPosition(t)) return false;
+   double total = 0.0;
+   last_price = 0.0; was_tp = false;
+   for(int d = 0; d < HistoryDealsTotal(); d++)
+     {
+      ulong dt = HistoryDealGetTicket(d);
+      long entry = HistoryDealGetInteger(dt, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) continue;
+      total += HistoryDealGetDouble(dt, DEAL_PROFIT)
+             + HistoryDealGetDouble(dt, DEAL_SWAP)
+             + HistoryDealGetDouble(dt, DEAL_COMMISSION);
+      last_price = HistoryDealGetDouble(dt, DEAL_PRICE);
+      if((ENUM_DEAL_REASON)HistoryDealGetInteger(dt, DEAL_REASON) == DEAL_REASON_TP) was_tp = true;
+     }
+   double delta = total - g_rej_booked[ri];
+   g_b[bi].realized += delta;
+   g_rej_booked[ri] = total;
+   if(MathAbs(delta) > 1e-10 && In_Diag && g_handle_diag != INVALID_HANDLE)
+      FileWrite(g_handle_diag, "REALIZED_RECEIPT", (string)g_now, (string)g_b[bi].id,
+                (string)t, DoubleToString(delta, 8), DoubleToString(g_b[bi].realized, 8));
+   return true;
   }
 
 //====================================================================
@@ -892,18 +970,41 @@ bool WczytajMost()
          if(StringFind(line, "# CONTRACT ") == 0)
            {
             g_most_contract_seen = true;
-            if(StringFind(line, "schema=2") >= 0) g_most_schema = 2;
-            else if(StringFind(line, "schema=1") >= 0) g_most_schema = 1;
-            g_most_dedup_value = (StringFind(line, "dedup_value=1") >= 0);
+            string contract[];
+            int fields=StringSplit(line,' ',contract);
+            g_most_schema=0;
+            for(int ci=0; ci<fields; ci++)
+              {
+               if(contract[ci]=="schema=1") g_most_schema=1;
+               if(contract[ci]=="schema=2") g_most_schema=2;
+               if(contract[ci]=="dedup_value=1") g_most_dedup_value=true;
+              }
+            if(g_most_schema==0)
+              {
+               Print("BLAD KONTRAKTU MOSTU: unsupported or missing schema version.");
+               FileClose(h);
+               return false;
+              }
            }
          continue;
         }
       string p[];
       int k = StringSplit(line, '|', p);
-      if(k < 7) continue;
       if(p[0] != "M") continue;
+      if(k < 7)
+        {
+         Print("BLAD KONTRAKTU MOSTU: incomplete message record.");
+         FileClose(h);
+         return false;
+        }
       if(g_nmsg >= ArraySize(g_msg)) ArrayResize(g_msg, g_nmsg + 5000);
       g_msg[g_nmsg].ts       = (long)StringToInteger(p[1]);
+      if(g_msg[g_nmsg].ts<=0 || (g_nmsg>0 && g_msg[g_nmsg].ts<g_msg[g_nmsg-1].ts))
+        {
+         Print("BLAD KONTRAKTU MOSTU: invalid or non-monotonic message timestamp.");
+         FileClose(h);
+         return false;
+        }
       g_msg[g_nmsg].msg_id   = (long)StringToInteger(p[2]);
       g_msg[g_nmsg].reply_to = (long)StringToInteger(p[3]);
       g_msg[g_nmsg].edit_of  = (long)StringToInteger(p[4]);
@@ -912,9 +1013,15 @@ bool WczytajMost()
       int start = 6;
       if(k > 6 && StringFind(p[6], ":") < 0) start = 7;
       int n = 0;
-      for(int i = start; i < k && n < 12; i++)
+      for(int i = start; i < k; i++)
         {
          if(StringLen(p[i]) == 0) continue;
+         if(n>=12)
+           {
+            Print("BLAD KONTRAKTU MOSTU: message exceeds supported action capacity; no truncation allowed.");
+            FileClose(h);
+            return false;
+           }
          g_msg[g_nmsg].akcje[n] = p[i];
          n++;
         }
@@ -969,6 +1076,23 @@ bool ConfirmedExitPending(int bi)
 bool ExitRiskAllowed(int bi)
   {
    return !ConfirmedExitPending(bi);
+  }
+bool ExplicitPendingSource(int bi)
+  {
+   return bi >= 0 && bi < g_nb && In_ExplicitPendingUntilCancel
+          && (g_b[bi].source_explicit || g_b[bi].is_limit || g_b[bi].is_stop);
+  }
+bool SourceWithdrawn(int bi)
+  {
+   return bi >= 0 && bi < g_nb && g_b[bi].source_withdrawn;
+  }
+bool EntryReviewBlocked(int bi)
+  {
+   return bi >= 0 && bi < g_nb && g_b[bi].entry_review;
+  }
+bool KeepExplicitPending(int bi)
+  {
+   return ExplicitPendingSource(bi) && !SourceWithdrawn(bi);
   }
 
 // Exact ownership only. Unknown/contradictory managed objects prevent proof
@@ -1826,18 +1950,160 @@ double RyzykoPortfela()
    return s;
   }
 
+// Opt-in reserve of observed daily equity profit. This only sizes NEW exposure.
+// The tester always starts from a fresh account; no cross-run day anchor is reused.
+bool PbPositive(double x) { return MathIsValidNumber(x) && x > 0.0; }
+
+int ProfitBudgetAvailable(double &remaining, string &error)
+  {
+   remaining = 0.0; error = "";
+   if(In_ProfitBudgetArmPct == 0.0) return 0; // byte-for-byte legacy send path
+   if(!PbPositive(In_ProfitBudgetArmPct) || !MathIsValidNumber(In_ProfitBudgetKeepPct)
+      || In_ProfitBudgetKeepPct < 0.0 || In_ProfitBudgetKeepPct > 100.0
+      || !MathIsValidNumber(In_ProfitBudgetDeployPct)
+      || In_ProfitBudgetDeployPct < 0.0 || In_ProfitBudgetDeployPct > 100.0)
+     { error = "InvalidSettings"; return -1; }
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(!MathIsValidNumber(equity)) { error = "InvalidAccount"; return -1; }
+   if(g_day != DayOf(g_now) || !PbPositive(g_day_start_eq) || !PbPositive(g_day_peak_eq))
+     { error = "UnknownDayAnchor"; return -1; }
+   double peak = MathMax(g_day_peak_eq, equity);
+   double profit = MathMax(peak - g_day_start_eq, 0.0);
+   if(profit <= 0.0 || profit < g_day_start_eq * In_ProfitBudgetArmPct / 100.0) return 0;
+   if(!PbPositive(g_bid) || !PbPositive(g_ask) || g_ask < g_bid)
+     { error = "InvalidQuote"; return -1; }
+   if(!MathIsValidNumber(In_MaxPortfolioRisk)) { error = "InvalidSettings"; return -1; }
+   double floor = g_day_start_eq + profit * In_ProfitBudgetKeepPct / 100.0;
+   double capacity = MathMax(equity - floor, 0.0) * In_ProfitBudgetDeployPct / 100.0;
+   if(In_MaxPortfolioRisk > 0.0)
+      capacity = MathMin(capacity, MathMax(equity, 0.0) * In_MaxPortfolioRisk / 100.0);
+   double used = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0) { error = "InvalidExposure"; return -1; }
+      if(PositionGetInteger(POSITION_MAGIC) != In_Magic) continue;
+      // This native fixture has one XAU quote stream. Never price another
+      // symbol silently using this stream if extra exposure was introduced.
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) { error = "InvalidQuote"; return -1; }
+      double sl = PositionGetDouble(POSITION_SL);
+      if(sl == 0.0) { int ip = PsIdx(t); if(ip >= 0) sl = g_ps_vsl[ip]; }
+      if(!PbPositive(sl)) { error = "MissingStop"; return -1; }
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      if(!PbPositive(volume)) { error = "InvalidExposure"; return -1; }
+      int side = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? 0 : 1;
+      used += MathMax((ExitPx(side) - sl) * SideSign(side), 0.0) * XAU_CONTRACT * volume;
+     }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(t == 0) { error = "InvalidExposure"; return -1; }
+      if(OrderGetInteger(ORDER_MAGIC) != In_Magic) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) { error = "InvalidQuote"; return -1; }
+      double sl = OrderGetDouble(ORDER_SL), entry = OrderGetDouble(ORDER_PRICE_OPEN);
+      double volume = OrderGetDouble(ORDER_VOLUME_CURRENT);
+      if(!PbPositive(sl)) { error = "MissingStop"; return -1; }
+      if(!PbPositive(entry) || !PbPositive(volume)) { error = "InvalidExposure"; return -1; }
+      long typ = OrderGetInteger(ORDER_TYPE);
+      int side;
+      if(typ == ORDER_TYPE_BUY_LIMIT || typ == ORDER_TYPE_BUY_STOP || typ == ORDER_TYPE_BUY_STOP_LIMIT) side = 0;
+      else if(typ == ORDER_TYPE_SELL_LIMIT || typ == ORDER_TYPE_SELL_STOP || typ == ORDER_TYPE_SELL_STOP_LIMIT) side = 1;
+      else { error = "InvalidExposure"; return -1; }
+      used += MathMax((entry - sl) * SideSign(side), 0.0) * XAU_CONTRACT * volume;
+     }
+   if(!MathIsValidNumber(floor) || !MathIsValidNumber(capacity) || !MathIsValidNumber(used))
+     { error = "InvalidExposure"; return -1; }
+   remaining = MathMax(capacity - used, 0.0);
+   return 1;
+  }
+
+double ProfitBudgetUnits(double value, double step, bool up)
+  {
+   double n = value / step;
+   if(!MathIsValidNumber(n) || n > 4503599627370496.0) return -1.0;
+   double rounded = MathRound(n);
+   double tolerance = 8.0 * 2.2204460492503131e-16 * MathMax(MathAbs(n), 1.0);
+   if(MathAbs(n - rounded) <= tolerance) return rounded;
+   return up ? MathCeil(n) : MathFloor(n);
+  }
+
+bool ProfitBudgetFloorVolume(double requested, double &volume)
+  {
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(!PbPositive(requested) || !PbPositive(vmin) || !PbPositive(step) || !PbPositive(vmax)
+      || vmax < vmin || !PbPositive(In_LotMin)
+      || !MathIsValidNumber(In_LotMax) || In_LotMax < 0.0
+      || !MathIsValidNumber(In_LotMaxZSalda) || In_LotMaxZSalda < 0.0) return false;
+   double wire = step * 1e8;
+   if(!MathIsValidNumber(wire) || wire < 1.0
+      || MathAbs(wire - MathRound(wire)) > 8.0 * 2.2204460492503131e-16 * MathMax(MathAbs(wire), 1.0)) return false;
+   double minimum = MathMax(vmin, In_LotMin), maximum = vmax;
+   if(In_LotMax > 0.0) maximum = MathMin(maximum, In_LotMax);
+   if(In_LotMaxZSalda > 0.0)
+     {
+      double capital = PodstawaLota();
+      if(!MathIsValidNumber(capital) || capital < 0.0) return false;
+      maximum = MathMin(maximum, capital / In_LotMaxZSalda);
+     }
+   if(minimum > maximum) return false;
+   double low = ProfitBudgetUnits(minimum, step, true);
+   double high = ProfitBudgetUnits(MathMin(requested, maximum), step, false);
+   if(low < 0.0 || high < low || high < 1.0) return false;
+   volume = high * step;
+   double eps = 16.0 * 2.2204460492503131e-16 * MathMax(MathMax(MathAbs(volume), MathAbs(step)), 1.0);
+   return PbPositive(volume) && volume <= requested + eps && volume <= maximum + eps && volume + eps >= minimum;
+  }
+
+bool ProfitBudgetLimit(int bi, int side, double entry, double sl, double requested, double &volume)
+  {
+   if(In_ProfitBudgetArmPct != 0.0 && g_day == DayOf(g_now))
+     {
+      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(MathIsValidNumber(equity)) g_day_peak_eq = MathMax(g_day_peak_eq, equity);
+     }
+   double remaining; string error;
+   int state = ProfitBudgetAvailable(remaining, error);
+   if(state == 0) return true; // retain the already-normalized legacy request
+   if(state > 0)
+     {
+      if(remaining <= 0.0) error = "Exhausted";
+      else if(!PbPositive(sl)) error = "MissingStop";
+      else if(!PbPositive(entry) || (entry-sl) * SideSign(side) <= 0.0) error = "InvalidNewStop";
+      else if(!PbPositive(requested)) error = "InvalidVolume";
+      else
+        {
+         double per_lot = (entry-sl) * SideSign(side) * XAU_CONTRACT;
+         if(!ProfitBudgetFloorVolume(MathMin(requested, remaining/per_lot), volume)) error = "Exhausted";
+         else if(!MathIsValidNumber(per_lot*volume)
+                 || per_lot*volume > remaining + 16.0*2.2204460492503131e-16*MathMax(remaining,1.0)) error = "Exhausted";
+        }
+     }
+   if(error == "") return true;
+   g_rej_budget++;
+   if(In_Diag && g_handle_diag != INVALID_HANDLE)
+      FileWrite(g_handle_diag, "PROFIT_BUDGET_REJECT", (string)g_now,
+                bi >= 0 && bi < g_nb ? (string)g_b[bi].id : "0", "ProfitBudget::"+error);
+   return false;
+  }
+
 void CapBasketRisk(int bi)
   {
    double pct = RiskPerBasketEff();
+   double profit_remaining; string profit_error;
+   int profit_state = ProfitBudgetAvailable(profit_remaining, profit_error);
    // engine.rs:3022: wczesny powrot TYLKO gdy OBA limity wylaczone —
    // sufit portfelowy dziala takze przy risk_per_basket_pct=0.
-   if((pct <= 0.0 && In_MaxPortfolioRisk <= 0.0) || g_b[bi].nlv == 0) return;
+   if((pct <= 0.0 && In_MaxPortfolioRisk <= 0.0 && profit_state == 0) || g_b[bi].nlv == 0) return;
    if(!g_b[bi].has_sl) return;
    double cap = (pct > 0.0)
       ? MathMax(AccountInfoDouble(ACCOUNT_EQUITY), 0.0) * pct * DlawikMult() / 100.0
       : 1e18;
    // sufit portfelowy: min z wolnym budżetem portfela — engine.rs:3121
-   if(In_MaxPortfolioRisk > 0.0)
+   if(profit_state != 0)
+      cap = MathMin(cap, profit_state > 0 ? profit_remaining : 0.0);
+   else if(In_MaxPortfolioRisk > 0.0)
      {
       double wolne = MathMax(AccountInfoDouble(ACCOUNT_EQUITY), 0.0) * In_MaxPortfolioRisk / 100.0
                      - RyzykoPortfela();
@@ -2079,7 +2345,8 @@ bool BrokerSl(int side, double sl, bool has_sl, double &out)
 bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
                  double tp, bool has_tp, string kom, ulong &ticket)
   {
-   if(!ExitRiskAllowed(bi)) return false;
+   if(!ExitRiskAllowed(bi) || SourceWithdrawn(bi)) return false;
+   if(EntryReviewBlocked(bi)) return false;
    MqlTradeRequest  r; MqlTradeResult res;
    ZeroMemory(r); ZeroMemory(res);
    r.action       = TRADE_ACTION_DEAL;
@@ -2092,8 +2359,11 @@ bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
    r.comment      = kom;
    r.type_filling = g_fill_deal;
    double bsl; bool hbsl = BrokerSl(g_b[bi].side, sl, has_sl, bsl);
-   if(hbsl && SlIsValid(g_b[bi].side, bsl)) r.sl = NormPx(bsl);
-   if(has_tp && TpIsValid(g_b[bi].side, tp)) r.tp = NormPx(tp);
+   // Preserve the requested protection. A currently invalid stop must be
+   // rejected by the broker, never converted silently into a naked order.
+   if(hbsl) r.sl = NormPx(bsl);
+   if(has_tp) r.tp = NormPx(tp);
+   if(!ProfitBudgetLimit(bi, g_b[bi].side, r.price, r.sl, vol, r.volume)) return false;
    if(!OrderSend(r, res) ||
       (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED))
      {
@@ -2117,7 +2387,8 @@ bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
 bool WyslijLimit(int bi, double price, double vol, double sl, bool has_sl,
                  double tp, bool has_tp, string kom, int typ, ulong &ticket)
   {
-   if(!ExitRiskAllowed(bi)) return false;
+   if(!ExitRiskAllowed(bi) || SourceWithdrawn(bi)) return false;
+   if(EntryReviewBlocked(bi)) return false;
    MqlTradeRequest  r; MqlTradeResult res;
    ZeroMemory(r); ZeroMemory(res);
    r.action       = TRADE_ACTION_PENDING;
@@ -2132,6 +2403,7 @@ bool WyslijLimit(int bi, double price, double vol, double sl, bool has_sl,
    double bsl; bool hbsl = BrokerSl(g_b[bi].side, sl, has_sl, bsl);
    if(hbsl) r.sl = NormPx(bsl);
    if(has_tp) r.tp = NormPx(tp);
+   if(!ProfitBudgetLimit(bi, g_b[bi].side, r.price, r.sl, vol, r.volume)) return false;
    if(!OrderSend(r, res) ||
       (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED))
      {
@@ -2182,6 +2454,13 @@ double MarketRiskScale(double loty, double px, double sl, bool has_sl, double ca
    return cap / ryzyko;
   }
 
+bool NativeLevelKnown(int level)
+  {
+   // Known special legs: reentry=-2, target pending=-3, fast addon=-4.
+   // Only a reconciled but unassigned level (-1) must block every grid level.
+   return level >= 0 || level == -2 || level == -3 || level == -4;
+  }
+
 bool GridLevelHasLivePosition(int bi, int lv)
   {
    if(!In_ConfirmedExitRetry)
@@ -2199,7 +2478,7 @@ bool GridLevelHasLivePosition(int bi, int lv)
          if(g_b[bi].pos[k] == positions[p])
            {
             known = true;
-            if(g_b[bi].pos_lv[k] < 0 || g_b[bi].pos_lv[k] == lv) return true;
+            if(!NativeLevelKnown(g_b[bi].pos_lv[k]) || g_b[bi].pos_lv[k] == lv) return true;
             break;
            }
       if(!known) return true;
@@ -2210,7 +2489,7 @@ bool GridLevelHasLivePosition(int bi, int lv)
       bool known = false;
       for(int k = 0; k < g_b[bi].npend; k++)
          if(g_b[bi].pend[k] == orders[p])
-           { known = g_b[bi].pend_lv[k] >= 0; break; }
+           { known = NativeLevelKnown(g_b[bi].pend_lv[k]); break; }
       if(!known) return true;
      }
    return false;
@@ -2220,6 +2499,7 @@ int PlaceGrid(int bi, bool tylko_brakujace = false, int max_szczebli = 0,
               bool odtwarzaj_wypelnione = false)
   {
    if(!ExitRiskAllowed(bi)) return 0;
+   if(EntryReviewBlocked(bi)) return 0;
    int placed = 0;
    int side = g_b[bi].side;
    string kom = "B" + IntegerToString(g_b[bi].id);
@@ -2486,6 +2766,7 @@ void RelotPendings()
      {
       double cel = LotSize();       // GOLY lot bazowy przy biezacym saldzie
       if(g_b[bi].state == ST_DONE || !ExitRiskAllowed(bi) || g_b[bi].npend == 0) continue;
+      if(EntryReviewBlocked(bi)) continue;
 
       for(int lv = 0; lv < g_b[bi].nlv; lv++)
         {
@@ -2630,6 +2911,28 @@ int CancelPendings(int bi)
       g_b[bi].npend--;
      }
    return n;
+  }
+
+int WithdrawPendingSource(int bi)
+  {
+   if(bi < 0 || bi >= g_nb) return 0;
+   g_b[bi].source_withdrawn = true;
+   g_b[bi].drop_po_ts = 0;
+   ulong positions[]; ulong orders[];
+   ExitOwnedSnapshot(bi, positions, orders);
+   int cancelled = 0;
+   for(int i = 0; i < ArraySize(orders); i++)
+      if(ExitCancelOwned(bi, orders[i])) cancelled++;
+   for(int level = 0; level < g_b[bi].nlv; level++)
+      if(!g_b[bi].lv_filled[level]) g_b[bi].lv_cancelled[level] = true;
+   ExitOwnedSnapshot(bi, positions, orders);
+   if(ArraySize(positions) == 0 && ArraySize(orders) == 0) g_b[bi].state = ST_DONE;
+   return cancelled;
+  }
+void RetrySourceCancellations()
+  {
+   for(int bi = 0; bi < g_nb; bi++)
+      if(SourceWithdrawn(bi)) WithdrawPendingSource(bi);
   }
 
 // Kasuje siatkę, ale ZOSTAWIA n najpłytszych zleceń — engine.rs:4883.
@@ -2802,6 +3105,13 @@ void ZapamietajZamiar(ulong t, double sl, bool hsl, double tp, bool htp)
 bool ModyfikujPozycje(ulong t, double sl, bool has_sl, double tp, bool has_tp)
   {
    if(!PositionSelectByTicket(t)) return false;
+   if(In_Diag && g_handle_diag != INVALID_HANDLE && In_DiagDetailFromMs > 0
+      && g_now >= In_DiagDetailFromMs && g_now <= In_DiagDetailToMs)
+      FileWrite(g_handle_diag, "RAW_SLTP", (string)g_now, (string)t,
+                DoubleToString(sl,16), DoubleToString(NormPx(sl),16),
+                DoubleToString(MathRound(sl*100.0)/100.0,16),
+                DoubleToString(tp,16), has_sl, has_tp,
+                DoubleToString(g_bid,16), DoubleToString(g_ask,16));
    int bok = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 0 : 1;
    if((has_sl && !SlIsValid(bok, sl)) || (has_tp && !TpIsValid(bok, tp)))
      {
@@ -2982,25 +3292,23 @@ void OdswiezBilety()
       for(int i = g_b[bi].npos - 1; i >= 0; i--)
         {
          ulong t = g_b[bi].pos[i];
-         if(PositionSelectByTicket(t)) continue;
+         if(PositionSelectByTicket(t))
+           {
+            double volume = PositionGetDouble(POSITION_VOLUME);
+            int ip = PsEnsure(t);
+            if(ip >= 0 && volume < g_ps_last_vol[ip] - 1e-9)
+              {
+               double partial_price; bool partial_tp;
+               if(!ReconcilePositionRealized(bi, t, partial_price, partial_tp)) continue;
+              }
+            if(ip >= 0) g_ps_last_vol[ip] = volume;
+            continue;
+           }
          // KSIEGOWANIE realized KOSZYKA (engine.rs:5148 bk.realized += profit)
          // — czyta je riskfree_trigger i rearm_min_basket_profit.
-         if(HistorySelectByPosition(t))
+         double cena_out = 0.0; bool byl_tp = false;
+         if(ReconcilePositionRealized(bi, t, cena_out, byl_tp))
            {
-            int nd = HistoryDealsTotal();
-            double pl = 0.0; double cena_out = 0.0; bool byl_tp = false;
-            for(int d = 0; d < nd; d++)
-              {
-               ulong dt = HistoryDealGetTicket(d);
-               if(HistoryDealGetInteger(dt, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
-               pl += HistoryDealGetDouble(dt, DEAL_PROFIT)
-                   + HistoryDealGetDouble(dt, DEAL_SWAP)
-                   + HistoryDealGetDouble(dt, DEAL_COMMISSION);
-               cena_out = HistoryDealGetDouble(dt, DEAL_PRICE);
-               if((ENUM_DEAL_REASON)HistoryDealGetInteger(dt, DEAL_REASON) == DEAL_REASON_TP)
-                  byl_tp = true;
-              }
-            g_b[bi].realized += pl;
             // tp_stage_from_broker_fill (engine.rs:5216-5242): NAJWYZSZY indeks
             // celu osiagniety/miniety cena zamkniecia — kierunkowo, bez tolerancji;
             // dziala niezaleznie od tp_source.
@@ -3017,6 +3325,7 @@ void OdswiezBilety()
                if(naj > g_b[bi].tp_stage) HandleTpHit(bi, naj);
               }
            }
+         else continue; // retain ownership and retry when broker history is available
          PsForget(t);
          for(int j = i; j < g_b[bi].npos - 1; j++)
            { g_b[bi].pos[j] = g_b[bi].pos[j+1]; g_b[bi].pos_lv[j] = g_b[bi].pos_lv[j+1]; }
@@ -3281,6 +3590,8 @@ void HandleEntry(long msg_id, int side, bool is_limit, bool is_stop, double lo, 
    g_b[bi].side = side;
    g_b[bi].is_limit = is_limit;
    g_b[bi].is_stop = is_stop;
+   g_b[bi].source_explicit = In_ExplicitPendingUntilCancel && (is_limit || is_stop);
+   g_b[bi].source_withdrawn = false;
    g_b[bi].entry_lo = lo; g_b[bi].entry_hi = hi;
    g_b[bi].zone_lo = zlo; g_b[bi].zone_hi = zhi;
    g_b[bi].sl = slv; g_b[bi].has_sl = has;
@@ -3292,6 +3603,7 @@ void HandleEntry(long msg_id, int side, bool is_limit, bool is_stop, double lo, 
    g_b[bi].created_ts = g_now;
    g_b[bi].state = ST_PENDING;
    g_b[bi].tp_stage = 0;
+   g_b[bi].plan_observed_stage = 0;
    g_b[bi].had_positions = false;
    g_b[bi].rearm_blocked_by_spp = false;
    g_b[bi].zone_touched = false;
@@ -3364,6 +3676,8 @@ void HandleMkt(long msg_id, int side)
    g_b[bi].side = side;
    g_b[bi].is_limit = false;
    g_b[bi].is_stop = false;
+   g_b[bi].source_explicit = false;
+   g_b[bi].source_withdrawn = false;
    g_b[bi].entry_lo = px; g_b[bi].entry_hi = px;
    g_b[bi].zone_lo = px; g_b[bi].zone_hi = px;
    g_b[bi].sl = sl; g_b[bi].has_sl = has_sl;
@@ -3375,6 +3689,7 @@ void HandleMkt(long msg_id, int side)
    g_b[bi].created_ts = g_now;
    g_b[bi].state = ST_PENDING;
    g_b[bi].tp_stage = 0;
+   g_b[bi].plan_observed_stage = 0;
    g_b[bi].had_positions = false;
    g_b[bi].rearm_blocked_by_spp = false;
    g_b[bi].zone_touched = true;
@@ -3423,7 +3738,7 @@ int TargetZAliasem(int mi, int bi)
    return bi;
   }
 
-int TargetBasket(int mi)
+int TargetBasket(int mi, bool register_alias = true)
   {
    if(g_msg[mi].reply_to != 0)
      {
@@ -3433,7 +3748,7 @@ int TargetBasket(int mi)
          int bi = BIdx(id);
          // Jawny adres jest rozstrzygający także wtedy, gdy koszyk jest Done.
          // Jeśli mapa wskazuje wpis już usunięty, nie wolno spaść na cudzy.
-         if(bi >= 0) return TargetZAliasem(mi, bi);
+         if(bi >= 0) return register_alias ? TargetZAliasem(mi, bi) : bi;
          return -1;
         }
       // F1: jawny reply do sygnału, którego bot nie ma, nie może wykonać
@@ -3462,15 +3777,15 @@ int TargetBasket(int mi)
             for(int t = 0; t < g_b[bi].ntp; t++)
                if(MathAbs(g_b[bi].tps[t] - h) <= tol) { is_tgt = true; break; }
             bool is_sl = g_b[bi].has_sl && MathAbs(g_b[bi].sl - h) <= tol;
-            if(in_zone || is_tgt || is_sl) return TargetZAliasem(mi, bi);
+            if(in_zone || is_tgt || is_sl) return register_alias ? TargetZAliasem(mi, bi) : bi;
            }
         }
      }
    // Z-3 hint_veto: wskazówki były, żadna nie pasuje → komunikat bez adresata
    if(In_HintVeto && mial_hinty) return -1;
    for(int q = nz - 1; q >= 0; q--)
-      if(g_b[zywe[q]].npos > 0) return TargetZAliasem(mi, zywe[q]);
-   return TargetZAliasem(mi, zywe[nz - 1]);
+      if(g_b[zywe[q]].npos > 0) return register_alias ? TargetZAliasem(mi, zywe[q]) : zywe[q];
+   return register_alias ? TargetZAliasem(mi, zywe[nz - 1]) : zywe[nz - 1];
   }
 
 //====================================================================
@@ -3830,6 +4145,7 @@ bool ApplySppTargetPlan(int bi, const double &targets[], int count)
    if(In_ResetTpOnTargetEdit && changed)
      {
       g_b[bi].tp_stage = 0;
+      g_b[bi].plan_observed_stage = 0;
       g_b[bi].zone_touched = false;
       g_b[bi].drop_armed = false;
       g_b[bi].drop_po_ts = 0;
@@ -3867,6 +4183,16 @@ bool TestSppTargetPlanReset()
 void HandleTpHit(int bi, int index)
   {
    if(!ExitRiskAllowed(bi) || (In_ConfirmedExitRetry && !Alive(bi))) return;
+   if(g_b[bi].npos == 0)
+     {
+      if(KeepExplicitPending(bi)) return;
+      int observed = MathMax(g_b[bi].tp_stage, g_b[bi].plan_observed_stage);
+      int stage = MathMax((index > 0) ? index : observed + 1, 1);
+      if(stage <= observed) return;
+      if(In_PendingDropOnTgt) DropGridOnTarget(bi, stage);
+      else g_b[bi].plan_observed_stage = MathMax(g_b[bi].plan_observed_stage, stage);
+      return;
+     }
    g_last_tp_hit_ts = g_now;
    int stage_now = g_b[bi].tp_stage;
    int target_stage = MathMax((index > 0) ? index : (stage_now + 1), 1);
@@ -3878,9 +4204,9 @@ void HandleTpHit(int bi, int index)
 
    if(In_TpHitFillStages)
       for(int st = stage_now + 1; st <= target_stage; st++)
-        { g_b[bi].tp_stage = st; BankOnTp(bi, st); }
+        { g_b[bi].tp_stage = st; g_b[bi].plan_observed_stage = MathMax(g_b[bi].plan_observed_stage, st); BankOnTp(bi, st); }
    else
-     { g_b[bi].tp_stage = target_stage; BankOnTp(bi, target_stage); }
+     { g_b[bi].tp_stage = target_stage; g_b[bi].plan_observed_stage = MathMax(g_b[bi].plan_observed_stage, target_stage); BankOnTp(bi, target_stage); }
 
    if(In_BankAllAtStage > 0 && target_stage >= In_BankAllAtStage)
      {
@@ -3939,7 +4265,7 @@ void HandleTpHit(int bi, int index)
    if(In_PendingLifetime == 1) cs = 1;
    else if(In_PendingLifetime == 2) cs = 2;
    else if(In_PendingLifetime == 3) cs = 3;
-   if(cs > 0 && target_stage >= cs) CancelPendings(bi);
+   if(cs > 0 && target_stage >= cs && !KeepExplicitPending(bi)) CancelPendings(bi);
 
    if(In_NoTpAfterStage > 0 && target_stage >= In_NoTpAfterStage)
      {
@@ -4007,7 +4333,8 @@ void HandleTpHit(int bi, int index)
 void DropGridOnTarget(int bi, int stage)
   {
    if(!ExitRiskAllowed(bi)) return;
-   g_b[bi].tp_stage = stage;
+   if(KeepExplicitPending(bi)) return;
+   g_b[bi].plan_observed_stage = MathMax(g_b[bi].plan_observed_stage, stage);
    int cs;
    if(In_PendingLifetime == 1) cs = 1;
    else if(In_PendingLifetime == 2) cs = 2;
@@ -4032,7 +4359,7 @@ void DokonczOdroczoneKasowanie()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(!ExitRiskAllowed(bi)) continue;
-      if(!Alive(bi) || g_b[bi].drop_po_ts == 0) continue;
+      if(!Alive(bi) || KeepExplicitPending(bi) || g_b[bi].drop_po_ts == 0) continue;
       if(g_now < g_b[bi].drop_po_ts && BliskoStrefy(bi)) continue;
       g_b[bi].drop_po_ts = 0;
       int n = CancelPendingsKeep(bi, In_DropKeepN);
@@ -4060,7 +4387,7 @@ void HandleRiskFree(int bi, double level, bool has_level)
    if(!ExitRiskAllowed(bi)) return;
    if(In_RiskFreeMode == 0) return;
 
-   if(In_PendCancelOnRf)
+   if(In_PendCancelOnRf && !KeepExplicitPending(bi))
       CancelPendings(bi);
 
    ulong live[MAXTK]; int n = 0;
@@ -4327,6 +4654,12 @@ void ApplyEntryEdit(int bi, int side, bool is_limit, bool is_stop,
                     double &tps[], int ntp)
   {
    if(!ExitRiskAllowed(bi)) return;
+   if(SourceWithdrawn(bi) || EntryReviewBlocked(bi)) return;
+   Basket committed = g_b[bi];
+   bool rebuild = g_b[bi].state == ST_PENDING && g_b[bi].npos == 0;
+   ulong before_positions[]; ulong before_orders[];
+   bool before_complete = true;
+   if(rebuild) before_complete = ExitOwnedSnapshot(bi, before_positions, before_orders);
    double deep = AdaptiveDeepOffset(MathAbs(hi - lo));
    double zlo = lo, zhi = hi;
    if(In_ZoneOffsetMode == 1) { zhi += In_EntryHiOffset; zlo += In_EntryLoOffset; }
@@ -4358,9 +4691,35 @@ void ApplyEntryEdit(int bi, int side, bool is_limit, bool is_stop,
    g_b[bi].ntp = MathMin(ntp, MAXTP);
    for(int i = 0; i < g_b[bi].ntp; i++) g_b[bi].tps[i] = tps[i];
    // przestawienie siatki TYLKO w stanie Armed bez pozycji
-   if(g_b[bi].state == ST_PENDING && g_b[bi].npos == 0)
+   if(rebuild)
      {
-      CancelPendings(bi);
+      int removed = 0;
+      if(before_complete)
+         for(int i = 0; i < ArraySize(before_orders); i++)
+            if(ExitCancelOwned(bi, before_orders[i])) removed++;
+      ulong after_positions[]; ulong after_orders[];
+      bool after_complete = ExitOwnedSnapshot(bi, after_positions, after_orders);
+      // This Armed transaction started with no tracked positions. Any actual
+      // fill, retained pending or uncertain snapshot invalidates replacement.
+      bool clean = before_complete && after_complete
+                   && ArraySize(before_positions) == 0 && ArraySize(after_positions) == 0
+                   && removed == ArraySize(before_orders) && ArraySize(after_orders) == 0;
+      if(!clean)
+        {
+         g_b[bi] = committed;
+         g_b[bi].entry_review = true;
+         g_b[bi].review_requested_lo = lo; g_b[bi].review_requested_hi = hi;
+         // Restore only committed strategy geometry. Confirmed broker changes
+         // are facts; reconcile actual fills/cancels rather than undoing them.
+         OdswiezBilety();
+         ExitOwnedSnapshot(bi, after_positions, after_orders);
+         ExitRememberLivePositions(bi, after_positions);
+         if(ArraySize(after_positions) > 0) g_b[bi].state = ST_WORKING;
+         if(In_Diag && g_handle_diag != INVALID_HANDLE)
+            FileWrite(g_handle_diag, "ENTRY_REVIEW", (string)g_now, (string)g_b[bi].id,
+                      "LegacyCancelOrFillUnconfirmed", DoubleToString(lo, 8), DoubleToString(hi, 8));
+         return;
+        }
       PlanGrid(bi);
       if(g_b[bi].nlv > 0) PlaceGrid(bi);
      }
@@ -4385,6 +4744,8 @@ void WykonajWiadomosc(int mi)
       if(nf < 1) continue;
       string akey = f[0];
       bool entry_kind = (kind == "ENTRY" || kind == "ENTRY2");
+      if((entry_kind || kind == "MKT") && (SourceWithdrawn(BIdx(MapGet(key_msg))) || EntryReviewBlocked(BIdx(MapGet(key_msg)))))
+        { ZapamietajPoStatusie(key_msg, akey, false); continue; }
 
       // Wejście w edycji ma własną ścieżkę: poprawia koszyk zanim dedup
       // zarządzania odsieje stare akcje doklejone do tej samej wiadomości.
@@ -4437,7 +4798,7 @@ void WykonajWiadomosc(int mi)
                int bx = BIdx(id);
                  if(bx >= 0)
                  {
-                  if(!ExitRiskAllowed(bx)) { ZapamietajPoStatusie(key_msg, akey, false); continue; }
+                  if(!ExitRiskAllowed(bx) || SourceWithdrawn(bx) || EntryReviewBlocked(bx)) { ZapamietajPoStatusie(key_msg, akey, false); continue; }
                   ApplyEntryEdit(bx, side, is_limit, is_stop, lo, hi, sl, has_sl,
                                  warstwy_offset, has_warstwy_offset, tps, ntp);
                   DiagKoszyk(bx, "EDYCJA");
@@ -4495,6 +4856,20 @@ void WykonajWiadomosc(int mi)
 
       // Wyłączona akcja nie może tworzyć aliasu reply_graph ani trafić do
       // pamięci „wykonanych" w trybie pełnego statusu.
+      if(kind == "CANCEL" && In_ExplicitPendingUntilCancel)
+        {
+         int target = TargetBasket(mi, false);
+         if(ExplicitPendingSource(target))
+           {
+            bool known_reply = g_msg[mi].reply_to != 0 && MapGet(g_msg[mi].reply_to) >= 0;
+            if(!known_reply)
+              { ZapamietajPoStatusie(key_msg, akey, false); continue; }
+            TargetZAliasem(mi, target);
+            WithdrawPendingSource(target);
+            ZapamietajPoStatusie(key_msg, akey, true);
+            continue;
+           }
+        }
       if((kind == "CANCEL" && !In_HonorCancel)
          || (kind == "CLOSEALL" && !In_HonorCloseAll))
         { ZapamietajPoStatusie(key_msg, akey, false); continue; }
@@ -4684,7 +5059,7 @@ void WykryjCeleZCeny()
       // czyta wyłącznie bieżący Bid/Ask MT5. Nie dotyczy pustej siatki,
       // więc nie skraca jej życia ani nie ukrywa reguły wejścia.
       if(In_TpSource == 1 && (!ma_poz || In_TpPriceFrontRun <= 0.0)) continue;
-      int stage = g_b[bi].tp_stage;
+      int stage = ma_poz ? g_b[bi].tp_stage : MathMax(g_b[bi].tp_stage, g_b[bi].plan_observed_stage);
       if(stage >= g_b[bi].ntp) continue;
       double next = g_b[bi].tps[stage];
       double front = ma_poz ? MathMax(In_TpPriceFrontRun, 0.0) : 0.0;
@@ -4714,7 +5089,7 @@ void PendingTtl()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(!ExitRiskAllowed(bi)) continue;
-      if(!Alive(bi) || g_b[bi].npend == 0) continue;
+      if(!Alive(bi) || KeepExplicitPending(bi) || g_b[bi].npend == 0) continue;
       for(int i = g_b[bi].npend - 1; i >= 0; i--)
         {
          ulong t = g_b[bi].pend[i];
@@ -4738,7 +5113,7 @@ void ExpireStale()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(!ExitRiskAllowed(bi)) continue;
-      if(!Alive(bi) || g_b[bi].had_positions || g_b[bi].npos > 0) continue;
+      if(!Alive(bi) || KeepExplicitPending(bi) || g_b[bi].had_positions || g_b[bi].npos > 0) continue;
       if(g_now - g_b[bi].created_ts > lim)
         {
          if(In_ConfirmedExitRetry) RequestConfirmedExit(bi, "WYGASL");
@@ -4753,7 +5128,7 @@ void ExpireOld()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(!ExitRiskAllowed(bi)) continue;
-      if(!Alive(bi)) continue;
+      if(!Alive(bi) || KeepExplicitPending(bi)) continue;
       double lim = 1e18;
       if(limit_glob > 0.0) lim = limit_glob;
       if(g_b[bi].age_limit_min > 0.0) lim = MathMin(lim, g_b[bi].age_limit_min);
@@ -4894,6 +5269,7 @@ void FastAddonSweep()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(!ExitRiskAllowed(bi)) continue;
+      if(EntryReviewBlocked(bi)) continue;
       if(!Alive(bi) || !g_b[bi].had_positions) continue;
       if(g_b[bi].fast_addons >= In_FastAddonMax || g_b[bi].tp_stage < In_FastAddonMinStage) continue;
       if(ostyg > 0 && g_b[bi].last_addon_ts > 0 && g_now - g_b[bi].last_addon_ts < ostyg) continue;
@@ -4934,6 +5310,7 @@ void RearmPass()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(!ExitRiskAllowed(bi)) continue;
+      if(EntryReviewBlocked(bi)) continue;
       if(!Alive(bi) || g_b[bi].nlv == 0) continue;
       if(!g_b[bi].had_positions)
         {
@@ -4977,6 +5354,7 @@ void MarketLadderPass()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(!ExitRiskAllowed(bi)) continue;
+      if(EntryReviewBlocked(bi)) continue;
       if(!Alive(bi) || g_b[bi].is_limit || g_b[bi].nlv == 0) continue;
       bool zostal = false;
       for(int i = 0; i < g_b[bi].nlv; i++)
@@ -5017,6 +5395,7 @@ void ReentryPass()
    for(int bi = 0; bi < g_nb; bi++)
      {
       if(!ExitRiskAllowed(bi)) continue;
+      if(EntryReviewBlocked(bi)) continue;
       double step = MarketStep();
       double lot = LotSize();
       if(!Alive(bi)) continue;
@@ -5342,7 +5721,8 @@ void RiskfreePass()
          g_powod_zamk = "RF_REGULA";
          if(ZamknijPozycje(zywe[i])) { zabankowane += z; g_cnt_rf_rule++; }
         }
-      g_b[bi].realized += zabankowane;
+      // basket_realized_broker_only=true: OdswiezBilety books confirmed deals.
+      // Booking the command estimate here would count the same exit twice.
 
       // 6. runner: stop wg riskfree_runner_stop, cel wg riskfree_runner_target
       double be_koszyka = srednia + SideSign(side) * In_RfBeOffset;
@@ -5411,6 +5791,87 @@ void RiskfreePass()
 //====================================================================
 //  TRAILING — engine.rs:6309 trail_candidate + 6393 trail_z_parametrow
 //====================================================================
+struct AdaptiveMovement
+  {
+   long first_ts, last_ts;
+   double first_px, last_px, path;
+   int samples;
+  };
+bool g_adaptive_valid = false, g_adaptive_has_vol = false;
+double g_adaptive_er = 0.0, g_adaptive_vol = 0.0;
+void AdaptivePush(AdaptiveMovement &a, long ts, double px)
+  {
+   if(a.samples == 0) { a.first_ts = ts; a.first_px = px; }
+   else a.path += MathAbs(px - a.last_px);
+   a.last_ts = ts; a.last_px = px; a.samples++;
+  }
+bool AdaptivePathRate(const AdaptiveMovement &a, double &rate)
+  {
+   double seconds = (double)(a.last_ts - a.first_ts) / 1000.0;
+   if(a.samples < 3 || seconds <= 0.0 || a.path <= 0.0) return false;
+   rate = a.path / seconds;
+   return true;
+  }
+void UpdateAdaptiveSnapshot()
+  {
+   g_adaptive_valid = false; g_adaptive_has_vol = false;
+   if(!In_TrailAdaptiveEnabled) return;
+   long er_ms = (long)(MathMax(In_TrailAdaptiveWindowS, 0.0) * 1000.0);
+   long fast_ms = (long)(MathMax(In_TrailAdaptiveFastVolS, 0.0) * 1000.0);
+   long slow_ms = (long)(MathMax(In_TrailAdaptiveSlowVolS, 0.0) * 1000.0);
+   if(er_ms <= 0) return;
+   long oldest = g_now - MathMax(er_ms, MathMax(fast_ms, slow_ms));
+   int lo = 0, hi = g_vh_n;
+   while(lo < hi)
+     {
+      int mid = (lo + hi) / 2;
+      if(g_vh_ts[(g_vh_head + mid) % MAXVH] < oldest) lo = mid + 1;
+      else hi = mid;
+     }
+   AdaptiveMovement er, fast, slow;
+   ZeroMemory(er); ZeroMemory(fast); ZeroMemory(slow);
+   double current = MidPx();
+   int last = (g_vh_head + g_vh_n - 1 + MAXVH) % MAXVH;
+   bool sampled = g_vh_n > 0 && g_vh_ts[last] == g_now && g_vh_px[last] == current;
+   for(int i = lo; i < g_vh_n + (sampled ? 0 : 1); i++)
+     {
+      long ts = g_now; double px = current;
+      if(i < g_vh_n) { int j = (g_vh_head + i) % MAXVH; ts = g_vh_ts[j]; px = g_vh_px[j]; }
+      if(ts > g_now) continue;
+      if(ts >= g_now - er_ms) AdaptivePush(er, ts, px);
+      if(fast_ms > 0 && ts >= g_now - fast_ms) AdaptivePush(fast, ts, px);
+      if(slow_ms > 0 && ts >= g_now - slow_ms) AdaptivePush(slow, ts, px);
+     }
+   if(er.samples < MathMax(In_TrailAdaptiveMinSamples, 2) || er.path <= 1e-12) return;
+   g_adaptive_er = MathMax(-1.0, MathMin(1.0, (er.last_px - er.first_px) / er.path));
+   double a = 0.0, b = 0.0;
+   if(AdaptivePathRate(fast, a) && AdaptivePathRate(slow, b) && b > 1e-12)
+     { g_adaptive_has_vol = true; g_adaptive_vol = a / b; }
+   g_adaptive_valid = true;
+  }
+double AdaptiveTrailGap(int side, double peak, bool runner, double base_gap)
+  {
+   if(!g_adaptive_valid || !In_TrailAdaptiveEnabled
+      || (In_TrailAdaptiveRunnersOnly && !runner)
+      || peak < MathMax(In_TrailAdaptiveMinPeak, 0.0)) return base_gap;
+   double signed_er = g_adaptive_er * SideSign(side);
+   double trend = MathMin(1.0, MathAbs(In_TrailAdaptiveTrendEr));
+   double reversal = MathMin(1.0, MathAbs(In_TrailAdaptiveReversalEr));
+   double mult = signed_er >= trend ? In_TrailAdaptiveTrendGapMult
+      : (signed_er <= -reversal ? In_TrailAdaptiveReversalGapMult : In_TrailAdaptiveChopGapMult);
+   if(!MathIsValidNumber(mult)) mult = 1.0;
+   mult = MathMax(mult, 0.0);
+   if(In_TrailAdaptiveVolRatio > 0.0 && g_adaptive_has_vol && g_adaptive_vol >= In_TrailAdaptiveVolRatio)
+     {
+      double vm = signed_er >= 0.0 ? In_TrailAdaptiveVolFavorableMult : In_TrailAdaptiveVolAdverseMult;
+      if(MathIsValidNumber(vm)) mult *= MathMax(vm, 0.0);
+     }
+   double gap = MathMax(base_gap, 0.0) * mult;
+   double lower = MathMax(In_TrailAdaptiveMinGap, 0.0);
+   if(lower > 0.0) gap = MathMax(gap, lower);
+   if(In_TrailAdaptiveMaxGap > 0.0) gap = MathMin(gap, MathMax(In_TrailAdaptiveMaxGap, lower));
+   return gap;
+  }
 // parse_tiers "prog:blokada,prog:blokada" — najwyższy osiągnięty próg wygrywa
 bool TrailTiers(string tiers, double peak, double &keep)
   {
@@ -5430,11 +5891,11 @@ bool TrailTiers(string tiers, double peak, double &keep)
 
 // trail_z_parametrow: kandydat SL z jawnych parametrów (0=Off..5=Chandelier)
 bool TrailZParametrow(int side, double open, double peak, int mode,
-                      double start, double gap, double lock, string tiers, double &out)
+                      double start, double gap, double lock, string tiers, bool runner, double &out)
   {
    if(mode == 0 || peak < start) return false;
    int s = SideSign(side);
-   if(mode == 1) { out = ExitPx(side) - s * gap; return true; }                 // Gap
+   if(mode == 1) { out = ExitPx(side) - s * AdaptiveTrailGap(side, peak, runner, gap); return true; }
    if(mode == 2) { out = open + s * peak * lock / 100.0; return true; }        // LockPct
    if(mode == 3)                                                               // Tiered
      {
@@ -5448,7 +5909,7 @@ bool TrailZParametrow(int side, double open, double peak, int mode,
       if(In_TrailAtrMult <= 0.0) return false;
       double atr;
       if(!AtrProxy(atr)) return false;
-      double luka = In_TrailAtrMult * atr;
+      double luka = AdaptiveTrailGap(side, peak, runner, In_TrailAtrMult * atr);
       if(mode == 4) out = ExitPx(side) - s * luka;             // kotwica: cena bieżąca
       else out = open + s * peak - s * luka;                   // kotwica: ekstremum
       return true;
@@ -5508,6 +5969,7 @@ bool TrailCandidate(int bi, ulong t, int side, double open, double peak, double 
    if(In_RfEnabled && In_RfRunnerStop == 2 && g_b[bi].secured)
      {
       double luz = (In_RfRunnerGap > 0.0) ? In_RfRunnerGap : 25.0;
+      luz = AdaptiveTrailGap(side, peak, true, luz);
       if(peak <= 0.0) return false;
       out = open + SideSign(side) * (peak - luz);
       return true;
@@ -5518,7 +5980,7 @@ bool TrailCandidate(int bi, ulong t, int side, double open, double peak, double 
       && In_TrailMode == 0 && In_TrailRunnerMode != 0)
       return TrailZParametrow(side, open, peak, In_TrailRunnerMode,
                               In_TrailRunnerStart, In_TrailRunnerGap,
-                              In_TrailRunnerLockPct, In_TrailRunnerTiers, out);
+                              In_TrailRunnerLockPct, In_TrailRunnerTiers, true, out);
    // (c) split runnerowy / (d) tryb bazowy
    // is_runner ustawiaja WYLACZNIE sciezki risk-free (engine.rs:4565/7419/7442)
    // — pozycja bez TP, ktora nie przeszla przez RF, NIE jest runnerem.
@@ -5540,9 +6002,9 @@ bool TrailCandidate(int bi, ulong t, int side, double open, double peak, double 
    if(runner)
       return TrailZParametrow(side, open, peak, In_TrailRunnerMode,
                               In_TrailRunnerStart, In_TrailRunnerGap,
-                              In_TrailRunnerLockPct, In_TrailRunnerTiers, out);
+                              In_TrailRunnerLockPct, In_TrailRunnerTiers, runner_teraz, out);
    return TrailZParametrow(side, open, peak, In_TrailMode,
-                           In_TrailStart, In_TrailGap, In_TrailLockPct, In_TrailTiers, out);
+                           In_TrailStart, In_TrailGap, In_TrailLockPct, In_TrailTiers, runner_teraz, out);
   }
 
 //====================================================================
@@ -5646,6 +6108,7 @@ bool SrKandydat(int side, double mid, double next_tp, bool ma_next_tp, long ts, 
 
 void ManagePositions()
   {
+   UpdateAdaptiveSnapshot();
    bool sr_swieca = In_TrailSrEnabled && g_sr_nowa;
    g_sr_nowa = false;
    // kolejka wyjść PRZED regułami
@@ -5952,24 +6415,23 @@ void CheckGuards()
       g_halted = StringFormat("MAX DRAWDOWN %.2f$ >= %.2f$", dd, In_MaxDdUsd * scale);
       return;
      }
-   bool sa_pozycje = (LiczPozycje() > 0);
    if(In_DayTrailStopUsd > 0.0)
      {
       double d = g_day_peak_eq - eq;
-      if(d >= In_DayTrailStopUsd * scale && sa_pozycje)
+      if(d >= In_DayTrailStopUsd * scale && (LiczPozycje() > 0 || LiczZlecenia() > 0))
         { g_powod_zamk = "DAYTRAIL"; CloseEverything(); }
      }
    if(In_DayTargetUsd > 0.0 && In_DayTargetClose)
      {
       double scale2 = In_DayTargetScaleLot ? MathMax(lot / 0.01, 1.0) : scale;
       double today = eq - g_day_start_eq;
-      if(today >= In_DayTargetUsd * scale2 && sa_pozycje)
+      if(today >= In_DayTargetUsd * scale2 && (LiczPozycje() > 0 || LiczZlecenia() > 0))
         { g_powod_zamk = "DAYTARGET"; CloseEverything(); }
      }
    if(DayPctGuardActive() && In_DayTargetPct > 0.0 && In_DayTargetClose)
      {
       double prog = MathMax(g_day_start_eq, 1.0) * In_DayTargetPct / 100.0;
-      if(eq - g_day_start_eq >= prog && sa_pozycje)
+      if(eq - g_day_start_eq >= prog && (LiczPozycje() > 0 || LiczZlecenia() > 0))
         { g_powod_zamk = "DAYTARGET"; CloseEverything(); }
      }
    if(DayPctGuardActive() && In_DayTrailStopPct > 0.0)
@@ -5978,19 +6440,24 @@ void CheckGuards()
       double zysk_szczytu = g_day_peak_eq - g_day_start_eq;
       bool uzbrojony = In_DayTrailArmPct <= 0.0
          || zysk_szczytu >= MathMax(g_day_start_eq, 1.0) * In_DayTrailArmPct / 100.0;
+      if(In_DayTrailBasis == 1)
+        {
+         szczyt = zysk_szczytu;
+         if(zysk_szczytu <= 0.0) uzbrojony = false;
+        }
       double oddane = g_day_peak_eq - eq;
       double prog = szczyt * In_DayTrailStopPct / 100.0;
       if(uzbrojony && oddane >= prog)
         {
          ZatrzymajDobe();   // Z-2: dobę zamykamy NIEZALEŻNIE od pozycji
-         if(sa_pozycje) { g_powod_zamk = "DAYTRAIL"; CloseEverything(); }
+         if(LiczPozycje() > 0 || LiczZlecenia() > 0) { g_powod_zamk = "DAYTRAIL"; CloseEverything(); }
         }
      }
    int hour = HourOf(g_now);
    if(In_EodFlatHour > 0.0 && hour == (int)In_EodFlatHour)
      {
       ZatrzymajDobe();
-      if(sa_pozycje) { g_powod_zamk = "EODFLAT"; CloseEverything(); }
+      if(LiczPozycje() > 0 || LiczZlecenia() > 0) { g_powod_zamk = "EODFLAT"; CloseEverything(); }
      }
    if(In_FlatWeekend)
      {
@@ -5998,7 +6465,7 @@ void CheckGuards()
       if(wd == 4 && hour >= (int)In_FlatWeekendHour)
         {
          ZatrzymajDobe();
-         if(sa_pozycje) { g_powod_zamk = "WEEKEND"; CloseEverything(); }
+         if(LiczPozycje() > 0 || LiczZlecenia() > 0) { g_powod_zamk = "WEEKEND"; CloseEverything(); }
         }
      }
   }
@@ -6126,9 +6593,165 @@ bool ExitTestNoNewRisk()
    return positions == PositionsTotal() && orders == OrdersTotal()
           && lo == g_b[0].zone_lo && hi == g_b[0].zone_hi && g_b[0].side == 0;
   }
+void EditReviewScenarioTick()
+  {
+   if(HourOf(g_now) < 2) return;
+   if(!ExitTestRequire(PositionsTotal() == 0 && OrdersTotal() == 0, "initial tester account must be empty")) return;
+   g_nb = 2; ExitTestBasket(0); ExitTestBasket(1);
+   if(!ExitTestRequire(ExitTestOpen(1, 0.02, g_test_reference_ticket), "reference open failed")) return;
+   g_b[0].state = ST_PENDING;
+   g_b[0].nlv = 2;
+   ulong old_orders[2];
+   for(int i = 0; i < 2; i++)
+     {
+      double price = g_bid - 50.0 - i;
+      if(!ExitTestRequire(WyslijLimit(0, price, 0.01, 0.0, false, 0.0, false,
+                                     "B1", ORDER_TYPE_BUY_LIMIT, old_orders[i]), "fixture pending open failed")) return;
+      g_b[0].pend[i] = old_orders[i]; g_b[0].pend_lv[i] = i; g_b[0].npend++;
+      g_b[0].lv_price[i] = price; g_b[0].lv_units[i] = 1; g_b[0].lv_vol[i] = 0.01;
+     }
+   double old_lo = g_b[0].zone_lo, old_hi = g_b[0].zone_hi;
+   double requested_lo = g_bid - 61.0, requested_hi = g_bid - 60.0;
+   double targets[1]; targets[0] = g_ask + 10.0;
+   g_test_cancel_reject = In_TestExitScenario == 7 ? 1 : 0;
+   ApplyEntryEdit(0, 0, true, false, requested_lo, requested_hi,
+                  0.0, false, 0.0, false, targets, 1);
+   if(In_TestExitScenario == 7)
+     {
+      if(!ExitTestRequire(EntryReviewBlocked(0) && g_b[0].zone_lo == old_lo && g_b[0].zone_hi == old_hi,
+                         "edit failure committed geometry or lost review")) return;
+      if(!ExitTestRequire(OrdersTotal() == 1 && g_b[0].npend == 1,
+                         "partial cancellation lost broker truth or created duplicate grid")) return;
+      ulong ticket;
+      if(!ExitTestRequire(!WyslijRynek(0, 0, 0.01, 0.0, false, 0.0, false, "B1", ticket)
+                         && PlaceGrid(0) == 0, "review allowed new risk")) return;
+      ApplyEntryEdit(0, 0, true, false, requested_lo - 10.0, requested_hi - 10.0,
+                     0.0, false, 0.0, false, targets, 1);
+      if(!ExitTestRequire(g_b[0].zone_lo == old_lo && EntryReviewBlocked(0)
+                         && ExitRiskAllowed(0), "review did not survive edit or blocked existing management")) return;
+     }
+   else
+     {
+      if(!ExitTestRequire(!EntryReviewBlocked(0) && g_b[0].zone_lo == requested_lo
+                         && g_b[0].zone_hi == requested_hi && OrdersTotal() > 0,
+                         "clean edit did not place replacement")) return;
+      if(!ExitTestRequire(!OrderSelect(old_orders[0]) && !OrderSelect(old_orders[1]), "old grid survived successful edit")) return;
+     }
+   if(!ExitTestRequire(PositionSelectByTicket(g_test_reference_ticket), "different basket was closed")) return;
+   ExitTestFinish(true, In_TestExitScenario == 7 ? "EDIT_REFUSAL_RETAINS_COMMITTED_PLAN_AND_REVIEW" : "EDIT_REPLACEMENT_GOLDEN");
+  }
+
+void PartialReceiptScenarioTick()
+  {
+   if(g_test_exit_stage == 0)
+     {
+      if(HourOf(g_now) < 2) return;
+      if(!ExitTestRequire(PositionsTotal() == 0 && OrdersTotal() == 0, "initial tester account must be empty")) return;
+      g_nb = 2; ExitTestBasket(0); ExitTestBasket(1);
+      if(!ExitTestRequire(ExitTestOpen(1, 0.02, g_test_reference_ticket), "reference open failed")) return;
+      if(!ExitTestRequire(ExitTestOpen(0, 0.08, g_test_exit_ticket), "owned open failed")) return;
+      PsEnsure(g_test_exit_ticket);
+      g_powod_zamk = "TEST_LOSING_PARTIAL";
+      if(!ExitTestRequire(ZamknijCzesc(g_test_exit_ticket, 0.04), "partial close failed")) return;
+      g_test_exit_stage = 1;
+      return;
+     }
+   OdswiezBilety();
+   if(!ExitTestRequire(PositionSelectByTicket(g_test_reference_ticket), "different basket was closed")) return;
+   double expected = 0.0;
+   if(!ExitTestRequire(HistorySelectByPosition(g_test_exit_ticket), "partial history unavailable")) return;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      if(HistoryDealGetInteger(d, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+         expected += HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP)
+                   + HistoryDealGetDouble(d, DEAL_COMMISSION);
+     }
+   if(!ExitTestRequire(MathAbs(expected - g_b[0].realized) < 1e-6, "partial/final receipt lost or duplicated")) return;
+   if(g_test_exit_stage == 1)
+     {
+      if(!ExitTestRequire(expected < 0.0, "fixture must realize a losing partial")) return;
+      if(!ExitTestRequire(PositionSelectByTicket(g_test_exit_ticket)
+                         && MathAbs(PositionGetDouble(POSITION_VOLUME) - 0.04) < 1e-9,
+                         "partial must leave a live residual")) return;
+      OdswiezBilety();
+      if(!ExitTestRequire(MathAbs(expected - g_b[0].realized) < 1e-6, "repeated receipt was double booked")) return;
+      PrintFormat("CEXIT_TEST_EVENT|losing_partial_booked_while_alive|%.8f|%.8f", expected, g_b[0].realized);
+      g_powod_zamk = "TEST_FINAL_RECEIPT";
+      if(!ExitTestRequire(ZamknijPozycje(g_test_exit_ticket), "final close failed")) return;
+      g_test_exit_stage = 2;
+      return;
+     }
+   if(!ExitTestRequire(!PositionSelectByTicket(g_test_exit_ticket), "final close left residual")) return;
+   PrintFormat("CEXIT_TEST_EVENT|final_receipt_once|%.8f|%.8f", expected, g_b[0].realized);
+   ExitTestFinish(true, "LOSING_PARTIAL_RECONCILED_BEFORE_FINAL_CLOSE");
+  }
+
+void KnownSpecialLevelScenarioTick()
+  {
+   if(HourOf(g_now) < 2) return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0 && In_ProfitBudgetArmPct==0.0, "special-level fixture requires fresh legacy account")) return;
+   g_nb=1; ExitTestBasket(0);
+   ulong market=0, pending=0;
+   if(!ExitTestRequire(ExitTestOpen(0,0.01,market), "special addon open failed")) return;
+   g_b[0].pos_lv[0]=-4;
+   if(!ExitTestRequire(WyslijLimit(0,g_bid-5.0,0.01,g_bid-15.0,true,0.0,false,"B1",ORDER_TYPE_BUY_LIMIT,pending), "special pending open failed")) return;
+   g_b[0].pend[0]=pending;g_b[0].pend_lv[0]=-3;g_b[0].npend=1;
+   if(!ExitTestRequire(!GridLevelHasLivePosition(0,0), "known special legs occupied unrelated grid")) return;
+   if(!ExitTestRequire(GridLevelHasLivePosition(0,-4), "addon did not occupy its own level")) return;
+   g_b[0].pos_lv[0]=-1;
+   if(!ExitTestRequire(GridLevelHasLivePosition(0,0), "unknown position level was ignored")) return;
+   g_b[0].pos_lv[0]=-4;g_b[0].pend_lv[0]=-1;
+   if(!ExitTestRequire(GridLevelHasLivePosition(0,0), "unknown pending level was ignored")) return;
+   g_b[0].pend_lv[0]=-3;
+   ExitTestFinish(true,"KNOWN_SPECIAL_LEGS_AND_UNKNOWN_OWNERSHIP");
+  }
+
+void ProfitBudgetScenarioTick()
+  {
+   if(HourOf(g_now) < 2) return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0, "profit budget needs fresh account")) return;
+   if(!ExitTestRequire(In_ProfitBudgetArmPct==1.0 && In_ProfitBudgetKeepPct==50.0
+                      && In_ProfitBudgetDeployPct==100.0 && In_MaxPortfolioRisk==0.0, "profit budget test inputs")) return;
+   g_nb=1;ExitTestBasket(0);g_day=DayOf(g_now);
+   double eq=AccountInfoDouble(ACCOUNT_EQUITY), remaining=0;string error;
+   g_day_start_eq=eq;g_day_peak_eq=eq;
+   if(!ExitTestRequire(ProfitBudgetAvailable(remaining,error)==0,"unarmed must retain legacy")) return;
+   // Inject an already-observed peak into this tester-only fixture; production
+   // reads only its normal day observation, never this synthetic test anchor.
+   g_day_start_eq=eq-100.0;g_day_peak_eq=eq;
+   if(!ExitTestRequire(ProfitBudgetAvailable(remaining,error)==1 && MathAbs(remaining-50.0)<1e-8,"observed profit capacity")) return;
+   double entry=MathFloor(g_bid)-10.0, stop=entry-10.0, volume=0.10;
+   if(!ExitTestRequire(!ProfitBudgetLimit(0,0,entry,0.0,0.1,volume),"missing SL was accepted")) return;
+   volume=0.10;
+   if(!ExitTestRequire(!ProfitBudgetLimit(0,0,entry,entry+1.0,0.1,volume),"adverse new stop was accepted")) return;
+   // Broker-normalized SL must be used: 49.99 cannot buy a 50.00 risk lot.
+   g_day_start_eq=eq-99.98;volume=0.05;
+   if(!ExitTestRequire(ProfitBudgetLimit(0,0,entry,NormPx(stop+0.004),0.05,volume)
+                      && MathAbs(volume-0.04)<1e-9,"normalized stop exceeded reserve")) return;
+   g_day_start_eq=eq-100.0;
+   ulong pending=0, refused=0;
+   if(!ExitTestRequire(WyslijLimit(0,entry,0.10,stop,true,0.0,false,"B1",ORDER_TYPE_BUY_LIMIT,pending),"capped pending was refused")) return;
+   g_b[0].pend[0]=pending;g_b[0].pend_lv[0]=0;g_b[0].npend=1;
+   if(!ExitTestRequire(OrderSelect(pending) && MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT)-0.05)<1e-9,"native send did not floor to budget")) return;
+   if(!ExitTestRequire(!WyslijLimit(0,entry,0.01,stop,true,0.0,false,"B1",ORDER_TYPE_BUY_LIMIT,refused)
+                      && OrdersTotal()==1,"sequential sends overspent reserve")) return;
+   if(!ExitTestRequire(ExitCancelOwned(0,pending),"budget fixture cancel failed")) return;
+   if(!ExitTestRequire(ProfitBudgetAvailable(remaining,error)==1 && MathAbs(remaining-50.0)<1e-8,"confirmed cancel did not release reserve")) return;
+   g_day--;
+   if(!ExitTestRequire(ProfitBudgetAvailable(remaining,error)==-1 && error=="UnknownDayAnchor","unknown anchor was guessed")) return;
+   g_day=DayOf(g_now);
+   PrintFormat("CEXIT_TEST_EVENT|profit_budget|capacity=50|normalized_stop_volume=0.04|pending_volume=0.05|sequential_refused=1");
+   ExitTestFinish(true,"PROFIT_BUDGET_NATIVE_FLOOR_AND_ACKNOWLEDGED_EXPOSURE");
+  }
+
 void ExitFaultScenarioTick()
   {
    if(!MQLInfoInteger(MQL_TESTER) || In_TestExitScenario == 0 || g_test_exit_finished) return;
+   if(In_TestExitScenario == 9) { KnownSpecialLevelScenarioTick(); return; }
+   if(In_TestExitScenario == 10) { ProfitBudgetScenarioTick(); return; }
+   if(In_TestExitScenario == 6) { PartialReceiptScenarioTick(); return; }
+   if(In_TestExitScenario == 7 || In_TestExitScenario == 8) { EditReviewScenarioTick(); return; }
    if(g_test_exit_stage == 0)
      {
       // Fixture starts inside the normal session, not on the first quote
@@ -6225,13 +6848,16 @@ int OnInit()
      }
    if(!TestSppTargetPlanReset()) return INIT_FAILED;
    if(!TestBeRetargetContract()) return INIT_FAILED;
-   if(In_TestExitScenario < 0 || In_TestExitScenario > 5) return INIT_PARAMETERS_INCORRECT;
+   if(In_TestExitScenario < 0 || In_TestExitScenario > 10) return INIT_PARAMETERS_INCORRECT;
    if(In_TestExitScenario > 0
       && (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       return INIT_PARAMETERS_INCORRECT;
    if((ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE)
       != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
-      Print("UWAGA: konto NIE jest w trybie HEDGING — siatka nie odwzoruje silnika.");
+     {
+      Print("CONDUIT_XT: HEDGING is required; netting cannot reproduce basket/position semantics.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
 
    long maska = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
    if((maska & SYMBOL_FILLING_FOK) != 0)      g_fill_deal = ORDER_FILLING_FOK;
@@ -6253,7 +6879,7 @@ int OnInit()
    PrintFormat("BROKER_SPEC symbol=%s digits=%d point=%.8f tick_size=%.8f "
                "tick_value=%.8f contract=%.2f stops=%.8f freeze=%.8f "
                "vol_min=%.4f vol_step=%.4f vol_max=%.4f swap_mode=%d "
-               "swap_long=%.8f swap_short=%.8f swap3day=%d",
+               "swap_long=%.8f swap_short=%.8f swap3day=%d leverage=%d hedging=%d cash_digits=%d pending_limit=%d",
                _Symbol, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS),
                SymbolInfoDouble(_Symbol, SYMBOL_POINT),
                SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE),
@@ -6268,7 +6894,11 @@ int OnInit()
                (int)SymbolInfoInteger(_Symbol, SYMBOL_SWAP_MODE),
                SymbolInfoDouble(_Symbol, SYMBOL_SWAP_LONG),
                SymbolInfoDouble(_Symbol, SYMBOL_SWAP_SHORT),
-               (int)SymbolInfoInteger(_Symbol, SYMBOL_SWAP_ROLLOVER3DAYS));
+               (int)SymbolInfoInteger(_Symbol, SYMBOL_SWAP_ROLLOVER3DAYS),
+               (int)AccountInfoInteger(ACCOUNT_LEVERAGE),
+               AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING,
+               (int)AccountInfoInteger(ACCOUNT_CURRENCY_DIGITS),
+               (int)AccountInfoInteger(ACCOUNT_LIMIT_ORDERS));
    if(StringLen(In_DzienOd) > 0) g_dzien_od = (long)StringToTime(In_DzienOd) * 1000;
    if(StringLen(In_DzienDo) > 0) g_dzien_do = (long)StringToTime(In_DzienDo) * 1000;
    if(g_dzien_od > 0)
@@ -6277,7 +6907,7 @@ int OnInit()
    if(In_Diag)
       g_handle_diag = In_TestExitScenario > 0
          ? FileOpen("confirmed_exit_test_diag.csv", FILE_WRITE | FILE_CSV)
-         : FileOpen("conduit_xt_diag.csv", FILE_WRITE | FILE_CSV | FILE_COMMON);
+         : FileOpen(In_DiagFile, FILE_WRITE | FILE_CSV | FILE_COMMON | FILE_SHARE_READ);
    g_nb = 0; g_mi = 0; g_nph = 0; g_ndone = 0; g_nmap = 0;
    g_slhit_dnia = 0; g_slhit_pauza_do = LONG_MIN; g_rej_slhit = 0;
    g_rezim_miekki = false; g_wyciszen = 0;
@@ -6408,12 +7038,102 @@ void ZrzucLedgerBrokera()
      }
   }
 
+struct FinalPositionSnapshot
+  { ulong ticket; long side; double volume; double price; long ts; double sl; double tp; double profit; double swap; };
+struct FinalOrderSnapshot
+  { ulong ticket; long type; double volume; double price; long ts; double sl; double tp; };
+FinalPositionSnapshot g_final_positions[];
+FinalOrderSnapshot g_final_orders[];
+bool g_final_account_seen = false;
+double g_final_balance, g_final_equity, g_final_margin;
+long g_final_tick_ts = 0;
+
+void WriteDailyAccountSnapshot()
+  {
+   if(!g_final_account_seen || g_handle_diag == INVALID_HANDLE) return;
+   FileWrite(g_handle_diag, "DAY_END_ACCOUNT", (string)g_final_tick_ts,
+             DoubleToString(g_final_balance, 8), DoubleToString(g_final_equity, 8),
+             DoubleToString(g_final_margin, 8), (string)ArraySize(g_final_positions),
+             (string)ArraySize(g_final_orders));
+  }
+
+void CaptureFinalBrokerState()
+  {
+   if(!In_Diag || g_handle_diag == INVALID_HANDLE) return;
+   // The tester liquidates before OnDeinit. Capture the actual end-of-tick
+   // portfolio here; querying the account in OnDeinit would silently look flat.
+   if(g_final_account_seen && DayOf(g_now) != DayOf(g_final_tick_ts)) WriteDailyAccountSnapshot();
+   g_final_account_seen = true;
+   g_final_tick_ts = g_now;
+   g_final_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_final_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_final_margin = AccountInfoDouble(ACCOUNT_MARGIN);
+   ArrayResize(g_final_positions, PositionsTotal());
+   int n = 0;
+   for(int i = 0; i < PositionsTotal(); i++)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol
+         || PositionGetInteger(POSITION_MAGIC) != In_Magic) continue;
+      g_final_positions[n].ticket = t;
+      g_final_positions[n].side = PositionGetInteger(POSITION_TYPE);
+      g_final_positions[n].volume = PositionGetDouble(POSITION_VOLUME);
+      g_final_positions[n].price = PositionGetDouble(POSITION_PRICE_OPEN);
+      g_final_positions[n].ts = PositionGetInteger(POSITION_TIME_MSC);
+      g_final_positions[n].sl = PositionGetDouble(POSITION_SL);
+      g_final_positions[n].tp = PositionGetDouble(POSITION_TP);
+      g_final_positions[n].profit = PositionGetDouble(POSITION_PROFIT);
+      g_final_positions[n].swap = PositionGetDouble(POSITION_SWAP);
+      n++;
+     }
+   ArrayResize(g_final_positions, n);
+   ArrayResize(g_final_orders, OrdersTotal());
+   n = 0;
+   for(int i = 0; i < OrdersTotal(); i++)
+     {
+      ulong t = OrderGetTicket(i);
+      if(t == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol
+         || OrderGetInteger(ORDER_MAGIC) != In_Magic) continue;
+      g_final_orders[n].ticket = t;
+      g_final_orders[n].type = OrderGetInteger(ORDER_TYPE);
+      g_final_orders[n].volume = OrderGetDouble(ORDER_VOLUME_CURRENT);
+      g_final_orders[n].price = OrderGetDouble(ORDER_PRICE_OPEN);
+      g_final_orders[n].ts = OrderGetInteger(ORDER_TIME_SETUP_MSC);
+      g_final_orders[n].sl = OrderGetDouble(ORDER_SL);
+      g_final_orders[n].tp = OrderGetDouble(ORDER_TP);
+      n++;
+     }
+   ArrayResize(g_final_orders, n);
+  }
+
+void ZrzucStanBrokera()
+  {
+   if(!In_Diag || g_handle_diag == INVALID_HANDLE || !g_final_account_seen) return;
+   WriteDailyAccountSnapshot();
+   FileWrite(g_handle_diag, "FINAL_ACCOUNT", (string)g_now,
+             DoubleToString(g_bid, 8), DoubleToString(g_ask, 8),
+             DoubleToString(g_final_balance, 8), DoubleToString(g_final_equity, 8),
+             DoubleToString(g_final_margin, 8));
+   for(int i = 0; i < ArraySize(g_final_positions); i++)
+      FileWrite(g_handle_diag, "OPEN_POSITION", (string)g_final_positions[i].ticket,
+                (string)g_final_positions[i].side, DoubleToString(g_final_positions[i].volume, 8),
+                DoubleToString(g_final_positions[i].price, 8), (string)g_final_positions[i].ts,
+                DoubleToString(g_final_positions[i].sl, 8), DoubleToString(g_final_positions[i].tp, 8),
+                DoubleToString(g_final_positions[i].profit, 8), DoubleToString(g_final_positions[i].swap, 8));
+   for(int i = 0; i < ArraySize(g_final_orders); i++)
+      FileWrite(g_handle_diag, "OPEN_ORDER", (string)g_final_orders[i].ticket,
+                (string)g_final_orders[i].type, DoubleToString(g_final_orders[i].volume, 8),
+                DoubleToString(g_final_orders[i].price, 8), (string)g_final_orders[i].ts,
+                DoubleToString(g_final_orders[i].sl, 8), DoubleToString(g_final_orders[i].tp, 8));
+  }
+
 void OnDeinit(const int reason)
   {
    // Ostatnia migawka planu po wszystkich edycjach/relotach. x_diff porównuje
    // ją z finalnym `koszyki.json`, zamiast mieszać początkowy plan EA z
    // końcowym stanem Rust.
    for(int bi = 0; bi < g_nb; bi++) DiagKoszyk(bi, "FINAL");
+   ZrzucStanBrokera();
    ZrzucWyniki();
    ZrzucLedgerBrokera();
    if(g_handle_diag != INVALID_HANDLE) FileClose(g_handle_diag);
@@ -6422,6 +7142,9 @@ void OnDeinit(const int reason)
                (int)g_cnt_reject, (int)g_merges);
    for(int i = 0; i < g_nkod; i++)
       PrintFormat("  ODRZUCENIE BROKERA kod=%d razy=%d", g_kod[i], (int)g_kod_n[i]);
+   for(int i = 0; i < g_nkod; i++)
+      if(g_kod[i] == TRADE_RETCODE_LIMIT_ORDERS)
+         PrintFormat("BROKER_PENDING_LIMIT rejected=%d account_limit=%d", (int)g_kod_n[i], (int)AccountInfoInteger(ACCOUNT_LIMIT_ORDERS));
    PrintFormat("  MIN_EQUITY=%.2f", g_min_equity);
    PrintFormat("EQ_STAT hi=%.2f lo=%.2f bal=%.2f",
                (g_eq_hi < -1e17 ? AccountInfoDouble(ACCOUNT_BALANCE) : g_eq_hi),
@@ -6486,7 +7209,7 @@ void OnTick()
    g_bid = tk.bid; g_ask = tk.ask;
    g_now = (long)tk.time_msc;
    if(In_TestExitScenario > 0)
-     { if(g_now <= 0) g_now = (long)tk.time * 1000; ExitFaultScenarioTick(); return; }
+     { if(g_now <= 0) g_now = (long)tk.time * 1000; ExitFaultScenarioTick(); CaptureFinalBrokerState(); return; }
    SrNaTicku(g_now, (g_bid + g_ask) * 0.5);
    if(g_now <= 0) g_now = (long)tk.time * 1000;
 
@@ -6502,6 +7225,7 @@ void OnTick()
    // 4. rekoncyliacja (fill pending->pozycja, tp_stage_from_broker_fill)
    OdswiezBilety();
    RetryConfirmedExits();
+   RetrySourceCancellations();
    CoverLateFills();
    // 6. pauza po serii strat
    AktualizujSerie();
@@ -6532,6 +7256,7 @@ void OnTick()
       g_doba_zamknieta = true;
       g_powod_zamk = "EOD";
       CloseEverything();
+      CaptureFinalBrokerState();
       return;
      }
 
@@ -6580,7 +7305,6 @@ void OnTick()
    // pendingi PRZED OnTick, teraz zakończyło się CAŁE zarządzanie tickiem.
    // Nowa wiadomość nie może dostać ponownego TP/TTL/rearm na tym ticku.
    if(In_LiveTickOrderStrict) PrzetworzWiadomosciCzasu();
+   CaptureFinalBrokerState();
   }
 //+------------------------------------------------------------------+
-
-

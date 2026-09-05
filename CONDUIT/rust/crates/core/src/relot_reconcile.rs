@@ -39,6 +39,9 @@ impl Engine {
     /// Replanning may reclaim only this basket's modifiable PENDING risk.
     /// Open positions, frozen orders and other baskets still consume the cap.
     pub(super) fn relot_portfolio_budget<B: Broker>(&self, b: &B, id: u32) -> Option<f64> {
+        match crate::profit_budget::available(&self.cfg,(&self.stats).into(),b,Some(id)) {
+            Ok(Some(v))=>return Some(v.remaining), Err(_)=>return Some(0.0), Ok(None)=>{}
+        }
         if self.cfg.max_portfolio_risk_pct <= 0.0 { return None; }
         let cap = self.stats.equity.max(0.0) * self.cfg.max_portfolio_risk_pct / 100.0;
         let pos: f64 = b.positions().iter().chain(b.ukryte_pozycje())

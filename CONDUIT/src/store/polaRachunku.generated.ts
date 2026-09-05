@@ -1,16 +1,12 @@
 /* PLIK GENEROWANY — NIE EDYTOWAĆ RĘCZNIE.
    Źródło: rust/crates/core/src/wielosilnik.rs (POLA_RACHUNKU)
    Generator: narzedzia/pola_rachunku.mjs
-   Pól w Ruście: 54 · zna je panel: 46
-
-   Pola rachunku, których panel nie ma w `Settings` (żyją tylko po stronie
-   serwera): expo_cap_pct, sim_margin_check_on_fill, sim_validate_pending_stops, sim_margin_at_market, expo_cap_ml_pct, expo_cap_close, expo_cap_s, lot_base
+   Pól w Ruście: 54 · zna je panel: 54
+   Pola wyłącznie po stronie serwera: brak
 */
-
 import type { Settings } from "@/types";
 
-/** Pola, które opisują RACHUNEK — jedna wartość dla całego bota.
- *  Wszystko poza tą listą silnik bierze z PRESETU NOGI. */
+/** Wspólna własność rachunku; preset nogi nie nadpisuje tych pól. */
 export const POLA_RACHUNKU = [
   "close_receipt_reconcile",
   "closed_profit_net_costs",
@@ -36,6 +32,13 @@ export const POLA_RACHUNKU = [
   "server_tz_offset_h",
   "stop_out_level_pct",
   "margin_call_level_pct",
+  "expo_cap_pct",
+  "sim_margin_check_on_fill",
+  "sim_validate_pending_stops",
+  "sim_margin_at_market",
+  "expo_cap_ml_pct",
+  "expo_cap_close",
+  "expo_cap_s",
   "mt5_autostart",
   "mt5_watchdog",
   "mt5_health_interval_s",
@@ -54,16 +57,16 @@ export const POLA_RACHUNKU = [
   "ai_model",
   "ai_decision_interval_s",
   "ai_replaces_management",
+  "lot_base",
   "odlicz_kredyt",
   "credit_balance_separate",
   "kredyt_reczny",
   "konto_dzwignia",
 ] as const satisfies readonly (keyof Settings)[];
 
-/** Nakładka „pola rachunku z dokumentu panelu" — odpowiednik
- *  `wielosilnik::ustawienia_formatu` po stronie frontu. */
+/** Account overlay corresponding to wielosilnik::ustawienia_formatu. */
 export function polaRachunkuZ(doc: Settings): Partial<Settings> {
   const out: Record<string, unknown> = {};
-  for (const k of POLA_RACHUNKU) out[k] = doc[k];
+  for (const key of POLA_RACHUNKU) out[key] = doc[key];
   return out as Partial<Settings>;
 }

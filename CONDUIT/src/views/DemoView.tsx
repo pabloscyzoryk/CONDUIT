@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
@@ -111,7 +112,7 @@ function Kandydat({
         <b className="truncate">{c.name}</b>
         <Badge tone={c.role === "ticks" ? "accent" : "info"}>{RODZAJ[c.kind] ? t(RODZAJ[c.kind]) : c.kind}</Badge>
         {!c.usable && (
-          <Badge tone="warn" title={c.note}>
+          <Badge tone="warn" title={tSilnik(c.note)}>
             {t("demo.unusable")}
           </Badge>
         )}
@@ -131,7 +132,7 @@ function Kandydat({
           <span className="hint">{t("demo.clockOf", { v: ZEGAR[c.clock] ? t(ZEGAR[c.clock]) : c.clock })}</span>
         )}
       </div>
-      {c.note && <div className="demo__candnote">{c.note}</div>}
+      {c.note && <div className="demo__candnote">{tSilnik(c.note)}</div>}
     </button>
   );
 }
@@ -588,10 +589,10 @@ export function DemoView() {
           {demo.error && (
             <div className="demo__err">
               <Icon name="alert" size={14} />
-              <span>{demo.error}</span>
+              <span>{tSilnik(demo.error)}</span>
             </div>
           )}
-          {demo.note && !demo.error && <div className="demo__note">{demo.note}</div>}
+          {demo.note && !demo.error && <div className="demo__note">{tSilnik(demo.note)}</div>}
           {demo.running && (
             <div className="demo__hintbox">
               <Icon name="info" size={13} />

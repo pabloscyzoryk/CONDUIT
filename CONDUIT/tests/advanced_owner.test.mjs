@@ -28,12 +28,12 @@ const fn = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text
 const js = ts.transpileModule(fn.getText(tree), { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
 const createElement = (type, props, ...children) => ({ type, props: { ...props, children } });
 const render = (app, editor = null, blocked = false) => new Function(
-  'React', 'useApp', 'useT', 'useState', 'useMemo', 'useContext', 'EdycjaPresetuCtx',
+  'React', 'useApp', 'useT', 'useState', 'useMemo', 'useContext', 'EdycjaPresetuCtx', 'useEffect', 'matchesSearch',
   'DEFAULT_SETTINGS', 'COVERED_KEYS', 'powiazPoleUstawien', 'Card', 'TextInput', 'Empty', 'Checkbox', 'NumberInput',
   `${js};return AdvancedSection;`,
 )(
   { createElement }, () => app, () => (k, args) => k + (args ? JSON.stringify(args) : ''),
-  initial => [initial, () => {}], f => f(), () => editor, {}, DEFAULT_SETTINGS,
+  initial => [initial, () => {}], f => f(), () => editor, {}, () => {}, load('lib/search').matchesSearch, DEFAULT_SETTINGS,
   COVERED_KEYS, powiazPoleUstawien, 'Card', 'TextInput', 'Empty', 'Checkbox', 'NumberInput',
 )({ zablokowane: blocked });
 function flatten(node) {
@@ -152,8 +152,8 @@ test('actual owner-tagged preset state rejects stale documents and preserves an 
   let state = { nazwa: 'PRESET-A', doc: { ...DEFAULT_SETTINGS, day_target_pct: 1 } };
   const calls = [];
   const callbackJs = compile(variable('zapiszPolePresetu').getText(tree));
-  const oldSave = new Function('useCallback', 'setPresetDoc', 'api', 'presetKonfig', `${callbackJs};return zapiszPolePresetu;`)(
-    f => f, f => { state = f(state); }, { savePresetSettings(name, patch) { calls.push([name, patch]); } }, 'PRESET-B');
+  const oldSave = new Function('useCallback', 'setPresetDoc', 'saveQueue', 'presetKonfig', 'reportPresetError', `${callbackJs};return zapiszPolePresetu;`)(
+    f => f, f => { state = f(state); }, { current: new (load('store/presetWriteQueue').PresetWriteQueue)((name, patch) => { calls.push([name, patch]); return Promise.resolve({ ok: true }); }) }, 'PRESET-B', () => {});
   oldSave('day_target_pct', 9);
   assert.equal(state.doc.day_target_pct, 1, 'late B save cannot overwrite A document');
   assert.deepEqual(calls, [['PRESET-B', { day_target_pct: 9 }]]);

@@ -53,7 +53,13 @@ pub const KRYTERIA: &[Kryterium] = &[
         format: Format::Dolary,
     },
     Kryterium {
-        etykieta: "% dni dodatnich",
+        etykieta: "% dodatnich dni rynkowych (equity)",
+        pole: "positive_market_days_pct",
+        lepiej: Lepiej::Wiecej,
+        format: Format::Procent,
+    },
+    Kryterium {
+        etykieta: "% dodatnich dni z zamknięciami (legacy)",
         pole: "win_days_pct",
         lepiej: Lepiej::Wiecej,
         format: Format::Procent,
@@ -71,7 +77,13 @@ pub const KRYTERIA: &[Kryterium] = &[
         format: Format::Procent,
     },
     Kryterium {
-        etykieta: "najgorszy dzień",
+        etykieta: "najgorszy dzień rynkowy (equity)",
+        pole: "worst_market_day",
+        lepiej: Lepiej::Wiecej,
+        format: Format::Dolary,
+    },
+    Kryterium {
+        etykieta: "najgorszy dzień z zamknięciami (legacy)",
         pole: "worst_day",
         lepiej: Lepiej::Wiecej,
         format: Format::Dolary,
@@ -131,6 +143,18 @@ pub const KRYTERIA: &[Kryterium] = &[
         format: Format::Sztuki,
     },
     Kryterium {
+        etykieta: "liczba koszyków",
+        pole: "baskets",
+        lepiej: Lepiej::Wiecej,
+        format: Format::Sztuki,
+    },
+    Kryterium {
+        etykieta: "% wykorzystanych sygnałów",
+        pole: "signal_use_pct",
+        lepiej: Lepiej::Wiecej,
+        format: Format::Procent,
+    },
+    Kryterium {
         etykieta: "WSZYSTKIE STATYSTYKI",
         pole: "",
         lepiej: Lepiej::Wiecej,
@@ -145,15 +169,17 @@ pub const KRYTERIA: &[Kryterium] = &[
 /// konta, ma przegrać z presetem zarabiającym mniej, ale wszędzie równym.
 const OSIE_LACZNE: &[(&str, Lepiej)] = &[
     ("total_profit", Lepiej::Wiecej),
-    ("win_days_pct", Lepiej::Wiecej),
+    ("positive_market_days_pct", Lepiej::Wiecej),
     ("profit_factor", Lepiej::Wiecej),
     ("max_dd_pct", Lepiej::Mniej),
-    ("worst_day", Lepiej::Wiecej),
+    ("worst_market_day", Lepiej::Wiecej),
     ("median_day", Lepiej::Wiecej),
     ("win_rate_bez_be", Lepiej::Wiecej),
     ("sharpe", Lepiej::Wiecej),
     ("max_losing_streak_days", Lepiej::Mniej),
     ("min_equity", Lepiej::Wiecej),
+    ("baskets", Lepiej::Wiecej),
+    ("signal_use_pct", Lepiej::Wiecej),
 ];
 
 /// Jeden policzony preset.
@@ -167,6 +193,11 @@ pub struct Wynik {
 impl Wynik {
     /// Liczba spod klucza; `None`, gdy pola nie ma albo nie jest liczbą.
     pub fn liczba(&self, klucz: &str) -> Option<f64> {
+        if klucz == "signal_use_pct" {
+            let seen = self.liczba("signals_seen")?;
+            let taken = self.liczba("signals_taken")?;
+            return (seen > 0.0).then_some(taken / seen * 100.0);
+        }
         self.pola
             .get(klucz)
             .and_then(|v| v.as_f64())
@@ -227,10 +258,14 @@ impl Wynik {
 
     /// Wartość jako napis do pokazania obok nazwy.
     pub fn napis(&self, k: &Kryterium) -> String {
+        self.napis_w_jezyku(k, crate::language::Language::Pl)
+    }
+
+    pub fn napis_w_jezyku(&self, k: &Kryterium, language: crate::language::Language) -> String {
         match self.wg(k) {
             None => "—".into(),
             Some(v) => match k.format {
-                Format::Dolary => format!("{} $", crate::pl_liczba(v, 2)),
+                Format::Dolary => format!("{} $", language.number(v, 2)),
                 Format::Procent => format!("{v:.1} %"),
                 Format::Liczba => format!("{v:.2}"),
                 Format::Sztuki => format!("{}", v.round() as i64),
@@ -246,16 +281,29 @@ impl Wynik {
     /// `preserve_order` układa klucze alfabetycznie, więc `total_profit`
     /// lądowałby gdzieś w ogonie, za `avg_hold_min` i `bes`.
     pub fn wiersze(&self) -> Vec<(String, String)> {
+        self.wiersze_w_jezyku(crate::language::Language::Pl)
+    }
+
+    pub fn wiersze_w_jezyku(&self, language: crate::language::Language) -> Vec<(String, String)> {
         let mut w = Vec::new();
         let mut kolejnosc: Vec<&str> = KRYTERIA
             .iter()
             .map(|k| k.pole)
             .filter(|p| !p.is_empty())
             .collect();
+        const SOURCE_COUNTS: [&str; 3] = [
+            "known_entry_sources",
+            "known_full_entry_sources",
+            "entry_sources_first_seen_as_edit",
+        ];
+        kolejnosc.extend(SOURCE_COUNTS);
         for k in self.pola.keys() {
             // Data jest pokazywana w TYM SAMYM wierszu co wartość
             // `worst_day`, a nie jako oderwana metryka na końcu tabeli.
-            if k != "worst_day_date" && !kolejnosc.contains(&k.as_str()) {
+            if k != "worst_day_date"
+                && k != "worst_market_day_date"
+                && !kolejnosc.contains(&k.as_str())
+            {
                 kolejnosc.push(k.as_str());
             }
         }
@@ -264,8 +312,30 @@ impl Wynik {
             .filter_map(|k| self.pola.get_key_value(*k))
             .collect();
         for (k, v) in pary {
+            if k == "odrzuty" {
+                if let Some(rejections) = v.as_object() {
+                    for (reason, count) in rejections {
+                        if let Some(count) = count.as_u64() {
+                            w.push((
+                                format!(
+                                    "{} · {}",
+                                    language.text("odrzucone", "rejected"),
+                                    crate::language::label(language, reason)
+                                ),
+                                language.number(count as f64, 0),
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
             let mut txt = match v {
-                serde_json::Value::Bool(b) => (if *b { "tak" } else { "nie" }).to_string(),
+                serde_json::Value::Bool(b) => (if *b {
+                    language.text("tak", "yes")
+                } else {
+                    language.text("nie", "no")
+                })
+                .to_string(),
                 serde_json::Value::Number(n) => {
                     let f = n.as_f64().unwrap_or(0.0);
                     if !f.is_finite() {
@@ -277,9 +347,9 @@ impl Wynik {
                         // prawie zero", więc skracamy ją do wykładnika.
                         format!("{f:.2e}")
                     } else if f.fract() == 0.0 {
-                        crate::pl_liczba(f, 0)
+                        language.number(f, 0)
                     } else {
-                        crate::pl_liczba(f, 2)
+                        language.number(f, 2)
                     }
                 }
                 serde_json::Value::String(s) => s.clone(),
@@ -287,15 +357,36 @@ impl Wynik {
                 // ma być czytelna, a nie kompletna; od kompletu jest plik
                 _ => continue,
             };
-            if k.as_str() == "worst_day" {
-                if let Some(date) = self.pola.get("worst_day_date").and_then(|v| v.as_str()) {
+            if k.as_str() == "worst_day" || k.as_str() == "worst_market_day" {
+                let date_key = if k == "worst_market_day" {
+                    "worst_market_day_date"
+                } else {
+                    "worst_day_date"
+                };
+                if let Some(date) = self.pola.get(date_key).and_then(|v| v.as_str()) {
                     if !date.is_empty() {
                         txt.push_str("  ·  ");
                         txt.push_str(date);
                     }
                 }
             }
-            w.push((k.clone(), txt));
+            let label = KRYTERIA
+                .iter()
+                .find(|item| item.pole == k)
+                .map(|item| item.etykieta)
+                .unwrap_or(k);
+            w.push((crate::language::label(language, label).to_string(), txt));
+        }
+        for key in SOURCE_COUNTS {
+            if self.liczba(key).is_none() {
+                w.push((crate::language::label(language, key).into(), "—".into()));
+            }
+        }
+        if let Some(usage) = self.liczba("signal_use_pct") {
+            w.push((
+                crate::language::label(language, "% wykorzystanych sygnałów").into(),
+                format!("{} %", language.number(usage, 2)),
+            ));
         }
         w
     }
@@ -430,6 +521,18 @@ fn ocena_laczna(wyniki: &mut [Wynik]) {
     let mut ile_osi = 0usize;
 
     for (pole, lepiej) in OSIE_LACZNE {
+        // A legacy-only file keeps its historical ranking. If any market-day
+        // result is present, absence stays unknown rather than borrowing a
+        // different denominator from closed-trade days.
+        let legacy = match *pole {
+            "positive_market_days_pct" => Some("win_days_pct"),
+            "worst_market_day" => Some("worst_day"),
+            _ => None,
+        };
+        let pole = match legacy {
+            Some(legacy) if !wyniki.iter().any(|w| w.liczba(pole).is_some()) => legacy,
+            _ => *pole,
+        };
         let wartosci: Vec<Option<f64>> = wyniki.iter().map(|w| w.liczba(pole)).collect();
         let obecne: Vec<f64> = wartosci.iter().flatten().copied().collect();
         if obecne.len() < 2 {
@@ -500,10 +603,8 @@ mod testy {
     use super::*;
 
     fn temp_dir(suffix: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "conduit-przesiane-{}-{suffix}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("conduit-przesiane-{}-{suffix}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -542,6 +643,63 @@ mod testy {
         let k = kolejnosc(&v, &kryt("total_profit"));
         assert_eq!(v[k[0]].nazwa, "b");
         assert_eq!(v[k[2]].nazwa, "a");
+    }
+
+    #[test]
+    fn wyniki_rynkowe_nie_pozyczaja_mianownika_legacy() {
+        let mut a = w("rynkowy-80", 1.0, 100.0, false);
+        a.pola
+            .insert("positive_market_days_pct".into(), serde_json::json!(80.0));
+        a.pola
+            .insert("worst_market_day".into(), serde_json::json!(-20.0));
+        let mut b = w("rynkowy-90", 1.0, 10.0, false);
+        b.pola
+            .insert("positive_market_days_pct".into(), serde_json::json!(90.0));
+        b.pola
+            .insert("worst_market_day".into(), serde_json::json!(-10.0));
+        let legacy = w("legacy-100", 1.0, 100.0, false);
+        assert_eq!(legacy.liczba("positive_market_days_pct"), None);
+        let mut v = vec![a, b, legacy];
+        ocena_laczna(&mut v);
+        assert!(v[1].laczna > v[0].laczna);
+        assert!(v[1].laczna > v[2].laczna);
+    }
+
+    #[test]
+    fn wykorzystanie_sygnalow_wymaga_obu_licznikow_i_dodatniego_mianownika() {
+        let mut row = w("pokrycie", 1.0, 80.0, false);
+        assert_eq!(row.liczba("signal_use_pct"), None);
+        row.pola
+            .insert("signals_taken".into(), serde_json::json!(120));
+        assert_eq!(row.liczba("signal_use_pct"), None);
+        row.pola
+            .insert("signals_seen".into(), serde_json::json!(200));
+        assert_eq!(row.liczba("signal_use_pct"), Some(60.0));
+        row.pola.insert("signals_seen".into(), serde_json::json!(0));
+        assert_eq!(row.liczba("signal_use_pct"), None);
+    }
+
+    #[test]
+    fn archived_source_counts_are_unknown_and_nested_rejections_are_visible() {
+        let mut row = w("history", 1.0, 80.0, false);
+        let before = row.wiersze_w_jezyku(crate::language::Language::En);
+        assert!(before.contains(&("known entry sources".into(), "—".into())));
+        row.pola
+            .insert("known_entry_sources".into(), serde_json::json!(100));
+        row.pola.insert(
+            "entry_sources_first_seen_as_edit".into(),
+            serde_json::json!(7),
+        );
+        row.pola.insert(
+            "odrzuty".into(),
+            serde_json::json!({"EditOrphan":7,"BudgetStop":4}),
+        );
+        let after = row.wiersze_w_jezyku(crate::language::Language::En);
+        assert!(after.contains(&("known entry sources".into(), "100".into())));
+        assert!(after.contains(&("known full entry sources".into(), "—".into())));
+        assert!(after.contains(&("rejected · edit without a known entry".into(), "7".into())));
+        assert!(after.contains(&("rejected · BudgetStop".into(), "4".into())));
+        assert!(!after.contains(&("known entry sources".into(), "—".into())));
     }
 
     /// Sedno reguły: przebieg z najwyższym zyskiem, ale wyzerowanym kontem,
@@ -701,7 +859,10 @@ mod testy {
         assert!(result.approximate);
         assert_eq!(result.quick_tick_stride, Some(20));
         assert!(!result.coronation_eligible);
-        assert_eq!(result.warning.as_deref(), Some("APPROXIMATE SCREENING ONLY"));
+        assert_eq!(
+            result.warning.as_deref(),
+            Some("APPROXIMATE SCREENING ONLY")
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

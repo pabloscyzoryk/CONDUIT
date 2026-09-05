@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { useEffect, useState } from "react";
 import { Badge, Button, Card, Icon, Select } from "@/components/ui";
 import { api, type ExportIndex } from "@/store/transport";
@@ -109,7 +110,7 @@ export function EksportPelny() {
       <div className="col">
         {blad && (
           <div className="hint" style={{ color: "var(--short-text)" }}>
-            {t("exp.err.index", { e: blad })}
+            {t("exp.err.index", { e: tSilnik(blad) })}
           </div>
         )}
 

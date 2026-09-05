@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, Icon, TextInput } from "@/components/ui";
 import { TradingChart } from "./TradingChart";
@@ -5,7 +6,7 @@ import { useApp } from "@/store/AppStore";
 import { api } from "@/store/transport";
 import { searchSymbols, SYMBOLS } from "@/data/symbols";
 import { num, pct, toneOf } from "@/lib/format";
-import { useT, RichT } from "@/i18n";
+import { useT, RichT, useLanguage } from "@/i18n";
 
 /**
  * Sekcja wykresow — odpowiednik karty "Wykresy" z bot.py:
@@ -15,6 +16,7 @@ import { useT, RichT } from "@/i18n";
 export function ChartsSection() {
   const app = useApp();
   const t = useT();
+  const { lang } = useLanguage();
   // One runtime instrument shared with the ticker, health indicator and ticket.
   // AUTO preferences deliberately contain no symbol; a watchlist is not a bind.
   const botSymbol = app.primary.symbol;
@@ -53,7 +55,7 @@ export function ChartsSection() {
     };
   }, [q, open]);
   const results = useMemo(() => {
-    const statyczne = searchSymbols(q).map((s) => s.symbol);
+    const statyczne = [...searchSymbols(q), ...SYMBOLS.filter(s => tSilnik(s.name).toLowerCase().includes(q.trim().toLowerCase()))].map(s => s.symbol);
     const mostowe = zMostu.map((s) => s.name);
     const zestaw = [...new Set([...mostowe, ...statyczne])];
     const ql = q.trim().toLowerCase();
@@ -61,7 +63,7 @@ export function ChartsSection() {
       zestaw.unshift(botSymbol);
     }
     return zestaw.slice(0, 20);
-  }, [q, zMostu, botSymbol]);
+  }, [q, zMostu, botSymbol, lang]);
 
   const add = (s: string) => {
     setPanels((p) => (p.includes(s) ? p : [...p, s]));
@@ -83,7 +85,7 @@ export function ChartsSection() {
   return (
     <div className="charts">
       <Card
-        title="Wykresy"
+        title={t("charts.title")}
         icon="chart"
         subtitle={t("charts.instruments", { n: panels.length })}
         accent="var(--accent)"
@@ -96,7 +98,7 @@ export function ChartsSection() {
                 setQ(v);
                 setOpen(true);
               }}
-              placeholder="Szukaj instrumentu (BTC, XAG, EURUSD…)"
+              placeholder={t("charts.search")}
               icon="search"
               size="sm"
               style={{ width: 260 }}
@@ -121,12 +123,12 @@ export function ChartsSection() {
                             e.stopPropagation();
                             app.toggleFavorite(sym);
                           }}
-                          title="ulubiony"
+                          title={t("charts.favorite")}
                         >
                           <Icon name={app.favorites.includes(sym) ? "star-filled" : "star"} size={12} />
                         </span>
                         <b>{sym}</b>
-                        <span className="truncate hint">{meta?.name ?? (sym === botSymbol ? "instrument bota" : "z mostu MT5")}</span>
+                        <span className="truncate hint">{meta ? tSilnik(meta.name) : (sym === botSymbol ? t("charts.botSymbol") : t("charts.bridge"))}</span>
                         <Badge tone="muted">{meta?.group ?? "broker"}</Badge>
                         {qt && (
                           <span className={`num ${toneOf(qt.change)}`} style={{ fontSize: "var(--fs-2xs)" }}>
@@ -173,7 +175,7 @@ export function ChartsSection() {
                   </span>
                 </>
               )}
-              {sym === botSymbol && <Badge tone="accent">instrument bota</Badge>}
+              {sym === botSymbol && <Badge tone="accent">{t("charts.botSymbol")}</Badge>}
             </span>
           }
           icon="chart"
@@ -185,7 +187,7 @@ export function ChartsSection() {
                 size="sm"
                 variant="ghost"
                 icon={app.favorites.includes(sym) ? "star-filled" : "star"}
-                title="ulubiony"
+                title={t("charts.favorite")}
                 onClick={() => app.toggleFavorite(sym)}
               />
               <Button size="sm" variant="ghost" icon="arrow-up" title={t("charts.up")} onClick={() => move(sym, -1)} disabled={i === 0} />
@@ -198,7 +200,7 @@ export function ChartsSection() {
                 disabled={i === panels.length - 1}
               />
               {sym !== botSymbol && (
-                <Button size="sm" variant="ghost" icon="x" title="zamknij panel" onClick={() => setPanels((p) => p.filter((x) => x !== sym))} />
+                <Button size="sm" variant="ghost" icon="x" title={t("charts.close")} onClick={() => setPanels((p) => p.filter((x) => x !== sym))} />
               )}
             </>
           }
@@ -220,13 +222,13 @@ export function ChartsSection() {
         </Card>
       ))}
 
-      <p className="hint charts__legend">
-        <Icon name="info" size={12} />{" "}
-        <RichT
+      <details className="context-help">
+        <summary>{t("charts.help.title")} · {app.settings.one_click ? t("charts.help.oneClick") : t("charts.help.confirm")}</summary>
+        <p className="hint"><RichT
           k="charts.help"
           vars={{ mode: app.settings.one_click ? t("charts.help.oneClick") : t("charts.help.confirm") }}
-        />
-      </p>
+        /></p>
+      </details>
     </div>
   );
 }

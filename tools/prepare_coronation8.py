@@ -110,7 +110,7 @@ def main():
                         "--sim-limit-price-improvement", "--sim-price-digits", "2",
                         "--sim-new-pending-sl-next-tick", "--sim-native-swap-cash-digits", "2",
                         "--live-telegram-ingress", "--rozgrzewka-h", "72",
-                        "--quick-tick-stride", "1", "--no-charts", "--out", str(result)]
+                        "--quick-tick-stride", "1", "--no-charts", "--dump-trades", "--out", str(result)]
                 jobs.append({"id": identity, "argv": argv, "result_dir": str(result),
                              "threads": worker_threads, "expected_candidates": len(loaded),
                              "window": window, "deposit": deposit, "cap_mode": label})
@@ -130,6 +130,7 @@ def main():
                          "week": "calendar Monday through Sunday, clipped to the full window",
                          "source_state": args.source_state,
                          "market_warmup_hours": 72, "warmup_trading": False,
+                         "best_day_exclusion": "only max lot 0.01; never subtract days from compounding at higher caps",
                          "arithmetic": "lot_max=0; strategy sizing, margin and risk rules remain active; no claim of broker-executable unlimited orders",
                          "coronation_eligible_without_owner_decision": False},
             "windows": windows}

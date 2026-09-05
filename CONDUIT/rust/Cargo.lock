@@ -788,6 +788,7 @@ dependencies = [
  "parking_lot",
  "qrcode",
  "rayon",
+ "regex",
  "rust-embed",
  "serde",
  "serde_json",

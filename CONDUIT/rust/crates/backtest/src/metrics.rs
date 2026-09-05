@@ -16,6 +16,103 @@ pub struct DayStat {
     pub signals: u32,
 }
 
+/// Retrospective concentration diagnostics, never a rule selecting future days.
+/// Removing a day's PnL does not replay later position sizing or order state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DailyConcentration {
+    pub observed_days: u32,
+    pub invalid_profit_days: u32,
+    pub positive_days: u32,
+    pub sum_daily_profit: f64,
+    pub positive_daily_profit: f64,
+    pub best_market_day: f64,
+    pub best_market_day_date: String,
+    pub median_market_day: f64,
+    /// Owner's protocol: exclusions are available only at max lot 0.01.
+    pub fixed_lot_exclusion_valid: bool,
+    pub profit_without_best_1: Option<f64>,
+    pub profit_without_best_3: Option<f64>,
+    pub profit_without_best_5: Option<f64>,
+    pub best_1_share_positive_pct: Option<f64>,
+    pub best_3_share_positive_pct: Option<f64>,
+    pub effective_positive_days: Option<f64>,
+    pub return_observations: u32,
+    pub unavailable_return_days: u32,
+    pub median_daily_return_pct: Option<f64>,
+    pub worst_5_observed_days_profit: Option<f64>,
+}
+
+pub fn daily_concentration(daily: &[DayStat]) -> DailyConcentration {
+    let valid: Vec<_> = daily.iter().filter(|d| d.profit.is_finite()).collect();
+    let mut profits: Vec<_> = valid.iter().map(|d| d.profit).collect();
+    let mut positive: Vec<_> = profits.iter().copied().filter(|p| *p > 0.0).collect();
+    positive.sort_by(|a, b| b.total_cmp(a));
+    let total: f64 = profits.iter().sum();
+    let gross: f64 = positive.iter().sum();
+    let best: f64 = positive.iter().take(1).sum();
+    let best3: f64 = positive.iter().take(3).sum();
+    let mut result = DailyConcentration {
+        observed_days: daily.len() as u32,
+        invalid_profit_days: (daily.len() - valid.len()) as u32,
+        positive_days: positive.len() as u32,
+        sum_daily_profit: total,
+        positive_daily_profit: gross,
+        median_market_day: median(&mut profits),
+        ..DailyConcentration::default()
+    };
+    if let Some(day) = valid.iter().max_by(|a, b| a.profit.total_cmp(&b.profit)) {
+        result.best_market_day = day.profit;
+        result.best_market_day_date = day.date.clone();
+    }
+    if gross > 0.0 {
+        result.best_1_share_positive_pct = Some(100.0 * best / gross);
+        result.best_3_share_positive_pct = Some(100.0 * best3 / gross);
+        let concentration: f64 = positive.iter().map(|p| (p / gross).powi(2)).sum();
+        result.effective_positive_days = Some(1.0 / concentration);
+    }
+    let mut returns: Vec<f64> = valid.iter().filter_map(|d| {
+        if !d.start_equity.is_finite() || d.start_equity <= 0.0 {
+            return None;
+        }
+        let value = d.profit / d.start_equity * 100.0;
+        value.is_finite().then_some(value)
+    }).collect();
+    result.return_observations = returns.len() as u32;
+    result.unavailable_return_days = daily.len() as u32 - result.return_observations;
+    if !returns.is_empty() {
+        result.median_daily_return_pct = Some(median(&mut returns));
+    }
+    // Do not bridge an invalid row and pretend those observations were adjacent.
+    result.worst_5_observed_days_profit = daily.windows(5)
+        .filter(|days| days.iter().all(|d| d.profit.is_finite()))
+        .map(|days| days.iter().map(|d| d.profit).sum::<f64>())
+        .min_by(f64::total_cmp);
+    result
+}
+
+impl Metrics {
+    /// Max-lot qualification must come from the actual strategy configuration,
+    /// not a filename or a guess from the size of the resulting profit.
+    pub fn qualify_fixed_lot_daily_exclusion(&mut self, daily: &[DayStat], max_lot: f64) {
+        let Some(result) = self.daily_concentration.as_mut() else { return };
+        result.fixed_lot_exclusion_valid = false;
+        result.profit_without_best_1 = None;
+        result.profit_without_best_3 = None;
+        result.profit_without_best_5 = None;
+        if !max_lot.is_finite() || (max_lot - 0.01).abs() > 1e-12
+            || daily.is_empty() || result.invalid_profit_days > 0 {
+            return;
+        }
+        let mut positive: Vec<_> = daily.iter().map(|d| d.profit).filter(|p| *p > 0.0).collect();
+        positive.sort_by(|a, b| b.total_cmp(a));
+        result.fixed_lot_exclusion_valid = true;
+        result.profit_without_best_1 = Some(result.sum_daily_profit - positive.iter().take(1).sum::<f64>());
+        result.profit_without_best_3 = Some(result.sum_daily_profit - positive.iter().take(3).sum::<f64>());
+        result.profit_without_best_5 = Some(result.sum_daily_profit - positive.iter().take(5).sum::<f64>());
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Metrics {
@@ -65,6 +162,9 @@ pub struct Metrics {
     pub worst_market_day: f64,
     pub worst_market_day_date: String,
     pub max_losing_streak_days: u32,
+    /// All observed equity days, including floating-only and idle days.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_concentration: Option<DailyConcentration>,
 
     // --- ryzyko ---
     pub max_dd_abs: f64,
@@ -134,6 +234,16 @@ pub struct Metrics {
     pub signals_seen: u32,
     pub signals_taken: u32,
     pub baskets: u32,
+    /// Zero in historical summaries; one when entry-source observations were measured.
+    pub entry_source_observation_version: u32,
+    /// Distinct source identities whose actual configured parser requested an
+    /// entry, including the first known revision when NEW is unavailable.
+    pub known_entry_sources: u32,
+    /// Distinct identities that provided a complete Entry (bare NOW excluded).
+    pub known_full_entry_sources: u32,
+    /// Entry identities first encountered through EDIT rather than NEW.
+    /// This exposes missing source history instead of hiding it in utilization.
+    pub entry_sources_first_seen_as_edit: u32,
     pub rejected_stops: u64,
     pub market_instead_of_limit: u64,
 
@@ -335,6 +445,7 @@ pub fn compute(
     // --- dni ---
     m.days = daily.len() as u32;
     m.market_days = daily.len() as u32;
+    m.daily_concentration = (!daily.is_empty()).then(|| daily_concentration(daily));
     m.positive_market_days = daily.iter().filter(|d| d.profit > 0.0).count() as u32;
     m.negative_market_days = daily.iter().filter(|d| d.profit < 0.0).count() as u32;
     m.flat_market_days = daily.iter().filter(|d| d.profit == 0.0).count() as u32;
@@ -632,5 +743,61 @@ mod testy_zgodnosci {
         assert!((metrics.positive_market_days_pct - 100.0/3.0).abs() < 1e-10);
         assert_eq!(metrics.worst_market_day, -20.0);
         assert_eq!(metrics.worst_market_day_date, "synthetic-day-1");
+    }
+
+    fn concentration_days(profits: &[f64]) -> Vec<DayStat> {
+        profits.iter().enumerate().map(|(day, profit)| DayStat {
+            day: day as i64, date: format!("day-{day}"), start_equity: 600.0,
+            end_equity: 600.0 + profit, profit: *profit, max_dd: 0.0,
+            trades: 0, signals: 0,
+        }).collect()
+    }
+
+    #[test]
+    fn concentration_distinguishes_bonus_day_from_only_profitable_day() {
+        let healthy_days = concentration_days(&[10., 10., 1000., 10., 10.]);
+        let fragile_days = concentration_days(&[-10., -10., 1000., -10., -10.]);
+        let mut healthy_metrics = Metrics { daily_concentration: Some(daily_concentration(&healthy_days)), ..Metrics::default() };
+        let mut fragile_metrics = Metrics { daily_concentration: Some(daily_concentration(&fragile_days)), ..Metrics::default() };
+        healthy_metrics.qualify_fixed_lot_daily_exclusion(&healthy_days, 0.01);
+        fragile_metrics.qualify_fixed_lot_daily_exclusion(&fragile_days, 0.01);
+        let healthy = healthy_metrics.daily_concentration.unwrap();
+        let fragile = fragile_metrics.daily_concentration.unwrap();
+        assert_eq!(healthy.profit_without_best_1, Some(40.0));
+        assert_eq!(healthy.profit_without_best_3, Some(20.0));
+        assert_eq!(healthy.median_market_day, 10.0);
+        assert_eq!(fragile.profit_without_best_1, Some(-40.0));
+        assert_eq!(fragile.profit_without_best_3, Some(-40.0));
+        assert_eq!(fragile.median_market_day, -10.0);
+        assert_eq!(healthy.positive_days, 5, "floating-only days count too");
+    }
+
+    #[test]
+    fn concentration_normalizes_compounding_and_does_not_invent_empty_returns() {
+        let mut days = concentration_days(&[600., 1200., 2400., 4800.]);
+        for day in &mut days {
+            day.start_equity = day.profit;
+            day.end_equity = 2.0 * day.profit;
+        }
+        let result = daily_concentration(&days);
+        assert_eq!(result.median_daily_return_pct, Some(100.0));
+        assert_eq!(result.profit_without_best_1, None);
+        assert!(result.best_1_share_positive_pct.unwrap() > 50.0);
+        days[0].start_equity = 0.0;
+        assert_eq!(daily_concentration(&days).unavailable_return_days, 1);
+        let flat = daily_concentration(&concentration_days(&[0.0, 0.0]));
+        assert_eq!(flat.best_1_share_positive_pct, None);
+        assert_eq!(flat.effective_positive_days, None);
+        assert_eq!(flat.profit_without_best_1, None);
+        let mut metrics = Metrics { daily_concentration: Some(daily_concentration(&days)), ..Metrics::default() };
+        metrics.qualify_fixed_lot_daily_exclusion(&days, 0.01);
+        assert!(metrics.daily_concentration.as_ref().unwrap().fixed_lot_exclusion_valid);
+        for cap in [0.0, 0.1, 5.0, 10.0, f64::NAN] {
+            metrics.qualify_fixed_lot_daily_exclusion(&days, cap);
+            let result = metrics.daily_concentration.as_ref().unwrap();
+            assert!(!result.fixed_lot_exclusion_valid);
+            assert_eq!(result.profit_without_best_1, None);
+            assert_eq!(result.profit_without_best_3, None);
+        }
     }
 }

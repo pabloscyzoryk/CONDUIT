@@ -27,6 +27,10 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
     title: "Entries and zone",
     desc: "How the bot reads the signal's entry zone and when it enters at all.",
     fields: {
+      explicit_pending_until_cancel: {
+        label: "LIMIT/STOP SIGNALS VALID UNTIL CANCELED",
+        hint: "An explicit LIMIT/STOP signal does not expire by age, TTL, TP or RISK FREE. A CANCEL / NO LONGER VALID reply withdraws the signal. Account protection may still remove exposure; that does not cancel the source or promise automatic order restoration. Does not apply to a market signal for which the bot generates a limit grid.",
+      },
       auto_limit: {
         label: "AUTO LIMIT",
         hint:
@@ -41,17 +45,17 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       valid_till_tp2: {
         label: "VALID TILL TP2",
-        hint: "Pendings and entries live until TP2 instead of TP1.",
+        hint: "For ordinary signals, moves entry expiry from TP1 to TP2. Explicit LIMIT/STOP signals valid until cancellation do not expire at TP.",
       },
       custom_entry: {
         label: "CUSTOM ENTRY LEVEL",
-        hint: "Custom offsets for the zone edges (instead of FIRST ENTRY ANY LEVEL).",
+        hint: "Custom price offsets for the zone edges. Enabling this clears the competing direction-aware offset mode.",
       },
       entry_high_offset: { label: "upper edge ±" },
       entry_low_offset: { label: "lower edge ±" },
       entry_offset_dir: {
         label: "DIRECTION-AWARE OFFSETS (SELL fix)",
-        hint: "Without this the zone is computed purely by price and the roles are inverted for SELL. Enabled: BUY better = lower, SELL better = HIGHER.",
+        hint: "BUY: a better price is lower. SELL: higher. Enabling this clears the competing CUSTOM ENTRY price-offset mode.",
       },
       entry_deep_offset: { label: "depth (towards better entries)" },
       entry_deep_frac_to_sl: {
@@ -91,7 +95,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       ignore_old_after_min: {
         label: "IGNORE STALE SIGNALS AFTER",
-        hint: "A waiting signal (no open position) older than X min is cancelled. 0 = disabled.",
+        hint: "Expires waiting signals without an open position after X minutes. 0 disables the threshold. Explicit LIMIT/STOP signals valid until cancellation are exempt.",
       },
     },
   },
@@ -190,7 +194,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       pending_ttl_h: {
         label: "PENDING TTL",
-        hint: "Delete pendings of baskets older than X h (stale limits fill in crashes). 0 = OFF.",
+        hint: "Removes unfilled orders after X hours; 0 disables TTL. Explicit LIMIT/STOP signals valid until cancellation are exempt. Risk protection remains active.",
       },
       pending_never_cancel: {
         label: "PENDINGS NEVER EXPIRE",
@@ -218,11 +222,11 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
     fields: {
       all_runners: {
         label: "ALL TPS ARE RUNNERS",
-        hint: "Every position gets the most favorable TP + a trailing SL after hits. Mutually exclusive with SCALE-OUT.",
+        hint: "Every position gets the most favorable TP. Enabling this clears SCALE-OUT and official mode. Trailing uses its own settings.",
       },
       scale_out: {
         label: "SCALE-OUT",
-        hint: "Closes a % of positions on EVERY successive TP (cascade). Mutually exclusive with ALL RUNNERS.",
+        hint: "Closes a percentage of positions at successive TPs. Enabling this clears ALL RUNNERS and official mode.",
       },
       scale_out_pct: { label: "% of positions per TP" },
       scale_out_round: {
@@ -306,7 +310,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
     fields: {
       runner_trail: {
         label: "SAFETY TRAILING STOP",
-        hint: "A 24/7 profit guarantee: a position deep in profit gets an SL trailed behind price — it will not give the profit back to BE and will close in the green without you. NOTE: this switch governs ONLY the basic trailing. The “split trailing (bank + runner)” family below is SEPARATE and keeps working even when this is off.",
+        hint: "After the profit threshold, moves the SL using the selected mode. Split bank + runner trailing has a separate switch. A protective order does not guarantee its fill price or net profit.",
         warn: (s: Settings) =>
           !s.runner_trail && s.trail_split
             ? "Basic trailing is OFF, but “split trailing (bank + runner)” below is ON and keeps working — runners still get a trailing stop. This is a separate settings family."
@@ -319,6 +323,8 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
           gap: "gap — SL a gap behind price (classic)",
           lock_pct: "lock_pct — lock a % of the peak (recommended)",
           tiered: "tiered — a ladder of thresholds",
+          atr: "ATR — volatility-based gap",
+          chandelier: "Chandelier — extreme and ATR",
         },
       },
       runner_trail_gap: { label: "SL gap behind price", warn: gapTrapEn },
@@ -348,7 +354,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       trail_runner_mode: {
         label: "runner mode",
-        options: { gap: "gap", lock_pct: "lock_pct", tiered: "tiered" },
+        options: { gap: "gap", lock_pct: "lock_pct", tiered: "tiered", atr: "ATR", chandelier: "Chandelier" },
       },
       trail_runner_start: { label: "runner threshold" },
       trail_runner_gap: { label: "runner gap" },
@@ -499,7 +505,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
     fields: {
       be_lock: {
         label: "BE-LOCK",
-        hint: "After reaching +X points, the SL lands at the entry. “Never give back what was already in profit.”",
+        hint: "After the profit threshold, moves the SL to the entry with the configured lock. Costs and the actual fill price affect net profit.",
       },
       be_lock_points: { label: "BE-LOCK threshold" },
       be_at_tp1: {
@@ -544,7 +550,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
     fields: {
       official_mode: {
         label: "OFFICIAL MODE",
-        hint: "A % schedule instead of the flat scale-out cascade. Takes precedence over SCALE-OUT.",
+        hint: "Uses a separate percentage or position-count schedule. Enabling this clears ALL RUNNERS and SCALE-OUT.",
       },
       official_pct_tp1: { label: "close at TP1" },
       official_pct_tp2: { label: "at TP2" },
@@ -925,7 +931,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       signal_max_age_min: {
         label: "MAX AGE OF AN OPENING SIGNAL",
-        hint: "Entry signals older than this threshold are rejected. Management messages and edits of existing baskets are unaffected. 0 disables the age gate.",
+        hint: "Rejects stale entry signals. Management messages, edits of existing baskets and explicit LIMIT/STOP signals valid until cancellation are exempt. 0 disables the age gate.",
       },
       dd_guard_scope: {
         label: "SCOPE OF THE POST-DRAWDOWN LOCK",
@@ -1003,9 +1009,22 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       day_target_close: {
         label: "after the target CLOSE everything",
-        hint: "“Take the win and go to sleep” — improves every backtest window.",
+        hint: "Close positions and cancel pending orders after the daily target is reached.",
       },
       day_target_scale_lot: { label: "scale the target with the lot" },
+      day_trail_basis: {
+        label: "Daily stop basis",
+        options: { equity_peak: "Peak equity · legacy", profit_peak: "Peak daily profit" },
+        hint: "Equity: the drop is a percentage of the day's peak equity. Profit: it is a percentage of positive daily peak profit; the stop cannot arm before a positive profit exists. Selecting a basis does not enable the stop — set its threshold below.",
+      },
+      day_trail_stop_pct: {
+        label: "Daily stop: allowed drop",
+        hint: "Distance from the peak using the selected basis. 0 disables the percentage daily stop. For a $100 profit peak and 30% threshold, exit after giving back $30.",
+      },
+      day_trail_arm_pct: {
+        label: "Daily stop: profit to arm",
+        hint: "Minimum gain from the day-start capital before the percentage stop can activate. 0 removes this extra arm threshold; the profit basis still requires a positive gain.",
+      },
       day_trail_stop_usd: {
         label: "DAY-TRAIL: close after a drop from the day peak",
         hint: "The automated version of the manual close. 0 = disabled.",
@@ -1016,7 +1035,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       eod_flat_hour: {
         label: "EOD-FLAT at hour",
-        hint: "Every day at this hour close everything and delete pendings. Sweep: the EOD23 axis = +360/mo vs −84 without. 0 = disabled.",
+        hint: "Close positions and cancel pending orders at this hour. The broker-clock setting selects the clock. 0 = disabled.",
       },
       flat_weekend: { label: "FLAT BEFORE THE WEEKEND", hint: "Protection against the weekend gap." },
       flat_weekend_hour: { label: "hour on Friday" },
@@ -1074,8 +1093,8 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
         label: "message clock offset",
         hint: "Empty = use the server zone (correct when the Telegram export is in UTC). An explicit value helps when the message source has its own zone.",
       },
-      lot_min: { label: "MINIMUM LOT" },
-      lot_max: { label: "MAXIMUM LOT" },
+      lot_min: { label: "MINIMUM LOT", hint: "Strategy minimum, separate from the broker minimum and step. Contract V2 requires a positive value and does not round an infeasible volume up." },
+      lot_max: { label: "MAXIMUM LOT", hint: "Single-order ceiling. 0 removes only this strategy limit; broker, risk and margin limits still apply. lot_max_z_salda provides an additional capital-based ceiling." },
       sim_stops_level: {
         label: "STOPS LEVEL (broker emulation)",
         hint: "A broker rejects SL/TP inside the symbol's minimum stop distance. Enter the target broker's value so simulations do not assume impossible levels.",
@@ -1485,7 +1504,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       pending_drop_on_target: {
         label: "delete pendings once the target is reached",
-        hint: "After the basket's target is realized, unfilled limits are removed.",
+        hint: "Removes unfilled limits after a basket target. Explicit LIMIT/STOP signals valid until cancellation are exempt; bot-generated grids for ordinary signals remain subject to this rule.",
       },
       pending_drop_require_zone_touch: {
         label: "require a zone touch",
@@ -1893,5 +1912,604 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
           "Closes the “late fill / restart left a position without a stop” class of bug.",
       },
     },
+  },
+
+  engine_entries: {
+    title: "Entries — full geometry",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      drop_unplaceable_levels: {
+        label: "Drop unplaceable levels"
+      },
+      enforce_position_limit_on_fill: {
+        label: "Enforce position limit on fill"
+      },
+      entry_jeden_na_glebokiej: {
+        label: "One entry at the deep edge"
+      },
+      entry_krzywa_kotwica: {
+        label: "Entry curve anchor",
+        options: {
+          Ocalaly: "Surviving",
+          Original: "Original"
+        }
+      },
+      entry_uklad: {
+        label: "Position counts by entry level",
+        hint: "Position count at successive levels, e.g. 1,2,1. Each value is 0–9; empty or all-zero keeps the default layout."
+      },
+      entry_uklad_kotwica: {
+        label: "Entry layout anchor",
+        options: {
+          Ocalaly: "Surviving",
+          Original: "Original"
+        }
+      },
+      entry_warstwy_offset: {
+        label: "Entry layer offset"
+      },
+      entry_warstwy_z_tekstu: {
+        label: "Read entry layers from message"
+      },
+      fast_fill_layers: {
+        label: "Fast fill layer count"
+      },
+      fast_fill_reject_s: {
+        label: "Fast fill rejection time threshold"
+      },
+      fast_fill_soft_age_min: {
+        label: "Fast fill soft age threshold"
+      },
+      honor_stop_orders: {
+        label: "Honor explicit STOP orders",
+        hint: "An explicit STOP keeps its STOP order type. Does not enable market signals or disable account protection."
+      },
+      limit_kasuje_tylko_nadmiar: {
+        label: "Limit cancels only excess orders"
+      },
+      market_entry_mode: {
+        label: "Market entry execution mode",
+        hint: "Controls market entries. Does not set the validity of an explicit LIMIT/STOP signal.",
+        options: {
+          GridAtOnce: "Whole grid at once",
+          Single: "Single entry",
+          Laddered: "Laddered"
+        }
+      },
+      pending_cross_policy: {
+        label: "When price crossed a pending entry",
+        options: {
+          Market: "Market",
+          Stop: "Stop",
+          Shift: "Shift",
+          Skip: "Skip"
+        }
+      },
+      units_per_level_zone: {
+        label: "Count units per zone level"
+      },
+      zakaz_ponizej_krawedzi: {
+        label: "Block entries beyond the edge"
+      }
+    }
+  },
+
+  engine_addons: {
+    title: "Addons, pyramids and re-entry",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      fast_addon_cooldown_s: {
+        label: "Momentum addon cooldown"
+      },
+      fast_addon_lot_mult: {
+        label: "Momentum addon lot multiplier"
+      },
+      fast_addon_max: {
+        label: "Maximum momentum addons"
+      },
+      fast_addon_min_stage: {
+        label: "Momentum addons from TP stage"
+      },
+      fast_addon_move_usd: {
+        label: "Required move for momentum addon"
+      },
+      fast_addon_window_s: {
+        label: "Momentum addon lookback"
+      },
+      no_reenter_from_stage: {
+        label: "Block re-entry from TP stage"
+      },
+      pyramid_after_stage: {
+        label: "Pyramid from TP stage"
+      },
+      pyramid_lot_mult: {
+        label: "Pyramid lot multiplier"
+      },
+      pyramid_min_equity_mult: {
+        label: "Pyramid equity threshold"
+      },
+      pyramid_regime_lookback: {
+        label: "Pyramid regime lookback"
+      },
+      pyramid_regime_max_fast_pct: {
+        label: "Pyramid maximum fast-market share"
+      },
+      rearm_bez_pozycji: {
+        label: "Rearm a basket without positions"
+      },
+      rearm_bez_pozycji_max_h: {
+        label: "Maximum age for empty-basket rearm"
+      },
+      reenter_min_return_s: {
+        label: "Re-entry minimum return time"
+      },
+      reenter_respect_cap: {
+        label: "Re-entry respects the cap"
+      },
+      reenter_stop_after_riskfree: {
+        label: "Block re-entry after RISK FREE"
+      }
+    }
+  },
+
+  engine_small: {
+    title: "Small-account thresholds",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      basket_max_age_min_small: {
+        label: "Basket max age: small account"
+      },
+      basket_max_age_min_small_mult: {
+        label: "Capital threshold: basket age",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      },
+      entry_units_small: {
+        label: "Entry units: small account"
+      },
+      entry_units_small_mult: {
+        label: "Capital threshold: entry units",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      },
+      fast_fill_soft_age_min_small: {
+        label: "Fast fill age for small account"
+      },
+      fast_fill_soft_age_min_small_mult: {
+        label: "Capital threshold: fast fill age",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      },
+      market_entry_step_small: {
+        label: "Market spacing: small account"
+      },
+      market_entry_step_small_mult: {
+        label: "Capital threshold: market spacing",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      },
+      max_open_baskets_small: {
+        label: "Maximum baskets: small account"
+      },
+      max_open_baskets_small_mult: {
+        label: "Capital threshold: maximum baskets",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      },
+      max_open_positions_small: {
+        label: "Maximum positions: small account"
+      },
+      max_open_positions_small_mult: {
+        label: "Capital threshold: maximum positions",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      },
+      reenter_max_small: {
+        label: "Maximum re-entries: small account"
+      },
+      reenter_max_small_mult: {
+        label: "Capital threshold: maximum re-entries",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      },
+      risk_per_basket_pct_small: {
+        label: "Basket risk: small account"
+      },
+      risk_per_basket_pct_small_mult: {
+        label: "Capital threshold: basket risk",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      },
+      sl_min_dist_small: {
+        label: "Minimum SL distance: small account"
+      },
+      sl_min_dist_small_mult: {
+        label: "Capital threshold: minimum SL",
+        hint: "Threshold = starting capital × multiplier. 0 disables the small-account variant."
+      }
+    }
+  },
+
+  engine_regime: {
+    title: "Regime and volatility sizing",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      regime_cena: {
+        label: "Regime reference price",
+        options: {
+          Rynkowa: "Market",
+          Wejscia: "Wejscia",
+          Obie: "Obie"
+        }
+      },
+      regime_gdy_rozerwany: {
+        label: "Regime behavior on disagreement",
+        options: {
+          Milcz: "No action",
+          KrotkieOkno: "KrotkieOkno",
+          Miekko: "Miekko"
+        }
+      },
+      regime_miara: {
+        label: "Regime measure",
+        options: {
+          Srednia: "Mean",
+          Mediana: "Mediana",
+          Kanal: "Kanal",
+          Wykladnicza: "Wykladnicza",
+          Percentyl: "Percentyl"
+        }
+      },
+      regime_okno2_h: {
+        label: "Second regime window"
+      },
+      regime_percentyl: {
+        label: "Regime percentile"
+      },
+      regime_pilnuj_limitow: {
+        label: "Apply regime to existing limits"
+      },
+      regime_soft: {
+        label: "Soft regime adaptation"
+      },
+      regime_soft_lot_mult: {
+        label: "Soft regime lot multiplier"
+      },
+      regime_soft_max_positions: {
+        label: "Soft regime maximum positions"
+      },
+      regime_soft_risk_mult: {
+        label: "Soft regime risk multiplier"
+      },
+      regime_soft_units_mult: {
+        label: "Soft regime unit multiplier"
+      },
+      regime_strefa_martwa: {
+        label: "Regime dead zone"
+      },
+      regime_zmiennosc_max: {
+        label: "Regime maximum volatility"
+      },
+      regime_zmiennosc_min: {
+        label: "Regime minimum volatility"
+      },
+      vol_size_max_mult: {
+        label: "Volatility sizing: maximum multiplier"
+      },
+      vol_size_min_mult: {
+        label: "Volatility sizing: minimum multiplier"
+      },
+      vol_size_mode: {
+        label: "Volatility sizing mode",
+        options: {
+          Off: "Off",
+          Target: "Volatility target",
+          Percentile: "Percentile"
+        }
+      },
+      vol_size_odsezonuj: {
+        label: "Remove volatility seasonality"
+      },
+      vol_size_percentile_okno: {
+        label: "Volatility percentile window"
+      },
+      vol_size_target: {
+        label: "Target volatility range"
+      }
+    }
+  },
+
+  engine_targets: {
+    title: "Targets, BE and runner management",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      be_min_pozycji: {
+        label: "BE: minimum positions"
+      },
+      be_od_etapu: {
+        label: "BE: starting TP stage"
+      },
+      cel_z_przeciwnego: {
+        label: "Target from opposite signal",
+        options: {
+          Off: "Off",
+          DalszaKrawedz: "DalszaKrawedz",
+          Srodek: "Srodek"
+        }
+      },
+      cel_z_przeciwnego_zapas: {
+        label: "Opposite target buffer"
+      },
+      cele_pomin_za_cena: {
+        label: "Skip targets behind current price"
+      },
+      no_tp_after_stage: {
+        label: "Remove TP from stage"
+      },
+      oae_pod_woda: {
+        label: "OUT AT ENTRY while losing",
+        options: {
+          NicNieRob: "No action",
+          Zamknij: "Close",
+          DociagnijStop: "Tighten stop"
+        }
+      },
+      oae_skip_after_riskfree: {
+        label: "Skip OUT AT ENTRY after RISK FREE"
+      },
+      runner_cele_krok: {
+        label: "Runner target spacing"
+      },
+      runner_cele_n: {
+        label: "Runner target count"
+      },
+      runner_max_hold_rule_only: {
+        label: "Runner age limit from rule only"
+      },
+      runner_partial_pct: {
+        label: "Runner partial close"
+      },
+      sl_po_tp1_na_krawedz: {
+        label: "Move SL to edge after TP1"
+      },
+      sl_wlasny_na_pozycje: {
+        label: "Individual stop per position"
+      },
+      spp_arms_runner_clock: {
+        label: "SPP arms the runner clock"
+      },
+      spp_sl_mode: {
+        label: "SPP stop-loss mode",
+        options: {
+          Off: "Off",
+          Stop: "Stop",
+          OnlyIfBetter: "Only a better SL",
+          RunnersOnly: "Runners only",
+          RunnersOnlyIfBetter: "Runners, only a better SL",
+          BankersOnly: "Bankers only"
+        }
+      },
+      spp_sl_pad: {
+        label: "SPP stop-loss buffer"
+      },
+      tp_drabinka_kotwica: {
+        label: "Target ladder anchor",
+        options: {
+          Ocalaly: "Surviving",
+          Original: "Original"
+        }
+      }
+    }
+  },
+
+  engine_sr: {
+    title: "S/R trailing — structure parameters",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      trail_atr_mult: {
+        label: "Trailing ATR multiplier"
+      },
+      trail_sr_atr_period: {
+        label: "S/R ATR period"
+      },
+      trail_sr_fractal_n: {
+        label: "S/R fractal width",
+        hint: "Candle count required to confirm a local extreme. A larger value confirms structure later."
+      },
+      trail_sr_min_dist_tp: {
+        label: "S/R minimum distance from TP"
+      },
+      trail_sr_min_prominence_atr: {
+        label: "S/R minimum prominence in ATR"
+      },
+      trail_sr_offset: {
+        label: "S/R fixed buffer"
+      },
+      trail_sr_offset_atr_mult: {
+        label: "S/R buffer in ATR multiples"
+      },
+      trail_sr_offset_spread_mult: {
+        label: "S/R buffer in spread multiples"
+      },
+      trail_sr_struct_window_h: {
+        label: "S/R structure window"
+      },
+      trail_sr_tf_min: {
+        label: "S/R candle timeframe",
+        hint: "S/R structure candle timeframe in minutes. Used while S/R trailing is enabled."
+      }
+    }
+  },
+
+  engine_messages: {
+    title: "Messages — interpretation and consistency",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      hint_veto: {
+        label: "Recipient hint may veto an action"
+      },
+      live_tick_order_strict: {
+        label: "Strict live tick ordering"
+      },
+      parser_geometryczny: {
+        label: "Signal geometry parser"
+      },
+      parser_luz_interpunkcyjny: {
+        label: "Tolerate punctuation variants"
+      },
+      parser_min_pewnosc: {
+        label: "Minimum parser confidence"
+      },
+      recap_guard: {
+        label: "Recognize trade recaps"
+      },
+      reply_graph_transitive: {
+        label: "Follow transitive Telegram replies"
+      },
+      rf_level_sanity_max_usd: {
+        label: "Maximum RISK FREE level distance"
+      },
+      sanity_tp_max: {
+        label: "Maximum TP distance"
+      },
+      sanity_tp_rosnace: {
+        label: "Require ordered TP ladder"
+      },
+      sanity_tp_strona: {
+        label: "Validate TP direction"
+      },
+      sanity_zone_max: {
+        label: "Maximum entry zone width"
+      },
+      sl_edit_reaches_pendings: {
+        label: "Apply SL edits to pending orders"
+      },
+      sync_only_live_levels: {
+        label: "Synchronize only live levels"
+      },
+      tp_correction_to_broker: {
+        label: "Send TP corrections to broker"
+      },
+      tp_hit_match_level: {
+        label: "Match TP HIT to price level"
+      },
+      tp_unindexed_pips_require_price: {
+        label: "Unindexed TP requires price confirmation"
+      }
+    }
+  },
+
+  engine_ea: {
+    title: "EA layer — capital and addons",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      ea_lot_z_wolnego_marginesu: {
+        label: "EA: sizing from free margin"
+      },
+      ea_redukcja_przy_zageszczeniu: {
+        label: "EA: density reduction"
+      },
+      ea_stan_dnia: {
+        label: "EA: daily state mode",
+        options: {
+          Off: "Off",
+          TylkoInkaso: "Profit taking only"
+        }
+      },
+      ea_stan_dnia_jednostki_mult: {
+        label: "EA: units multiplier after daily threshold"
+      },
+      ea_stan_dnia_prog_sl: {
+        label: "EA: SL threshold for daily state"
+      },
+      ea_stop_dokladek_powrot: {
+        label: "EA: resume after addon pause"
+      },
+      ea_stop_dokladek_przy_stracie: {
+        label: "EA: pause addons on loss"
+      },
+      ea_zageszczenie_podloga: {
+        label: "EA: density floor"
+      }
+    }
+  },
+
+  engine_risk: {
+    title: "Protection — gates and exposure",
+    desc: "Advanced preset axes. Edits apply to the selected preset; reveal dependent fields or use search.",
+    fields: {
+      profit_budget_arm_pct: {
+        label: "New-entry budget: daily profit threshold",
+        hint: "Arms from peak daily profit relative to starting capital. 0 disables the budget. Limits new entries; does not close existing positions."
+      },
+      profit_budget_keep_pct: {
+        label: "Retain a share of peak profit",
+        hint: "Budget basis = starting capital + this share of peak profit. This does not guarantee an equity floor during gaps."
+      },
+      profit_budget_deploy_pct: {
+        label: "Use available headroom",
+        hint: "Share of equity above the basis, minus the downside of open positions and pending orders to SL. New lots are rounded to the broker step; entry is rejected if the minimum does not fit."
+      },
+      day_gate_do_salda: {
+        label: "Daily gate: upper equity boundary",
+        hint: "Day-start equity must be below this value. 0 removes the upper boundary."
+      },
+      day_gate_od_salda: {
+        label: "Daily gate: lower equity boundary",
+        hint: "Day-start equity must be at least this value. 0 removes the lower boundary."
+      },
+      exposure_bonus_baskets: {
+        label: "Extra baskets after profit threshold"
+      },
+      exposure_bonus_positions: {
+        label: "Extra positions after profit threshold"
+      },
+      exposure_bonus_profit_pct: {
+        label: "Profit threshold for extra exposure"
+      },
+      lot_max_z_salda: {
+        label: "Capital per lot of order limit",
+        hint: "Single-order limit = capital basis / this value. 0 disables this limit. lot_max, risk budget and broker constraints still apply."
+      },
+      sesja_bramka: {
+        label: "Session gate scope",
+        options: {
+          Sygnal: "Signal",
+          Wypelnienie: "Wypelnienie",
+          Oba: "Oba"
+        }
+      },
+      zone_exit_adverse_close: {
+        label: "Close on adverse zone exit"
+      },
+      zone_exit_adverse_s: {
+        label: "Adverse zone exit delay"
+      }
+    }
+  },
+
+  engine_broker: {
+    title: "Account — execution and margin",
+    desc: "Advanced account-wide settings. They do not replace symbol specifications received from the broker.",
+    fields: {
+      lot_base: {
+        label: "Capital basis for position sizing",
+        hint: "Shared by the account. Balance, equity or their minimum; credit deduction still follows the bonus settings.",
+        options: { Balance: "Balance", Equity: "Equity", MinOfBoth: "Minimum of balance / equity" },
+      },
+      expo_cap_close: {
+        label: "Close on exposure breach"
+      },
+      expo_cap_ml_pct: {
+        label: "Minimum margin level for exposure"
+      },
+      expo_cap_pct: {
+        label: "Account exposure percentage cap"
+      },
+      expo_cap_s: {
+        label: "Exposure check interval"
+      },
+      sim_margin_at_market: {
+        label: "Simulation: margin at market price"
+      },
+      sim_margin_check_on_fill: {
+        label: "Simulation: margin check on fill"
+      },
+      sim_validate_pending_stops: {
+        label: "Simulation: validate pending stops"
+      }
+    }
   },
 };

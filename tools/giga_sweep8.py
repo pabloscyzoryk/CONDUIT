@@ -15,6 +15,7 @@ import re
 
 FAMILIES = ('profit_retention', 'basket_harvest', 'adaptive_trail', 'breadth',
             'sizing', 'neighborhood', 'hybrid')
+EXTRA_FAMILIES = ('daily_bank', 'soft_regime', 'budget_reinvest', 'budget_soft_regime')
 BROKER_FIELDS = {
     'konto_dzwignia', 'commission_per_lot', 'swap_enabled', 'swap_long_points',
     'swap_short_points', 'swap_point_value', 'swap_rollover_z_serwera',
@@ -29,6 +30,53 @@ def fingerprint(settings: dict) -> str:
 
 def sample_family(family: str, rng: random.Random) -> dict:
     choice = rng.choice
+    if family in ('budget_reinvest', 'budget_soft_regime'):
+        arm = choice([1., 2., 4., 8., 12., 20.])
+        keep = choice([20., 40., 60., 80.])
+        axes = {
+            'profit_budget_arm_pct': arm,
+            'profit_budget_keep_pct': keep,
+            'profit_budget_deploy_pct': choice([25., 50., 75., 100.]),
+            'day_trail_basis': 'ProfitPeak',
+            'day_trail_arm_pct': arm,
+            # Half the space sizes new risk only; the other half also closes
+            # existing exposure at the matching peak-profit retention floor.
+            'day_trail_stop_pct': choice([0., 100. - keep]),
+            'lot_percent': choice([.2, .3, .5, .7, 1.]),
+            'risk_per_basket_pct': choice([5., 8., 12., 20., 30.]),
+            'entry_units': choice([4, 6, 8, 10]),
+            'max_portfolio_risk_pct': choice([0., 25., 50., 100.]),
+        }
+        if family == 'budget_soft_regime':
+            axes.update({k:v for k,v in sample_family('soft_regime', rng).items()
+                         if k.startswith('regime_')})
+        return axes
+    if family == 'daily_bank':
+        return {
+            'day_target_pct': choice([.5, 1., 2., 3., 5., 8., 12., 20.]),
+            'day_target_close': True, 'day_target_usd': 0.,
+            'day_trail_basis': 'ProfitPeak',
+            'day_trail_arm_pct': choice([.5, 1., 2., 4., 8., 12.]),
+            'day_trail_stop_pct': choice([10., 20., 30., 40., 50.]),
+            'lot_percent': choice([.1, .15, .2, .3, .5]),
+            'risk_per_basket_pct': choice([3., 5., 8., 12.]),
+            'entry_units': choice([3, 4, 6, 8, 10]),
+            'max_portfolio_risk_pct': choice([10., 20., 40., 60.]),
+        }
+    if family == 'soft_regime':
+        return {
+            'regime_filter': choice(['TrendMa', 'CounterMa']),
+            'regime_ma_hours': choice([1., 3., 6., 12., 24., 48., 72.]),
+            'regime_cena': 'Rynkowa',
+            'regime_miara': 'Srednia',
+            'regime_soft': True, 'regime_gdy_rozerwany': 'Milcz',
+            'regime_soft_units_mult': choice([.5, .75, 1.]),
+            'regime_soft_lot_mult': choice([.25, .5, .75]),
+            'regime_soft_risk_mult': choice([.5, .75, 1.]),
+            'regime_soft_max_positions': 0,
+            'lot_percent': choice([.1, .15, .2, .3, .5]),
+            'risk_per_basket_pct': choice([3., 5., 8., 12.]),
+        }
     if family == 'profit_retention':
         return {
             'day_trail_basis': 'ProfitPeak',
@@ -112,23 +160,28 @@ def sample_family(family: str, rng: random.Random) -> dict:
     raise ValueError(family)
 
 
-def generate(base: dict, broker: dict, count: int, seed: int) -> list[dict]:
+def generate(base: dict, broker: dict, count: int, seed: int,
+             families: tuple[str, ...] = FAMILIES, prefix: str = 'G8') -> list[dict]:
+    if count < 1 or not families or set(families) - set(FAMILIES + EXTRA_FAMILIES):
+        raise ValueError('Invalid candidate count or axis family')
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', prefix):
+        raise ValueError('Candidate prefix must be a safe identifier')
     if set(broker)-BROKER_FIELDS:
         raise ValueError(f'Unexpected broker fields: {sorted(set(broker)-BROKER_FIELDS)}')
     common = copy.deepcopy(base['settings'])
     common.update(broker)
     common['lot_max'] = 5.0
-    common['day_trail_basis'] = 'EquityPeak'
-    # User-specified source contract, fixed across the whole search space.
-    # It applies to explicit LIMIT/STOP signals, not ordinary entry-grid legs.
-    common['explicit_pending_until_cancel'] = True
+    # Management belongs to the supplied preset. Publisher validity must not
+    # silently replace its TP-stage/TTL/rearm or daily-profit interpretation.
+    # A phase that changes an ingress or pending policy supplies an explicitly
+    # qualified base, whose file hash is recorded in the space manifest.
     rows = [{'id': 'GOD-X7-cap5', 'family': 'reference', 'settings': common,
              'changes': {}, 'fingerprint': fingerprint(common)}]
     seen = {rows[0]['fingerprint']}
     rng = random.Random(seed)
     attempt = 0
     while len(rows) < count:
-        family = FAMILIES[attempt % len(FAMILIES)]
+        family = families[attempt % len(families)]
         attempt += 1
         changes = sample_family(family, rng)
         settings = copy.deepcopy(common)
@@ -139,7 +192,7 @@ def generate(base: dict, broker: dict, count: int, seed: int) -> list[dict]:
             continue
         seen.add(key)
         changes = {k:v for k,v in changes.items() if v != common.get(k)}
-        rows.append({'id': f'G8-{family}-{len(rows):05d}', 'family': family,
+        rows.append({'id': f'{prefix}-{family}-{len(rows):05d}', 'family': family,
                      'settings': settings, 'changes': changes, 'fingerprint': key})
     return rows
 
@@ -152,12 +205,16 @@ def main() -> None:
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--count', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=20260905)
+    parser.add_argument('--families', default=','.join(FAMILIES),
+                        help='Explicit comma-separated families; use a new output directory for each phase.')
+    parser.add_argument('--prefix', default='G8', help='Use a new prefix for a separate search phase.')
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
     base = json.loads(args.base.read_text('utf-8-sig'))
     broker = json.loads(args.broker.read_text('utf-8-sig'))
-    rows = generate(base, broker, args.count, args.seed)
+    families = tuple(args.families.split(','))
+    rows = generate(base, broker, args.count, args.seed, families, args.prefix)
     known = set(re.findall(r'pub\s+(\w+)\s*:', args.settings_source.read_text('utf-8')))
     for row in rows:
         unknown = set(row['changes'])-known
@@ -175,13 +232,14 @@ def main() -> None:
                    'settings': row['settings']}
         path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
         manifest_rows.append({k:v for k,v in row.items() if k!='settings'})
-    manifest = {'schema': 'conduit.giga-sweep8-space.v1', 'seed': args.seed,
+    manifest = {'schema': 'conduit.giga-sweep8-space.v2', 'seed': args.seed,
                 'candidate_count': len(rows), 'search_lot_cap': 5.0,
                 'base_sha256': hashlib.sha256(args.base.read_bytes()).hexdigest(),
-                'broker_profile': broker, 'families': list(FAMILIES),
+                'broker_profile': broker, 'families': list(families), 'prefix': args.prefix,
                 'candidates': manifest_rows,
                 'invariants': ['No date/hour/message-ID filter axes.',
-                               'Explicit pending signals remain source-valid until a bound cancellation.',
+                               'Pending-order and entry-ingress policies are inherited from the supplied preset.',
+                               'Publisher validity is independent of preset-driven order management.',
                                'Broker costs are fixed across all candidates.',
                                'Quick results cannot enter coronation without exact reruns.',
                                'GOD-X8 name is reserved for the owner-selected candidate.']}

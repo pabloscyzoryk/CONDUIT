@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { useState } from "react";
 import { Badge, Button, Card, Empty, Icon, NumberInput, TextInput } from "@/components/ui";
 import { usePotwierdzenie } from "@/components/ui/Potwierdzenie";
@@ -165,7 +166,7 @@ function BasketCard({ b }: { b: Basket }) {
               .map((e, i) => (
                 <li key={i} className={`basket__ev basket__ev--${e.kind}`}>
                   <span className="num">{time(e.t)}</span>
-                  {e.text}
+                  {tSilnik(e.text)}
                 </li>
               ))}
           </ul>

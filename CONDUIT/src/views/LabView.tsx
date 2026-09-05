@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { tSilnik } from "@/i18n/silnik";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -14,7 +15,8 @@ import {
 } from "@/components/ui";
 import { useApp } from "@/store/AppStore";
 import { formatPresetu } from "@/data/presets";
-import { api, type BacktestReq, type LabGen, type LabInfo, type LabJob, type LabRow, type TrainReq } from "@/store/transport";
+import { api, type BacktestReq, type LabGen, type LabInfo, type LabJob, type LabRow, type LabSourceCounts, type TrainReq } from "@/store/transport";
+import { entrySourceCounts, optionalCount } from "@/lib/labMetrics";
 import { duration, num, locale } from "@/lib/format";
 import { useT, RichT } from "@/i18n";
 import "./views.css";
@@ -55,7 +57,7 @@ interface LabMonth {
   lossDays: number;
 }
 
-interface LabCell {
+interface LabCell extends LabSourceCounts {
   mode: TrybKey;
   profit: number;
   lossDaysPct: number;
@@ -200,7 +202,7 @@ function Postep({ job, onCancel, onOpenDir, busy }: { job: LabJob; onCancel: () 
         </div>
       }
     >
-      <div className="lab__title">{job.title}</div>
+      <div className="lab__title">{tSilnik(job.title)}</div>
 
       <div className="lab__bar">
         <div className="meter" style={{ height: 8 }}>
@@ -225,7 +227,7 @@ function Postep({ job, onCancel, onOpenDir, busy }: { job: LabJob; onCancel: () 
       {/* CO AKTUALNIE LICZY — to jest najważniejszy napis na tym ekranie */}
       <div className="lab__now">
         {job.phase === "running" && <span className="lab__spin" />}
-        <span className="truncate">{job.label}</span>
+        <span className="truncate">{tSilnik(job.label)}</span>
       </div>
 
       <div className="lab__metrics">
@@ -238,11 +240,11 @@ function Postep({ job, onCancel, onOpenDir, busy }: { job: LabJob; onCancel: () 
           <span>{t("lab.m.eta")}</span>
         </div>
         <div className="lab__metric">
-          <b className="num">{job.speed || "—"}</b>
+          <b className="num">{tSilnik(job.speed) || "—"}</b>
           <span>{t("lab.m.speed")}</span>
         </div>
         <div className="lab__metric">
-          <b className="num">{job.speed2 || "—"}</b>
+          <b className="num">{tSilnik(job.speed2) || "—"}</b>
           <span>{t("lab.m.rate")}</span>
         </div>
         <div className="lab__metric">
@@ -276,10 +278,10 @@ function Postep({ job, onCancel, onOpenDir, busy }: { job: LabJob; onCancel: () 
       {job.error && (
         <div className="lab__err">
           <Icon name="alert" size={14} />
-          <span>{job.error}</span>
+          <span>{tSilnik(job.error)}</span>
         </div>
       )}
-      {job.note && !job.error && <div className="lab__note">{job.note}</div>}
+      {job.note && !job.error && <div className="lab__note">{tSilnik(job.note)}</div>}
       {job.phase === "cancelled" && (
         <div className="lab__hintbox">
           <Icon name="info" size={13} />
@@ -397,6 +399,13 @@ function Komorka({ cell, balance, onChart }: { cell: LabCell; balance: number; o
           {t("lab.c.units")}
         </span>
         <b className="num">{cell.units}</b>
+
+        {entrySourceCounts(cell).map(({ label, value }) => (
+          <Fragment key={label}>
+            <span className="hint" title={t("lab.sources.hint")}>{t(label)}</span>
+            <b className="num">{optionalCount(value)}</b>
+          </Fragment>
+        ))}
 
         <span className="hint">{t("lab.c.tradingDays")}</span>
         <b className="num">{cell.tradingDays}</b>
@@ -642,6 +651,7 @@ function Wyniki({ job, onChart }: { job: LabJob; onChart: (name: string) => void
               {head("winDaysPct", t("lab.col.winDays"))}
               {head("winRate", t("lab.col.winRate"))}
               {head("trades", t("lab.col.trades"))}
+              {entrySourceCounts({}).map(({ label }) => <th key={label} title={t("lab.sources.hint")}>{t(label)}</th>)}
               {head("score", t("lab.col.score"), t("lab.col.score.title"))}
               <th />
             </tr>
@@ -671,6 +681,7 @@ function Wyniki({ job, onChart }: { job: LabJob; onChart: (name: string) => void
                 <td className="num">{r.winDaysPct.toFixed(0)}</td>
                 <td className="num">{r.winRate.toFixed(0)}</td>
                 <td className="num">{r.trades}</td>
+                {entrySourceCounts(r).map(({ label, value }) => <td key={label} className="num">{optionalCount(value)}</td>)}
                 <td className="num">{r.score.toFixed(2)}</td>
                 <td>{r.chart && <Icon name="chart" size={13} />}</td>
               </tr>
@@ -844,7 +855,7 @@ export function LabView() {
                 </span>
               </>
             ) : (
-              <span className="down">{info.error ?? t("lab.data.none")}</span>
+              <span className="down">{tSilnik(info.error) || t("lab.data.none")}</span>
             )}
           </div>
         )}
@@ -1165,8 +1176,8 @@ export function LabView() {
               <article key={h.id} className="lab__histitem">
                 <Badge tone={(FAZA[h.phase] ?? FAZA.done).tone}>{t((FAZA[h.phase] ?? FAZA.done).label)}</Badge>
                 <div className="lab__histbody">
-                  <b className="truncate">{h.title}</b>
-                  <span className="hint truncate">{h.note || h.error || "—"}</span>
+                  <b className="truncate">{tSilnik(h.title)}</b>
+                  <span className="hint truncate">{tSilnik(h.note || h.error) || "—"}</span>
                 </div>
                 <span className="num hint">{czasKrotki(h.elapsedMs)}</span>
               </article>
@@ -1180,7 +1191,7 @@ export function LabView() {
           <Empty
             icon="alert"
             title={t("lab.noData")}
-            text={t("lab.noData.text", { err: info.error ?? "", path: info.ticksPath })}
+            text={t("lab.noData.text", { err: tSilnik(info.error), path: info.ticksPath })}
           />
         </Card>
       )}

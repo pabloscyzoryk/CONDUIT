@@ -1675,6 +1675,7 @@ impl SytuacjaKoszyka<'_> {
 pub struct EaRdzen {
     /// Engine-scoped restore latch. Never suppresses protective EA actions.
     continuation_entry_hold: bool,
+    profit_budget_anchor: crate::profit_budget::BudgetAnchor,
     /// bieżący stan warstwy
     stan: EaStan,
     /// odkąd trwa bieżący stan (0 = od zawsze)
@@ -1751,6 +1752,24 @@ impl Default for EaStan {
 }
 
 impl EaRdzen {
+    pub(crate) fn set_profit_budget_anchor(&mut self, anchor:crate::profit_budget::BudgetAnchor) {
+        self.profit_budget_anchor=anchor;
+    }
+    pub(crate) fn profit_budget_peak(&self)->f64 {self.profit_budget_anchor.peak}
+    fn profit_budget_volume<B:Broker>(&mut self,cfg:&Settings,b:&B,side:Side,entry:Px,
+        sl:Option<Px>,volume:f64,r:&mut Rachuba)->Option<f64> {
+        if cfg.profit_budget_arm_pct!=0.0 {
+            let equity=b.account().equity;
+            if equity.is_finite(){self.profit_budget_anchor.peak=self.profit_budget_anchor.peak.max(equity);}
+        }
+        match crate::profit_budget::limit_open_volume(cfg,self.profit_budget_anchor,b,side,entry,sl,volume) {
+            Ok(v)=>Some(v), Err(reason)=>{
+                eprintln!("[EA-BETA][ProfitBudget::{reason:?}] new order withheld");
+                r.odmowa_brokera(&mut self.bilans,&mut self.bilans_decyzji);None
+            }
+        }
+    }
+
     pub(crate) fn set_continuation_entry_hold(&mut self, hold: bool) {
         self.continuation_entry_hold=hold;
     }
@@ -3403,6 +3422,7 @@ impl EaRdzen {
                         return;
                     }
                 }
+                let Some(vol)=self.profit_budget_volume(cfg,b,side,q.entry(side),sl_ok,vol,r) else{return;};
                 match b.open_market(OrderReq {
                     side,
                     volume: vol,
@@ -3453,6 +3473,7 @@ impl EaRdzen {
                         return;
                     }
                 }
+                let Some(vol)=self.profit_budget_volume(cfg,b,side,px,sl,vol,r) else{return;};
                 match b.place_pending(PendingReq {
                     kind,
                     volume: vol,
@@ -5287,5 +5308,36 @@ mod testy {
         );
         assert!(s2.ryzyko_usd.is_none(), "koszyk bez SL zgłosił ryzyko");
         assert!(s2.pl_r().is_none());
+    }
+}
+
+#[cfg(test)]
+mod profit_budget_send_tests {
+    use super::*;
+    use crate::profit_budget::tests::{broker,cfg,anchor};
+    #[test]
+    fn profit_budget_ea_beta_market_and_pending_sends_use_shared_reserve() {
+        for limit in [None,Some(3990.0)] {
+            let mut c=cfg();c.ea_enabled=true;let mut b=broker();let q=b.quote();
+            let mut ea=EaRdzen::default();ea.set_profit_budget_anchor(anchor(&b,&c));
+            let sl=if limit.is_some(){3980.0}else{3990.0};let mut r=Rachuba::default();
+            ea.zloz_wejscie(&c,&mut b,&q,0.0,Side::Buy,1.0,limit,Some(sl),Some(4100.0),-2,"test",&mut r);
+            assert_eq!(r.ok,1);assert_eq!(b.sends,1);
+            let volume=if limit.is_some(){b.pendings[0].volume}else{b.positions[0].volume};
+            assert_eq!(volume,if limit.is_some(){0.05}else{0.04});
+            ea.zloz_wejscie(&c,&mut b,&q,0.0,Side::Buy,1.0,limit,Some(sl),Some(4100.0),-2,"test",&mut r);
+            assert_eq!(b.sends,1,"EA repeated the budget after its first send");assert_eq!(r.blad,1);
+        }
+    }
+    #[test]
+    fn profit_budget_ea_beta_unbound_anchor_or_missing_stop_cannot_open_new_exposure() {
+        for missing_anchor in [false,true] {
+            let c=cfg();let mut b=broker();let q=b.quote();let mut ea=EaRdzen::default();
+            if !missing_anchor{ea.set_profit_budget_anchor(anchor(&b,&c));}
+            let mut r=Rachuba::default();
+            ea.zloz_wejscie(&c,&mut b,&q,0.0,Side::Buy,1.0,None,
+                if missing_anchor{Some(3990.0)}else{None},Some(4100.0),0,"test",&mut r);
+            assert_eq!(b.sends,0);assert_eq!(r.blad,1);
+        }
     }
 }

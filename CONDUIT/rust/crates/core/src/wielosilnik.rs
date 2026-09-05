@@ -269,7 +269,8 @@ pub const POLA_RACHUNKU: &[&str] = &[
 ];
 
 // day_trail_basis is strategy-owned, like the existing day trail percentages.
-pub const LICZBA_POL_USTAWIEN: usize = 517;
+// Profit budget arm/keep/deploy are per-strategy risk axes, like day trail.
+pub const LICZBA_POL_USTAWIEN: usize = 520;
 
 /// Składa ustawienia dla JEDNEGO formatu.
 ///

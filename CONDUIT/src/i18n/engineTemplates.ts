@@ -1,0 +1,1524 @@
+/** Presentation-only translations of engine templates. Raw diagnostics remain unchanged. */
+export const ENGINE_TEMPLATES: readonly (readonly [string, string])[] = [
+  [
+    "Koszty netto są obecnie trybem badawczym: brak certyfikowanej migracji i trwałego ACK. LIVE nie włącza nowego księgowania. Nowe wejścia HOLD; działająca sesja zachowuje poprzednie księgowanie oraz close/SL/TP/cancel. Nie zeruję koszyków ani DD. Przy starcie ON nie łączę MT5; ochronę istniejących pozycji sprawdź w terminalu.",
+    "Net costs are currently a research mode: certified migration and durable ACK are unavailable. LIVE does not enable the new accounting. New entries are on HOLD; an active session keeps its previous accounting and protective close/SL/TP/cancel. Baskets and DD are not reset. If ON at startup, MT5 is not connected; check protection of existing positions in the terminal."
+  ],
+  [
+    "S/R V2 z dokładnych ticków jest badawcze: adapter historii LIVE nie jest podłączony. Żądana konfiguracja nie zostaje uruchomiona; nowe wejścia HOLD. Działająca noga zachowuje poprzednią konfigurację i ochronne close/SL/TP/cancel. Przy starcie ON nie łączę MT5; ochronę istniejących pozycji sprawdź w terminalu.",
+    "S/R V2 from exact ticks is experimental: the LIVE history adapter is not connected. The requested configuration is not started; new entries are on HOLD. An active strategy keeps its previous configuration and protective close/SL/TP/cancel. If ON at startup, MT5 is not connected; check protection of existing positions in the terminal."
+  ],
+  [
+    "S/R V2 LIVE — konfiguracja odrzucona, nowe wejścia HOLD",
+    "S/R V2 LIVE — configuration rejected, new entries on HOLD"
+  ],
+  [
+    "LIVE koszty netto — HOLD przed podłączeniem",
+    "LIVE net costs — HOLD before connection"
+  ],
+  [
+    "Zmiana ustawień S/R V2 odrzucona — dotychczasowa ochrona pozostaje",
+    "S/R V2 settings change rejected — existing protection remains"
+  ],
+  [
+    "Ustawienia przeładowane w locie",
+    "Settings reloaded during operation"
+  ],
+  [
+    "Preset {} NIE został przeładowany: S/R V2 LIVE HOLD",
+    "Preset {} was NOT reloaded: S/R V2 LIVE HOLD"
+  ],
+  [
+    "Preset {} przeładowany w locie",
+    "Preset {} reloaded during operation"
+  ],
+  [
+    "(brak — źródło tylko nasłuchiwane)",
+    "(none — source is monitored only)"
+  ],
+  [
+    "SYGNAŁ NIECZYTELNY — bot go nie wykonał",
+    "UNREADABLE SIGNAL — not executed"
+  ],
+  [
+    "Nierozpoznany zapis sygnału (źródło bez formatu)",
+    "Unrecognized signal syntax (source has no format)"
+  ],
+  [
+    "pętla handlowa nie działa — komenda odrzucona",
+    "trading loop is not running — command rejected"
+  ],
+  [
+    "Ręczne polecenie wymaga identyfikatora aktualnej sesji rachunku. Odśwież widok i podejmij decyzję ponownie.",
+    "A manual command requires the current account session ID. Refresh the view and decide again."
+  ],
+  [
+    "polecenie wstrzyknięcia bez treści",
+    "injection command has no content"
+  ],
+  [
+    "Polecenie pochodzi ze starej sesji FOLLOW. Odśwież widok po zmianie trybu rachunku.",
+    "This command belongs to an old FOLLOW session. Refresh the view after changing account mode."
+  ],
+  [
+    "Ręczne polecenie nie należy do aktualnej, potwierdzonej sesji rachunku. Odśwież widok i podejmij decyzję ponownie.",
+    "This manual command does not belong to the current confirmed account session. Refresh the view and decide again."
+  ],
+  [
+    "MT5 (na żywo)",
+    "MT5 (live)"
+  ],
+  [
+    "zlecenie oczekujące",
+    "pending order"
+  ],
+  [
+    "zamknięcie pozycji",
+    "position closure"
+  ],
+  [
+    "zamknięcie częściowe",
+    "partial close"
+  ],
+  [
+    "Rozgrzewka historii pominięta",
+    "History warm-up skipped"
+  ],
+  [
+    "MT5 zwrócił point=0; spreadu nie wolno zgadywać",
+    "MT5 returned point=0; the spread cannot be guessed"
+  ],
+  [
+    "nie udało się pobrać point instrumentu: {e}",
+    "failed to retrieve the instrument point: {e}"
+  ],
+  [
+    "dynamiczne S/R {}/{}: {} domkniętych M1, pokrycie={} → {}",
+    "dynamic S/R {}/{}: {} closed M1 bars, coverage={} → {}"
+  ],
+  [
+    "pełne",
+    "complete"
+  ],
+  [
+    "za krótkie",
+    "too short"
+  ],
+  [
+    "filtr reżimu: historia {} h / wymagane {} h → {}\n",
+    "regime filter: {} h of history / {} h required → {}\n"
+  ],
+  [
+    "filtr reżimu: wyłączony we wszystkich pracujących presetach\n",
+    "regime filter: disabled in every active preset\n"
+  ],
+  [
+    "okno zmienności: {} próbek M1 / okno {} min\n",
+    "volatility window: {} M1 samples / {} min window\n"
+  ],
+  [
+    "\n⚠ NIE UDAŁO SIĘ POBRAĆ ŚWIEC H1: {e}\n",
+    "\n⚠ FAILED TO RETRIEVE H1 BARS: {e}\n"
+  ],
+  [
+    "⚠ NIE UDAŁO SIĘ POBRAĆ ŚWIEC M1: {e}\n",
+    "⚠ FAILED TO RETRIEVE M1 BARS: {e}\n"
+  ],
+  [
+    "⚠ NIE UDAŁO SIĘ ODTWORZYĆ SPREADU S/R: {e}\n",
+    "⚠ FAILED TO RECONSTRUCT THE S/R SPREAD: {e}\n"
+  ],
+  [
+    "⚠ HISTORIA RYNKU NIEPEŁNA",
+    "⚠ INCOMPLETE MARKET HISTORY"
+  ],
+  [
+    "⚠ Bot wystartował z NIECZYNNYM filtrem reżimu",
+    "⚠ Bot started with an INACTIVE regime filter"
+  ],
+  [
+    "⚠ Dynamiczne S/R wystartowało bez pełnej historii",
+    "⚠ Dynamic S/R started without complete history"
+  ],
+  [
+    "Żaden format nie handluje",
+    "No format is trading"
+  ],
+  [
+    "Kolizja slotów numeracji koszyków",
+    "Basket numbering slot collision"
+  ],
+  [
+    "Łańcuch „{}”: {} silników",
+    "Chain “{}”: {} engines"
+  ],
+  [
+    "rachunek zmienia ścieżkę wykonania nogi {} ({})",
+    "account changes the execution path of strategy {} ({})"
+  ],
+  [
+    "ROZJAZD PARYTETU LIVE/BACKTEST: {} pól wykonania",
+    "LIVE/BACKTEST PARITY MISMATCH: {} execution fields"
+  ],
+  [
+    "Rachunek nadpisuje {} pól nogom łańcucha",
+    "Account overrides {} fields of chain strategies"
+  ],
+  [
+    "ROZJAZD BEZPIECZNIKÓW: {} nóg gra bez własnej ochrony",
+    "RISK PROTECTION MISMATCH: {} strategies lack their own protection"
+  ],
+  [
+    "Nie uruchamiam MT5: konfiguracja startowa niepotwierdzona",
+    "MT5 not started: startup configuration is unconfirmed"
+  ],
+  [
+    "Napraw konfigurację i uruchom Conduit ponownie. Odblokowanie panelu nie zastępuje poprawnego wczytania konfiguracji.",
+    "Fix the configuration and restart Conduit. Unlocking the panel does not replace successfully loading the configuration."
+  ],
+  [
+    "powtórna dostawa bez nowej wykonywalnej rewizji — nie idzie do silnika",
+    "repeat delivery without a new executable revision — not sent to the engine"
+  ],
+  [
+    "nie udało się dopisać wiadomości do archiwum",
+    "failed to append the message to the archive"
+  ],
+  [
+    "Łączę z MetaTrader 5",
+    "Connecting to MetaTrader 5"
+  ],
+  [
+    "Brak połączenia z MT5",
+    "No connection to MT5"
+  ],
+  [
+    "Połączono z MetaTrader 5",
+    "Connected to MetaTrader 5"
+  ],
+  [
+    "Utracono połączenie z MT5",
+    "MT5 connection lost"
+  ],
+  [
+    "niezgodna tożsamość w risk_state.json; nie resetuję ochrony rachunku",
+    "identity mismatch in risk_state.json; account protection is not reset"
+  ],
+  [
+    "Poprzedni rachunek ma niezapisany stan ochrony; napraw zapis przed zmianą konta.",
+    "The previous account has unsaved protection state; fix persistence before switching accounts."
+  ],
+  [
+    "Poprzedni zakres magic ma niezapisany stan ochrony; napraw zapis przed zmianą zakresu.",
+    "The previous magic scope has unsaved protection state; fix persistence before switching scopes."
+  ],
+  [
+    "Niedostępna pamięć ryzyka rachunku: {e}. Nie resetuję ochrony; napraw risk_state.json przed wznowieniem.",
+    "Account risk memory is unavailable: {e}. Protection is not reset; fix risk_state.json before resuming."
+  ],
+  [
+    "Odrzucono nieprzypisaną kolejkę po podłączeniu konta",
+    "Unassigned queue rejected after connecting the account"
+  ],
+  [
+    "{dropped} poleceń/wiadomości z okresu bez potwierdzonej sesji konta; nie przenoszę ich między rachunkami.",
+    "{dropped} commands/messages from a period without a confirmed account session; these are not transferred between accounts."
+  ],
+  [
+    "Blokada strażnika ryzyka PRZENIESIONA przez ponowne podłączenie",
+    "Risk guard halt CARRIED OVER through reconnection"
+  ],
+  [
+    "MetaTrader 5 podłączony",
+    "MetaTrader 5 connected"
+  ],
+  [
+    "odliczanie kredytu WYŁĄCZONE",
+    "credit deduction DISABLED"
+  ],
+  [
+    "kwota RĘCZNA z ustawień",
+    "MANUAL amount from settings"
+  ],
+  [
+    "Podstawa wielkości pozycji",
+    "Position sizing basis"
+  ],
+  [
+    "Nie można zapisać pamięci ryzyka rachunku — handel wstrzymany: {e}",
+    "Cannot save account risk memory — trading halted: {e}"
+  ],
+  [
+    "Odrzucono zmianę księgowania LIVE — nowe wejścia HOLD",
+    "LIVE accounting change rejected — new entries on HOLD"
+  ],
+  [
+    "Zmieniono zasady wyboru konta — nowa sesja MT5.",
+    "Account selection policy changed — new MT5 session."
+  ],
+  [
+    "Follow terminal: tożsamość/połączenie wymaga wznowienia: {e}",
+    "Follow terminal: identity/connection requires recovery: {e}"
+  ],
+  [
+    "Kolejka poleceń zamknięta.",
+    "Command queue closed."
+  ],
+  [
+    "Kwotowania wróciły",
+    "Quotes restored"
+  ],
+  [
+    "Brak kwotowań {symbol} od {} — odbudowuję połączenie z terminalem.",
+    "No {symbol} quotes for {} — reconnecting to the terminal."
+  ],
+  [
+    "Niepełne potwierdzenie zamknięcia — blokada nowych wejść",
+    "Incomplete close confirmation — new entries blocked"
+  ],
+  [
+    "Potwierdzenia zamknięć uzgodnione",
+    "Close confirmations reconciled"
+  ],
+  [
+    "Odczyt stanu brokera zakończony; tymczasowa bramka wejść zdjęta.",
+    "Broker state read completed; temporary entry gate removed."
+  ],
+  [
+    "Odrzucono ręczne polecenie z nieaktualnej sesji",
+    "Manual command from an outdated session rejected"
+  ],
+  [
+    "Polecenie nie zostanie przeniesione na inny rachunek ani nowe połączenie. Odśwież widok i zdecyduj ponownie.",
+    "The command will not be transferred to another account or a new connection. Refresh the view and decide again."
+  ],
+  [
+    "Sygnał PRZETERMINOWANY ({wiek:.0} min) — pominięty",
+    "EXPIRED signal ({wiek:.0} min) — skipped"
+  ],
+  [
+    "Sygnał ODROCZONY — nie wykonany",
+    "DEFERRED signal — not executed"
+  ],
+  [
+    "Sygnał POMINIĘTY: {}",
+    "SKIPPED signal: {}"
+  ],
+  [
+    "Sygnał wykonany: {}",
+    "Signal executed: {}"
+  ],
+  [
+    "Sygnał CZEKA na decyzję: {}",
+    "Signal AWAITS a decision: {}"
+  ],
+  [
+    "Sygnał ręczny ODROCZONY",
+    "Manual signal DEFERRED"
+  ],
+  [
+    "Sygnał ręczny POMINIĘTY",
+    "Manual signal SKIPPED"
+  ],
+  [
+    "Silnik ŚWIADOMIE go nie wziął — {powod}.\n\n{}",
+    "The engine deliberately did not take it — {powod}.\n\n{}"
+  ],
+  [
+    "Sygnał ręczny → silnik",
+    "Manual signal → engine"
+  ],
+  [
+    "Kliknięty sygnał ODROCZONY",
+    "Clicked signal DEFERRED"
+  ],
+  [
+    "Sygnał kliknięty POMINIĘTY",
+    "Clicked signal SKIPPED"
+  ],
+  [
+    "Sygnał wykonany ręcznie",
+    "Signal executed manually"
+  ],
+  [
+    "Nie ma czego wykonać",
+    "Nothing to execute"
+  ],
+  [
+    "wiadomość {id} już nie czeka",
+    "message {id} is no longer waiting"
+  ],
+  [
+    "Sygnał odrzucony",
+    "Signal rejected"
+  ],
+  [
+    "Zmieniono komentarz zleceń",
+    "Order comment changed"
+  ],
+  [
+    "nowe zlecenia dostaną prefiks „{znacznik}”",
+    "new orders will use the prefix “{znacznik}”"
+  ],
+  [
+    "Follow terminal: nie publikuję niepotwierdzonej sesji rachunku: {e}",
+    "Follow terminal: unconfirmed account session is not published: {e}"
+  ],
+  [
+    "Nie zapisano stanu rachunku: zatrzymuję sesję, aby nie utracić ochrony po restarcie lub zmianie konta.",
+    "Account state was not saved: stopping the session to preserve protection after a restart or account switch."
+  ],
+  [
+    "Aktywny łańcuch zmienił się na „{aktywny}” (panel albo drabinka).",
+    "Active chain changed to “{aktywny}” (panel or ladder)."
+  ],
+  [
+    "Sidecar MT5 rozłączył się.",
+    "MT5 sidecar disconnected."
+  ],
+  [
+    "{preset} (zamrożony)",
+    "{preset} (frozen)"
+  ],
+  [
+    "Zakres {:?}: {}. Nowe ryzyko wstrzymane; ochronne wyjścia i SL pozostają czynne. Etap A nie jest atomowym checkpointem dysku/receiptów.",
+    "Scope {:?}: {}. New risk is on hold; protective exits and SL remain active. Stage A is not an atomic disk/receipt checkpoint."
+  ],
+  [
+    "Zamiary SL/TP: {}, terminy wyjść: {}. To nie certyfikuje pełnej pamięci strategii ani trwałego ACK receiptów.",
+    "SL/TP intents: {}, exit deadlines: {}. This does not certify complete strategy memory or durable receipt ACK."
+  ],
+  [
+    "Silnik zapasowy: {} (właściciel slotu 0)",
+    "Fallback engine: {} (slot 0 owner)"
+  ],
+  [
+    "Slot {slot} formatu {format} zajęty w nowym łańcuchu",
+    "Slot {slot} for format {format} is occupied in the new chain"
+  ],
+  [
+    "Format {} ZAMROŻONY (tylko zarządzanie)",
+    "Format {} FROZEN (management only)"
+  ],
+  [
+    " [zamrożony]",
+    " [frozen]"
+  ],
+  [
+    "ŁAŃCUCH PRZEŁĄCZONY: {}",
+    "CHAIN SWITCHED: {}"
+  ],
+  [
+    "Łańcuch przełączony: {} → {}",
+    "Chain switched: {} → {}"
+  ],
+  [
+    "DRABINKA: błąd przełączenia",
+    "LADDER: switch failed"
+  ],
+  [
+    "filtr rezimu nie wpuscil",
+    "regime filter rejected entry"
+  ],
+  [
+    "filtr trendu nie wpuscil",
+    "trend filter rejected entry"
+  ],
+  [
+    "TELEGRAM MILCZY, a połączenia nie da się potwierdzić",
+    "TELEGRAM IS SILENT and the connection cannot be confirmed"
+  ],
+  [
+    "pamięć procesu (ponowne podłączenie)",
+    "process memory (reconnection)"
+  ],
+  [
+    "Start bez otwartych koszyków",
+    "Started without open baskets"
+  ],
+  [
+    "Na rachunku {} nie ma nic z magic {magic} do przejęcia.",
+    "Account {} has no orders with magic {magic} to adopt."
+  ],
+  [
+    "SAME ZLECENIA U BROKERA (brak zrzutu)",
+    "BROKER ORDERS ONLY (no snapshot)"
+  ],
+  [
+    "brak zrzutu",
+    "no snapshot"
+  ],
+  [
+    "Wznowienie stanu po restarcie — SĄ POZYCJE BEZ ROZPOZNANIA",
+    "State recovery after restart — UNIDENTIFIED POSITIONS EXIST"
+  ],
+  [
+    "Wznowiono {ile} koszyków po restarcie",
+    "Recovered {ile} baskets after restart"
+  ],
+  [
+    "Nie zapisano pamięci ryzyka rachunku",
+    "Failed to save account risk memory"
+  ],
+  [
+    "{e}; zapis zostanie ponowiony, sesja wstrzymana do odzyskania trwałej ochrony.",
+    "{e}; saving will be retried; the session is halted until durable protection is restored."
+  ],
+  [
+    "nie udało się zapisać zrzutu koszyków",
+    "failed to save the basket snapshot"
+  ],
+  [
+    "Nie udało się zapisać zrzutu koszyków",
+    "Failed to save the basket snapshot"
+  ],
+  [
+    "Śledzę konto wybrane w terminalu",
+    "Following the account selected in the terminal"
+  ],
+  [
+    "{} · {} · {}; stare dane logowania nie są wysyłane. Każde polecenie ma blokadę tożsamości rachunku.",
+    "{} · {} · {}; old credentials are not sent. Every command is guarded by account identity."
+  ],
+  [
+    "Nie sprawdzam, na jakim koncie jest terminal",
+    "Terminal account identity is not checked"
+  ],
+  [
+    "handel tym symbolem jest WYŁĄCZONY przez brokera",
+    "trading this symbol is DISABLED by the broker"
+  ],
+  [
+    "broker dopuszcza wyłącznie pozycje KUPNA — sygnały SELL zostaną odrzucone",
+    "the broker allows BUY positions only — SELL signals will be rejected"
+  ],
+  [
+    "broker dopuszcza wyłącznie pozycje SPRZEDAŻY — sygnały BUY zostaną odrzucone",
+    "the broker allows SELL positions only — BUY signals will be rejected"
+  ],
+  [
+    "broker dopuszcza wyłącznie ZAMYKANIE pozycji — nowe wejścia będą odrzucane",
+    "the broker allows CLOSING positions only — new entries will be rejected"
+  ],
+  [
+    "Symbol wyłączony z handlu",
+    "Symbol trading disabled"
+  ],
+  [
+    "Brak kwotowań {symbol}",
+    "No quotes for {symbol}"
+  ],
+  [
+    "zamknięto wszystko (pozycje i zlecenia oczekujące)",
+    "closed everything (positions and pending orders)"
+  ],
+  [
+    "nie ma pozycji {} — nic do zamknięcia",
+    "no {} positions — nothing to close"
+  ],
+  [
+    "zamknięto {zamkniete} z {ile} pozycji {} · {suma:+.2} $",
+    "closed {zamkniete} of {ile} {} positions · {suma:+.2} $"
+  ],
+  [
+    "{opis} (część odrzucona: {})",
+    "{opis} (partly rejected: {})"
+  ],
+  [
+    "łatka koszyka nie jest obiektem",
+    "basket patch is not an object"
+  ],
+  [
+    "nie ma koszyka B{id}",
+    "basket B{id} does not exist"
+  ],
+  [
+    "dół strefy {v:.2}",
+    "zone low {v:.2}"
+  ],
+  [
+    "góra strefy {v:.2}",
+    "zone high {v:.2}"
+  ],
+  [
+    "koszyk B{id}: broker odrzucił zmianę SL — {}",
+    "basket B{id}: broker rejected the SL change — {}"
+  ],
+  [
+    "koszyk B{id}: nic do zmiany",
+    "basket B{id}: nothing to change"
+  ],
+  [
+    "koszyk B{id}: {}",
+    "basket B{id}: {}"
+  ],
+  [
+    "CONTINUATION REVIEW: zwykłe Wznów nie uzgadnia brakującej pamięci strategii i nie rozbraja strażnika ryzyka",
+    "CONTINUATION REVIEW: ordinary Resume does not reconcile missing strategy memory and does not disarm the risk guard"
+  ],
+  [
+    "Zdjęto zatrzymanie klasy DIAGNOZA (strażnik ryzyka NIETKNIĘTY)",
+    "DIAGNOSTIC halt removed (risk guard UNCHANGED)"
+  ],
+  [
+    "zdjęto zatrzymanie diagnostyczne (strażnik ryzyka DZIAŁA)",
+    "diagnostic halt removed (risk guard ACTIVE)"
+  ],
+  [
+    "zdjęto zatrzymanie diagnostyczne · ZOSTAJE ryzyko: {zostaje}",
+    "diagnostic halt removed · risk halt REMAINS: {zostaje}"
+  ],
+  [
+    "STRAŻNIK RYZYKA WYŁĄCZONY (ręczne wznowienie)",
+    "RISK GUARD DISABLED (manual resume)"
+  ],
+  [
+    "handel wznowiony (STRAŻNIK WYŁĄCZONY)",
+    "trading resumed (GUARD DISABLED)"
+  ],
+  [
+    "zamknięto #{ticket} (spoza bota) · {p:+.2} $",
+    "closed #{ticket} (outside the bot) · {p:+.2} $"
+  ],
+  [
+    "zamknięto #{ticket} · {p:+.2} $",
+    "closed #{ticket} · {p:+.2} $"
+  ],
+  [
+    " — UWAGA: {zostalo} pozycji/zleceń zostało, koszyk dalej pod zarządem",
+    " — WARNING: {zostalo} positions/orders remain; basket is still managed"
+  ],
+  [
+    "koszyk B{id}: zamknięto {n} z {ile} pozycji, skasowano {z} z {ile_z} zleceń{ogon}",
+    "basket B{id}: closed {n} of {ile} positions, cancelled {z} of {ile_z} orders{ogon}"
+  ],
+  [
+    "skasowano {} z {} zleceń oczekujących (bota {n}/{ile_n}, spoza bota {o}/{ile_o})",
+    "cancelled {} of {} pending orders (bot {n}/{ile_n}, outside bot {o}/{ile_o})"
+  ],
+  [
+    "zamknięto {volume} lota z #{ticket} (spoza bota) · {p:+.2} $",
+    "closed {volume} lots of #{ticket} (outside the bot) · {p:+.2} $"
+  ],
+  [
+    "zamknięto {volume} lota z #{ticket} · {p:+.2} $",
+    "closed {volume} lots of #{ticket} · {p:+.2} $"
+  ],
+  [
+    "strażnik uzbrojony ponownie",
+    "risk guard rearmed"
+  ],
+  [
+    "pętla handlowa nie obsługuje polecenia {inne:?}",
+    "trading loop does not support command {inne:?}"
+  ],
+  [
+    "sygnał przeterminowany: wysłany {wiek_min:.0} min temu, próg {prog_min:.0} min",
+    "expired signal: sent {wiek_min:.0} min ago, limit {prog_min:.0} min"
+  ],
+  [
+    " (koszyk B{b}",
+    " (basket B{b}"
+  ],
+  [
+    "Broker odrzucił {} operacji",
+    "Broker rejected {} operations"
+  ],
+  [
+    "Broker odrzucił zlecenie ({})",
+    "Broker rejected the order ({})"
+  ],
+  [
+    "SL/TP bliżej ceny niż wymaga broker (stops level)",
+    "SL/TP is closer to price than the broker permits (stops level)"
+  ],
+  [
+    "SL/TP po niewłaściwej stronie ceny",
+    "SL/TP is on the wrong side of price"
+  ],
+  [
+    "zlecenie/pozycja już nie istnieje",
+    "order/position no longer exists"
+  ],
+  [
+    "brak wolnego marginesu",
+    "insufficient free margin"
+  ],
+  [
+    "rynek zamknięty",
+    "market closed"
+  ],
+  [
+    "broker odrzucił zlecenie",
+    "broker rejected the order"
+  ],
+  [
+    "HANDEL ZATRZYMANY przez strażnika ryzyka",
+    "TRADING HALTED by the risk guard"
+  ],
+  [
+    "UWAGA: obsunięcie {pct:.1} % — STRAŻNIK JEST WYŁĄCZONY",
+    "WARNING: drawdown {pct:.1} % — GUARD IS DISABLED"
+  ],
+  [
+    "Obsunięcie {pct:.1} % zbliża się do limitu",
+    "Drawdown {pct:.1} % is approaching the limit"
+  ],
+  [
+    "ręczne wznowienie handlu",
+    "manual trading resume"
+  ],
+  [
+    "Terminal jest teraz na {} · {} ({}). PnL dnia i sesji liczą się                  od bieżącego equity — kotwice poprzedniego konta nie mogą być                  używane po zmianie rachunku.",
+    "The terminal is now on {} · {} ({}). Daily and session PnL start from the current equity — anchors from the previous account cannot be used after switching accounts."
+  ],
+  [
+    "konfiguracja nie została wczytana",
+    "configuration was not loaded"
+  ],
+  [
+    "brak zrodel",
+    "no sources"
+  ],
+  [
+    "start bez źródeł",
+    "started without sources"
+  ],
+  [
+    "FRESHQUEEN-5 (zamrożony)",
+    "FRESHQUEEN-5 (frozen)"
+  ],
+  [
+    "ROZJAZD BEZPIECZNIKÓW",
+    "RISK PROTECTION MISMATCH"
+  ],
+  [
+    "żadne scalanie nie trwa",
+    "no merge is running"
+  ],
+  [
+    "brak mostu do MetaTradera 5 — listy symboli brokera nie ma skąd wziąć",
+    "no MetaTrader 5 bridge — broker symbols cannot be retrieved"
+  ],
+  [
+    "MetaTrader 5 nie jest podłączony — listy symboli brokera nie ma skąd wziąć",
+    "MetaTrader 5 is not connected — broker symbols cannot be retrieved"
+  ],
+  [
+    "lista symboli padła: {e}",
+    "symbol list retrieval failed: {e}"
+  ],
+  [
+    "katalog nie istnieje: {}",
+    "directory does not exist: {}"
+  ],
+  [
+    "brak pola `path`",
+    "missing `path` field"
+  ],
+  [
+    "plik nie istnieje: {zadana}",
+    "file does not exist: {zadana}"
+  ],
+  [
+    "to nie jest plik: {zadana}",
+    "not a file: {zadana}"
+  ],
+  [
+    "pusta ścieżka",
+    "empty path"
+  ],
+  [
+    "ścieżka leży poza katalogiem bota i poza katalogiem docelowym scalania",
+    "path is outside the bot directory and the merge output directory"
+  ],
+  [
+    "plik ma {:.1} MB — za dużo na schowek (sufit {} MB)",
+    "file is {:.1} MB — too large for the clipboard (limit {} MB)"
+  ],
+  [
+    "nie udało się uruchomić Eksploratora: {e}",
+    "failed to start Explorer: {e}"
+  ],
+  [
+    "nie udało się otworzyć katalogu: {e}",
+    "failed to open directory: {e}"
+  ],
+  [
+    "pusta wiadomość",
+    "empty message"
+  ],
+  [
+    "nie ma presetu „{name}”",
+    "preset “{name}” does not exist"
+  ],
+  [
+    "łatka musi być obiektem JSON",
+    "patch must be a JSON object"
+  ],
+  [
+    "zapis presetu: {e}",
+    "preset save: {e}"
+  ],
+  [
+    "pobranie listy czatów nie doszło do skutku: {e}",
+    "chat list retrieval failed: {e}"
+  ],
+  [
+    "ten czat nie ma zdjęcia profilowego",
+    "this chat has no profile photo"
+  ],
+  [
+    "miniatura zniknęła z pamięci podręcznej",
+    "thumbnail is no longer cached"
+  ],
+  [
+    "nie ma wyniku „{id}”",
+    "result “{id}” does not exist"
+  ],
+  [
+    "nie ma modelu „{id}”",
+    "model “{id}” does not exist"
+  ],
+  [
+    "api_id musi być liczbą dodatnią z my.telegram.org",
+    "api_id must be a positive number from my.telegram.org"
+  ],
+  [
+    "api_hash ma mieć dokładnie 32 znaki szesnastkowe (skopiuj go z my.telegram.org)",
+    "api_hash must contain exactly 32 hexadecimal characters (copy it from my.telegram.org)"
+  ],
+  [
+    "Zapisano poświadczenia Telegrama",
+    "Telegram credentials saved"
+  ],
+  [
+    "czyszczenie nie doszło do skutku: {e}",
+    "cleanup failed: {e}"
+  ],
+  [
+    "Skasowano poświadczenia Telegrama",
+    "Telegram credentials deleted"
+  ],
+  [
+    "api_id, api_hash i łańcuch sesji usunięte z secrets.json",
+    "api_id, api_hash and session string removed from secrets.json"
+  ],
+  [
+    "powiadomienia e-mail nie są uruchomione",
+    "email notifications are not running"
+  ],
+  [
+    "zadanie wysyłki padło: {e}",
+    "email task failed: {e}"
+  ],
+  [
+    "Podsumowanie dnia",
+    "Daily summary"
+  ],
+  [
+    "zadanie logowania padło: {e}",
+    "login task failed: {e}"
+  ],
+  [
+    "brak aktywnego kodu QR",
+    "no active QR code"
+  ],
+  [
+    "hasło nie może być puste",
+    "password cannot be empty"
+  ],
+  [
+    "wylogowanie nie doszło do skutku: {e}",
+    "logout failed: {e}"
+  ],
+  [
+    "to źródło danych nie zna listy symboli brokera",
+    "this data source does not provide broker symbols"
+  ],
+  [
+    "MetaTrader 5 nie jest podłączony — historii nie ma skąd wziąć.",
+    "MetaTrader 5 is not connected — history cannot be retrieved."
+  ],
+  [
+    "odczyt historii padł: {e}",
+    "history read failed: {e}"
+  ],
+  [
+    "MetaTrader 5 nie jest podłączony — kosztów nie ma skąd zmierzyć.",
+    "MetaTrader 5 is not connected — costs cannot be measured."
+  ],
+  [
+    "pomiar kosztów padł: {e}",
+    "cost measurement failed: {e}"
+  ],
+  [
+    "odczyt świec padł: {e}",
+    "candle read failed: {e}"
+  ],
+  [
+    "odczyt symbolu padł: {e}",
+    "symbol read failed: {e}"
+  ],
+  [
+    "brak połączenia z MT5 — historii rachunku nie ma skąd wziąć",
+    "no connection to MT5 — account history cannot be retrieved"
+  ],
+  [
+    "pełna historia rachunku z terminala MT5",
+    "complete account history from the MT5 terminal"
+  ],
+  [
+    "ręczne / terminal",
+    "manual / terminal"
+  ],
+  [
+    "przeglądarka",
+    "browser"
+  ],
+  [
+    "historia zleceń oczekujących",
+    "pending order history"
+  ],
+  [
+    "nie ma plików dziennika w tym zakresie dób",
+    "no journal files in this date range"
+  ],
+  [
+    "nie ma zdarzeń dziennika w tym zakresie dób",
+    "no journal events in this date range"
+  ],
+  [
+    "archiwum wiadomości jest puste — zapis rusza z pierwszą wiadomością z Telegrama",
+    "message archive is empty — recording starts with the first Telegram message"
+  ],
+  [
+    "archiwum wiadomości jest puste w tym zakresie dób",
+    "message archive is empty in this date range"
+  ],
+  [
+    "postęp zostanie zapisany",
+    "progress will be saved"
+  ],
+  [
+    "nic się nie liczy",
+    "nothing is being calculated"
+  ],
+  [
+    "odpowiedź ok=false bez pola `error`",
+    "ok=false response without an `error` field"
+  ],
+  [
+    "sidecar niepodłączony",
+    "sidecar disconnected"
+  ],
+  [
+    "błąd protokołu: {0}",
+    "protocol error: {0}"
+  ],
+  [
+    "broker odmówił: {} ({})",
+    "broker refused: {} ({})"
+  ],
+  [
+    "odpowiedź w złym kształcie: {0}",
+    "unexpected response shape: {0}"
+  ],
+  [
+    "połączenie z sidecarem zerwane",
+    "sidecar connection lost"
+  ],
+  [
+    "MT5: nasłuch dla sidecara",
+    "MT5: listening for sidecar"
+  ],
+  [
+    "MT5: sidecar nie zdążył się połączyć, nadzór działa dalej",
+    "MT5: sidecar connection timed out; supervision continues"
+  ],
+  [
+    "MT5: zapis do sidecara nieudany",
+    "MT5: sidecar write failed"
+  ],
+  [
+    "MT5: nie da się ustawić nasłuchu nieblokującego",
+    "MT5: cannot set nonblocking listener"
+  ],
+  [
+    "MT5: nie udało się uruchomić sidecara",
+    "MT5: failed to start sidecar"
+  ],
+  [
+    "MT5: autostart wyłączony — czekam, aż sidecar sam się połączy",
+    "MT5: autostart disabled — waiting for the sidecar to connect"
+  ],
+  [
+    "MT5: sidecar się nie zgłosił",
+    "MT5: sidecar did not connect"
+  ],
+  [
+    "MT5: nadzór zakończony",
+    "MT5: supervision ended"
+  ],
+  [
+    "MT5: odrzucone połączenie spoza pętli lokalnej",
+    "MT5: non-loopback connection rejected"
+  ],
+  [
+    "MT5: nie da się przełączyć gniazda w tryb blokujący",
+    "MT5: cannot switch socket to blocking mode"
+  ],
+  [
+    "MT5: nie da się sklonować gniazda",
+    "MT5: cannot clone socket"
+  ],
+  [
+    "MT5: sidecar podłączony",
+    "MT5: sidecar connected"
+  ],
+  [
+    "MT5: sidecar zamknął połączenie",
+    "MT5: sidecar closed the connection"
+  ],
+  [
+    "MT5: odpowiedź ze starego połączenia — pominięta",
+    "MT5: response from an old connection — ignored"
+  ],
+  [
+    "MT5: odpowiedź bez oczekującego żądania (timeout?)",
+    "MT5: response has no pending request (timeout?)"
+  ],
+  [
+    "MT5: ramka nie do sparsowania",
+    "MT5: unparseable frame"
+  ],
+  [
+    "MT5: zły tick",
+    "MT5: invalid tick"
+  ],
+  [
+    "MT5: złe zdarzenie zamknięcia",
+    "MT5: invalid close event"
+  ],
+  [
+    "Nieczytelne potwierdzenie zamknięcia: {e}",
+    "Unreadable close confirmation: {e}"
+  ],
+  [
+    "MT5: ROZJAZD WERSJI PROTOKOŁU — sidecar i bot nie pasują do siebie",
+    "MT5: PROTOCOL VERSION MISMATCH — sidecar and bot are incompatible"
+  ],
+  [
+    "MT5: złe powitanie",
+    "MT5: invalid handshake"
+  ],
+  [
+    "Kontynuacja strategii {owner}: REVIEW",
+    "Strategy continuation {owner}: REVIEW"
+  ],
+  ["Koszyk utworzony · {0}{1} · strefa {2}–{3}", "Basket created · {0}{1} · zone {2}–{3}"],
+  ["Wejście rynkowe · {0} × {1} lot @ {2}", "Market entry · {0} × {1} lots @ {2}"],
+  ["Rozstawiono {0} limitów · krok {1}{2}", "Placed {0} limits · step {1}{2}"],
+  ["Zamknięto #{0} @ {1} · {2}{3} $ ({4})", "Closed #{0} @ {1} · {2}{3} $ ({4})"],
+  ["Koszyk zakończony (brak pozycji i limitów)", "Basket finished (no positions or limits)"],
+  ["TP{0} osiągnięty ({1}) @ {2}", "TP{0} reached ({1}) @ {2}"],
+  ["Skasowano {0} niezafillowanych limitów", "Cancelled {0} unfilled limits"],
+  ["SCALE-OUT: zamknięto {0} poz. ({1}%)", "SCALE-OUT: closed {0} positions ({1}%)"],
+  ["RISK FREE zignorowany (ustawienie)", "RISK FREE ignored (setting)"],
+  ["RISK FREE bez otwartych pozycji — pominięto", "RISK FREE without open positions — skipped"],
+  ["OUT AT ENTRY zignorowany (ustawienie)", "OUT AT ENTRY ignored (setting)"],
+  ["OUT AT ENTRY — koszyk zamknięty", "OUT AT ENTRY — basket closed"],
+  ["Limity anulowane komunikatem z kanału", "Limits cancelled by a channel message"],
+  ["SL HIT z kanału — limity skasowane", "SL HIT from channel — limits cancelled"],
+  ["Koszyk zamknięty ręcznie", "Basket closed manually"],
+  ["Zamknięto wszystko ({0})", "Closed everything ({0})"],
+  ["poza sesją ({0})", "outside session ({0})"],
+  ["cel dzienny osiągnięty ({0} $)", "daily target reached ({0} $)"],
+  ["tag pominięty: {0}", "excluded tag: {0}"],
+  ["brak wymaganego tagu", "required tag missing"],
+  ["Sygnał zablokowany", "Signal blocked"],
+  ["Sygnał odrzucony filtrem", "Signal rejected by filter"],
+  ["Wejścia zablokowane", "Entries blocked"],
+  ["Koszyk B{0} · {1}{2}", "Basket B{0} · {1}{2}"],
+  ["TP{0} HIT · koszyk B{1}", "TP{0} HIT · basket B{1}"],
+  ["SL HIT · koszyk B{0}", "SL HIT · basket B{0}"],
+  ["RISK FREE · koszyk B{0}", "RISK FREE · basket B{0}"],
+  ["bez poziomu — użyto krawędzi strefy", "no level — zone edge used"],
+  ["OUT AT ENTRY · koszyk B{0}", "OUT AT ENTRY · basket B{0}"],
+  ["CANCEL · koszyk B{0}", "CANCEL · basket B{0}"],
+  ["CLOSE ALL z kanału", "CLOSE ALL from channel"],
+  ["Nowy SL koszyka B{0}", "New SL for basket B{0}"],
+  ["Brak dopasowania", "No match"],
+  ["Bot wystartował", "Bot started"],
+  ["Sesja zainicjowana, backup pamięci wczytany", "Session initialized, memory backup loaded"],
+  ["Interwał pętli", "Loop interval"],
+  ["Wypełniono {0} zlecenie(a)", "Filled {0} order(s)"],
+  ["Equity spadło o ${0} od piku dnia", "Equity fell ${0} from the daily peak"],
+  ["+${0} — zamknięto wszystko", "+${0} — closed everything"],
+  ["Przywrócenie ustawień", "Restore settings"],
+  ["stały {0}", "fixed {0}"],
+  ["Zapis łańcuchów", "Save chains"],
+  ["Zmiana łańcucha", "Change chain"],
+  ["Aktywny łańcuch → {0}", "Active chain → {0}"],
+  ["Ręczne wejście {0}", "Manual entry {0}"],
+  ["Zamknięcie #{0}", "Close #{0}"],
+  ["Zamknięto #{0}", "Closed #{0}"],
+  ["Zamknięcie {0} lota z #{1}", "Close {0} lots of #{1}"],
+  ["SL {0} · TP {1} · pozycja zamrożona", "SL {0} · TP {1} · position frozen"],
+  ["Zamknięcie zbiorcze", "Close positions in bulk"],
+  ["Zamknięto {0} pozycji ({1})", "Closed {0} positions ({1})"],
+  ["Usunięcie pendinga #{0}", "Delete pending #{0}"],
+  ["Usunięto pending #{0}", "Deleted pending #{0}"],
+  ["Usunięcie wszystkich pendingów", "Delete all pending orders"],
+  ["Usunięto wszystkie pendingi ({0})", "Deleted all pending orders ({0})"],
+  ["Zamknięcie koszyka B{0}", "Close basket B{0}"],
+  ["Zamknięto koszyk B{0}", "Closed basket B{0}"],
+  ["Zapis koszyka B{0}", "Save basket B{0}"],
+  ["Aktualizacja koszyka B{0}", "Update basket B{0}"],
+  ["Zapis kanału", "Save channel"],
+  ["Symulacja wiadomości", "Simulate message"],
+  ["Wykonanie sygnału", "Execute signal"],
+  ["Odrzucenie sygnału", "Reject signal"],
+  ["Czyszczenie logów", "Clear logs"],
+  ["Usunięcie instancji", "Delete instance"],
+  ["{0} · strażnik wyłączony na własną odpowiedzialność, licznik obsunięcia wyzerowany", "{0} · guard disabled at your own risk, drawdown counter reset"],
+  ["Uzbrojenie strażnika", "Arm risk guard"],
+  ["Strażnik ryzyka uzbrojony ponownie", "Risk guard rearmed"],
+  ["Zapis poczty", "Save mail settings"],
+  ["Zapis powiadomień", "Save notifications"],
+  ["Wiadomość testowa", "Test message"],
+  ["Zmiana drabinki łańcuchów", "Change chain ladder"],
+  ["Handel wstrzymany: {0}", "Trading halted: {0}"],
+  ["strefa {0} · SL {1} · TP {2}", "zone {0} · SL {1} · TP {2}"],
+  ["poziom {0}", "level {0}"],
+  ["Korekta TP{0} · B{1}", "TP{0} correction · B{1}"],
+  ["Zainkasowano {0} poz. na TP{1}", "Closed {0} positions at TP{1}"],
+  ["Drabinka SL → {0} ({1} poz.)", "SL ladder → {0} ({1} positions)"],
+  ["RISK FREE @ {0} · zamknięto {1} poz. ({2} $, VWAP wejść {3}) · runner{4}: {5}, {6}", "RISK FREE @ {0} · closed {1} positions ({2} $, entry VWAP {3}) · runners: {5}, {6}"],
+  ["Balans konta", "Account balance"],
+  ["Kapitał (equity)", "Equity"],
+  ["Margines użyty", "Used margin"],
+  ["Wolny margines", "Free margin"],
+  ["Poziom marginu", "Margin level"],
+  ["Zysk ZREALIZOWANY dzisiaj", "Realized profit today"],
+  ["Wynik dnia razem z pozycjami otwartymi", "Daily PnL including open positions"],
+  ["Wynik pływający otwartych pozycji", "Floating PnL of open positions"],
+  ["Obsunięcie dnia w dolarach", "Daily drawdown in dollars"],
+  ["Obsunięcie dnia w procentach", "Daily drawdown in percent"],
+  ["Otwarte pozycje bota", "Open bot positions"],
+  ["Zlecenia oczekujące bota", "Pending bot orders"],
+  ["Aktywne koszyki", "Active baskets"],
+  ["Transakcje zamknięte dzisiaj", "Trades closed today"],
+  ["Skuteczność dzisiaj", "Win rate today"],
+  ["Profit factor dzisiaj", "Profit factor today"],
+  ["Rozpoznane sygnały od startu", "Signals recognized since startup"],
+  ["Instrument", "Instrument"],
+  ["Cena bid", "Bid price"],
+  ["Cena ask", "Ask price"],
+  ["Spread", "Spread"],
+  ["Użytkownik Telegrama", "Telegram user"],
+  ["Numer rachunku", "Account number"],
+  ["Nazwa brokera", "Broker name"],
+  ["Serwer brokera", "Broker server"],
+  ["Waluta rachunku", "Account currency"],
+  ["Dźwignia", "Leverage"],
+  ["Rodzaj rachunku (DEMO/REAL)", "Account type (DEMO/REAL)"],
+  ["Nazwa presetu", "Preset name"],
+  ["Tryb pracy bota", "Bot mode"],
+  ["Kategoria zdarzenia", "Event category"],
+  ["Systemowy temat zdarzenia", "System event subject"],
+  ["Data (czas lokalny)", "Date (local time)"],
+  ["Godzina (czas lokalny)", "Time (local time)"],
+  ["mail testowy", "test email"],
+  ["To jest wiadomość testowa z CONDUIT.", "This is a test message from CONDUIT."],
+  ["Serwer SMTP: {host}:{port} ({sec})", "SMTP server: {host}:{port} ({sec})"],
+  ["Nadawca:     {from}", "Sender:     {from}"],
+  ["Odbiorcy:    {to}", "Recipients: {to}"],
+  ["Czas:        {czas}", "Time:       {czas}"],
+  ["Jeśli ją widzisz, powiadomienia e-mail działają.", "If you can read this, email notifications are working."],
+  ["Mail testowy wysłany", "Test email sent"],
+  ["Mail testowy NIE wyszedł", "Test email NOT sent"],
+  ["Wysłano do: {to}", "Sent to: {to}"],
+  ["do {ile} adresatów: {to}", "to {ile} recipients: {to}"],
+  ["{ile} zdarzeń", "{ile} events"],
+  ["Rachunek {account} · {server} · saldo {balance}", "Account {account} · {server} · balance {balance}"],
+  ["W ostatnim oknie dławienia wystąpiło {ile} zdarzeń kategorii „{category}”:", "During the last throttle window, {ile} events occurred in category “{category}”:"],
+  ["  … oraz {ukryte} dalszych zdarzeń tej kategorii", "  … and {ukryte} additional events in this category"],
+  ["Zbiorcze powiadomienie: {ile} × {category}", "Coalesced notification: {ile} × {category}"],
+  ["Podsumowanie: {dzis:+.2} $ dzisiaj", "Summary: {dzis:+.2} $ today"],
+  ["Rachunek · saldo {0} $ · equity {1} $ · wolny margines {2} $", "Account · balance {0} $ · equity {1} $ · free margin {2} $"],
+  ["Dzisiaj · zrealizowane {0} $ · obsunięcie dnia {1} $ · transakcji {2}", "Today · realized {0} $ · daily drawdown {1} $ · trades {2}"],
+  ["Teraz · pozycji {0} (pływające {1} $) · zleceń oczekujących {2} · koszyków {3}", "Now · positions {0} (floating {1} $) · pending orders {2} · baskets {3}"],
+  ["Skuteczność od startu · {0} z {1} ({2} %) · profit factor {3}", "Win rate since startup · {0} of {1} ({2} %) · profit factor {3}"],
+  ["UWAGA: HANDEL ZATRZYMANY — {powod}", "WARNING: TRADING HALTED — {powod}"],
+  ["CONDUIT wystartował", "CONDUIT started"],
+  ["Serwer nasłuchuje na {addr}", "Server listening at {addr}"],
+  ["Katalog roboczy: {path}", "Working directory: {path}"],
+  ["Wczytano {0} godzin historii, preset wymaga {1}. Do czasu zebrania pełnego okna bot bierze sygnały, które preset każe odrzucać.", "Loaded {0} hours of history; the preset requires {1}. Until a complete window is collected, the bot takes signals that the preset would reject."],
+  ["Oś pozostaje fail-closed i nie modyfikuje SL, dopóki z zamkniętych świec nie powstanie pełne okno ATR/spreadu. Sprawdź historię M1 i point instrumentu w terminalu MT5.", "This axis remains fail-closed and does not modify SL until closed bars provide a complete ATR/spread window. Check M1 history and the instrument point in MT5."],
+  ["Próba {proba} nieudana: {e}", "Attempt {proba} failed: {e}"],
+  ["Najczęstsze przyczyny:", "Common causes:"],
+  ["• terminal MetaTrader 5 nie jest uruchomiony albo nie jest zalogowany,", "• the MetaTrader 5 terminal is not running or is not logged in,"],
+  ["• w Pythonie brakuje pakietu MetaTrader5 (pip install MetaTrader5),", "• Python is missing the MetaTrader5 package (pip install MetaTrader5),"],
+  ["• pole „interpreter Pythona” wskazuje inny Python niż ten z pakietem,", "• the Python interpreter setting points to a different Python installation than the one containing the package,"],
+  ["• w terminalu wyłączony jest handel algorytmiczny.", "• algorithmic trading is disabled in the terminal."],
+  ["Rachunek {0} ({1}) · {2} · {3}", "Account {0} ({1}) · {2} · {3}"],
+  ["Symbol {symbol}. Bot zarządza pozycjami od tej chwili.", "Symbol {symbol}. The bot manages positions from now on."],
+  ["Otwarte pozycje zostają u brokera i NIE są zarządzane, dopóki połączenie nie wróci. Bot próbuje dalej.", "Open positions remain with the broker and are NOT managed until the connection returns. The bot keeps trying."],
+  ["Nieczytelny sygnał z „{source}\"", "Unreadable signal from “{source}\""],
+  ["Wiadomość z „{source}\"{topic} ma kształt sygnału wejścia — jest w niej cel i stop — ale parser nie rozpoznał w niej ANI wejścia, ANI polecenia zarządzającego. Bot jej NIE wykonał.", "The message from “{source}\"{topic} resembles an entry signal — it contains a target and stop — but the parser recognized NEITHER an entry NOR a management command. The bot did NOT execute it."],
+  ["Najczęstsza przyczyna: kanał zmienił sposób zapisywania sygnałów. Jeżeli takich wiadomości jest więcej, bot przestał handlować i trzeba dopisać wzorzec do parsera — sam z siebie się to nie naprawi.", "Common cause: the channel changed its signal syntax. If this repeats, the bot is no longer trading these messages and a parser pattern needs updating. It will not fix itself."],
+  ["format źródła: {sourceFormat}", "source format: {sourceFormat}"],
+  ["Polecenie z panelu odrzucone", "Panel command rejected"],
+  ["start/stop bota", "bot start/stop"],
+  ["połączenie z MT5", "MT5 connection"],
+  ["nieudane wznowienie MT5", "MT5 recovery failed"],
+  ["limit obsunięcia", "drawdown limit"],
+  ["błąd zlecenia", "order error"],
+  ["podsumowanie", "summary"],
+  ["nieczytelny sygnał", "unreadable signal"],
+  ["slot wolno przypisać tylko silnikowi bez koszyków", "A slot can only be assigned to an engine without baskets"],
+  ["VOLUME CONTRACT: odmowa nowego zlecenia ({reason:?}); requested={requested:?}, broker min={:?}/step={:?}/max={:?}, strategy min={:?}/max={:?}/capital_per_lot={:?}", "VOLUME CONTRACT: new order rejected ({reason:?}); requested={requested:?}, broker min={:?}/step={:?}/max={:?}, strategy min={:?}/max={:?}/capital_per_lot={:?}"],
+  ["COST HOLD: {reason}; nowe ryzyko zablokowane, wyjścia pozostają czynne", "COST HOLD: {reason}; new risk blocked, exits remain active"],
+  ["AT TP telemetry: pominięto {telemetry_tp_suppressed} wykonawczą akcję TP, zachowano pozostałe intencje", "AT TP telemetry: skipped {telemetry_tp_suppressed} executable TP action, retained other intents"],
+  ["position() wskazało Entry", "position() returned Entry"],
+  ["edycja nieznanej wiadomości {orig} nie otwiera koszyka", "Editing unknown message {orig} does not open a basket"],
+  ["edycja wiadomości {orig}: pominięto {} akcji już wykonanych", "Message {orig} edit: skipped {} actions already executed"],
+  ["edycja wiadomości {orig} powtarza akcję „{k}\", która została już WYKONANA", "Message {orig} edit repeats action “{k}\", which was already EXECUTED"],
+  ["ponowna dostawa wiadomości {}: pominięto {} wykonanych akcji zarządzających", "Message {} redelivery: skipped {} management actions already executed"],
+  ["ponowna dostawa wiadomości {} powtarza akcję „{k}”, która została już WYKONANA", "Message {} redelivery repeats action “{k}”, which was already EXECUTED"],
+  ["cel ze strefy przeciwnej {cel:.2} odrzucony — po złej stronie rynku", "Opposite-zone target {cel:.2} rejected — wrong side of the market"],
+  ["komunikat o trafionym celu nieprzyjęty", "Target-hit message rejected"],
+  ["HAMULEC SL-HIT: {} stopów kanału w dobie — pauza wejść {}", "SL-HIT BRAKE: {} channel stops today — entry pause {}"],
+  ["do końca doby", "until the end of the day"],
+  ["RISK FREE odrzucony: poziom rażąco daleko od rynku i koszyka", "RISK FREE rejected: level too far from the market and basket"],
+  ["CANCEL z kanału — skasowano {n} limitów", "Channel CANCEL — removed {n} limits"],
+  ["CANCEL z kanału wyłączony ustawieniem", "Channel CANCEL disabled in settings"],
+  ["CLOSE ALL z kanału — koszyk B{id}: {zamkniete} poz. {wynik:+.2} $, skasowano {skasowane} limitów", "Channel CLOSE ALL — basket B{id}: {zamkniete} positions {wynik:+.2} $, removed {skasowane} limits"],
+  ["CLOSE ALL z kanału wyłączony ustawieniem", "Channel CLOSE ALL disabled in settings"],
+  ["SPP pominięty — koszyk starszy niż {:.0} h", "SPP skipped — basket older than {:.0} h"],
+  ["CELE ODRZUCONE — {targets:?} niespójne z kierunkiem {strona:?}; to zapowiedź nadawcy dla JEGO pozycji, nie nasze cele", "TARGETS REJECTED — {targets:?} inconsistent with direction {strona:?}; this is the sender's plan for THEIR position, not our targets"],
+  ["SPP przyjęty jako NOWY PLAN, ale koszyk nie ma pozycji — nie ma czego zabezpieczać (`secured` bez zmian)", "SPP accepted as a NEW PLAN, but the basket has no positions — nothing to protect (`secured` unchanged)"],
+  ["„{side:?} NOW\" zignorowane — brak SL i celów w komunikacie", "“{side:?} NOW\" ignored — message has no SL or targets"],
+  ["koszyk potwierdza obowiązkowe wyjście; zarządzanie nie może odwołać zamknięcia", "Basket is confirming a required exit; management cannot cancel the close"],
+  ["brak żywego koszyka z tego źródła — komunikat nie ma do czego się odnieść", "No active basket from this source — message has no target"],
+  ["„{side:?} NOW\" pominięte: {r}", "“{side:?} NOW\" skipped: {r}"],
+  ["sygnal-NOW", "signal-NOW"],
+  ["koszyk zamknięty sygnałem przeciwnym ({nowa:?}) — {zamkniete} poz. {wynik:+.2} $, skasowano {skasowane} limitów", "Basket closed by opposite signal ({nowa:?}) — {zamkniete} positions {wynik:+.2} $, removed {skasowane} limits"],
+  ["koszyk B{id} zamknięty — kanał wysłał sygnał przeciwny ({nowa:?})", "Basket B{id} closed — channel sent an opposite signal ({nowa:?})"],
+  ["wiadomość {} już otworzyła koszyk B{bid} — powtórka (re-delivery) potraktowana jak edycja", "Message {} already opened basket B{bid} — redelivery treated as an edit"],
+  ["sygnał pominięty — handel wstrzymany: {r}", "Signal skipped — trading halted: {r}"],
+  ["sygnał rynkowy pominięty (tylko LIMIT)", "Market signal skipped (LIMIT only)"],
+  ["sygnał rynkowy pominięty — ustawienie „tylko LIMIT\"", "Market signal skipped — “LIMIT only\" setting"],
+  ["sygnał odrzucony filtrem tagów: {reason}", "Signal rejected by tag filter: {reason}"],
+  ["wejścia zablokowane: {r}", "Entries blocked: {r}"],
+  ["pułap łańcucha: inny format stoi już po stronie przeciwnej do {:?}; otwarcie obu naraz to spread w obie strony i wyzerowana ekspozycja", "Chain cap: another format is already opposite to {:?}; opening both would pay both spreads and cancel exposure"],
+  ["reżim bez zdania (okno rozerwane) — wejście mniejszym rozmiarem", "Regime undecided (discontinuous window) — smaller entry size"],
+  ["sygnał niezgodny z reżimem rynku — pominięty", "Signal inconsistent with market regime — skipped"],
+  ["sygnał niezgodny z reżimem rynku", "Signal inconsistent with market regime"],
+  ["sygnał niezgodny z reżimem — wejście w trybie miękkim", "Signal inconsistent with regime — soft-mode entry"],
+  ["sygnał pod trend wyższego rzędu — pominięty", "Signal against the higher-order trend — skipped"],
+  ["sygnał {:?} pod trend: rynek zmienił się o ponad {:.2} % w oknie {:.0} h", "Signal {:?} against trend: market changed by over {:.2} % within {:.0} h"],
+  ["parametry z sygnału: strefa {sig_w:.2} $ → sl_min_dist {d:.2} $ (preset {:.2}), deep {deep:.2} $ (preset {:.2}), szczebli {u} (preset {})", "Parameters from signal: zone {sig_w:.2} $ → sl_min_dist {d:.2} $ (preset {:.2}), deep {deep:.2} $ (preset {:.2}), levels {u} (preset {})"],
+  ["sygnał odrzucony — R:R {rr:.2} poniżej progu", "Signal rejected — R:R {rr:.2} below threshold"],
+  ["R:R {rr:.2} przy krawędzi {krawedz:.2} poniżej progu {:.2} (ryzyko {ryzyko:.2} $, nagroda {nagroda:.2} $)", "R:R {rr:.2} at edge {krawedz:.2} below threshold {:.2} (risk {ryzyko:.2} $, reward {nagroda:.2} $)"],
+  ["sygnał odrzucony — strefa {sig_w:.2} $ poza pasmem", "Signal rejected — zone {sig_w:.2} $ outside range"],
+  ["szerokość strefy {sig_w:.2} $ poza pasmem {:.2}–{:.2} $", "Zone width {sig_w:.2} $ outside {:.2}–{:.2} $"],
+  ["sygnał pominięty — SL {slv:.2} przebity zanim powstało zlecenie (cena {:.2})", "Signal skipped — SL {slv:.2} crossed before order placement (price {:.2})"],
+  ["SL {slv:.2} przebity zanim powstało zlecenie (cena {:.2})", "SL {slv:.2} crossed before order placement (price {:.2})"],
+  ["sygnał pominięty — cena {beyond:.2} $ za strefą", "Signal skipped — price {beyond:.2} $ beyond zone"],
+  ["cena uciekła {beyond:.2} $ za strefę (limit {:.2} $)", "Price moved {beyond:.2} $ beyond zone (limit {:.2} $)"],
+  ["TP{} = {tp:.2} po złej stronie strefy", "TP{} = {tp:.2} on the wrong side of the zone"],
+  ["TP{} = {tp:.2} nie jest dalej niż poprzedni cel", "TP{} = {tp:.2} is not beyond the previous target"],
+  ["sygnał pominięty — geometria: {p}", "Signal skipped — geometry: {p}"],
+  ["wejście pominięte — zbyt daleko od SL", "Entry skipped — too far from SL"],
+  ["odległość strefa–SL {:.2} $ ponad limit {:.2} $", "Zone–SL distance {:.2} $ exceeds limit {:.2} $"],
+  ["sygnał dołączony do tego koszyka zamiast nowego (pokrycie stref {:.0} %, wiek koszyka {wiek:.0} min) — jeden spread zamiast dwóch", "Signal joined this basket instead of creating a new one (zone overlap {:.0} %, basket age {wiek:.0} min) — one spread instead of two"],
+  ["koszyk B{id}: nowy sygnał {:?} scalony (pokrycie {:.0} %, wiek {wiek:.0} min)", "Basket B{id}: new {:?} signal merged (overlap {:.0} %, age {wiek:.0} min)"],
+  ["sygnał pominięty — budżet dnia wyczerpany ({} koszyków)", "Signal skipped — daily budget exhausted ({} baskets)"],
+  ["budżet dnia wyczerpany: {} z {} koszyków", "Daily budget exhausted: {} of {} baskets"],
+  ["koszyk B{id} · {:?}{} · strefa {:.2}–{:.2} · SL {} · cele {}", "Basket B{id} · {:?}{} · zone {:.2}–{:.2} · SL {} · targets {}"],
+  ["koszyk B{id} {:?}{} strefa {zone_lo:.2}–{zone_hi:.2}", "Basket B{id} {:?}{} zone {zone_lo:.2}–{zone_hi:.2}"],
+  ["EDYCJA pominięta: źródło anulowało ten sygnał", "EDIT skipped: source cancelled this signal"],
+  ["EDYCJA bez zmiany źródłowego planu — postęp i zlecenia pozostają", "EDIT leaves source plan unchanged — progress and orders retained"],
+  ["EDYCJA pominięta: trwa potwierdzanie zamknięcia koszyka", "EDIT skipped: basket close confirmation in progress"],
+  ["EDYCJA ODRZUCONA — sygnal {:?} nie pasuje do koszyka {:?}; przeciwny kierunek to nowy setup, nie poprawka", "EDIT REJECTED — signal {:?} does not match basket {:?}; opposite direction is a new setup, not a correction"],
+  ["CELE ODRZUCONE przy edycji — {:?} niespójne z {:?}", "TARGETS REJECTED on edit — {:?} inconsistent with {:?}"],
+  ["EDYCJA sygnału: strefa {old_lo:.2}–{old_hi:.2} → {zone_lo:.2}–{zone_hi:.2}", "Signal EDIT: zone {old_lo:.2}–{old_hi:.2} → {zone_lo:.2}–{zone_hi:.2}"],
+  ["edycja bez różnicy — siatka zostaje na rynku", "Edit makes no change — grid remains in the market"],
+  ["odrzucony — wolny margines nie starcza na ani jedną nogę (A1 = {:.1} % FM)", "Rejected — free margin cannot cover even one position (A1 = {:.1} % FM)"],
+  ["koszyk {opis}", "Basket {opis}"],
+  ["koszyk B{id} {opis}", "Basket B{id} {opis}"],
+  ["odrzucony — wszystkie szczeble bliżej SL niż stops_level {:.2}", "Rejected — all levels closer to SL than stops_level {:.2}"],
+  ["odrzucony — nie mieści się w limicie ryzyka {:.2}% kapitału", "Rejected — exceeds risk limit of {:.2}% capital"],
+  ["rozstawiono {placed} zleceń · lot bazowy {lot:.2} · ryzyko koszyka {planned_risk:.2} $", "Placed {placed} orders · base lot {lot:.2} · basket risk {planned_risk:.2} $"],
+  ["rozstawiono {placed} zleceń koszyka B{id} · lot bazowy {lot:.2} · ryzyko {planned_risk:.2} $", "Placed {placed} orders for basket B{id} · base lot {lot:.2} · risk {planned_risk:.2} $"],
+  ["poziom {:.2} pominięty — limit nie mieści się przy cenie {:.2} (stops {stops:.2})", "Level {:.2} skipped — limit invalid at price {:.2} (stops {stops:.2})"],
+  ["wejście rynkowe wstrzymane — cena {px_rynek:.2} jest za dalszą krawędzią strefy {:.2} (zakaz_ponizej_krawedzi)", "Market entry held — price {px_rynek:.2} is beyond the far zone edge {:.2} (zakaz_ponizej_krawedzi)"],
+  ["koszyk B{id}: wejście rynkowe odrzucone — cena {px_rynek:.2} za dalszą krawędzią strefy {:.2}", "Basket B{id}: market entry rejected — price {px_rynek:.2} beyond far zone edge {:.2}"],
+  ["wejście rynkowe ucięte — budżet ryzyka {cap:.2} $ wyczerpany przy cenie wypełnienia {px_rynek:.2}", "Market entry cut — risk budget {cap:.2} $ exhausted at fill price {px_rynek:.2}"],
+  ["siatka ucięta — poziom marginesu poniżej {:.0} %", "Grid cut — margin level below {:.0} %"],
+  ["poziom {:.2} pominięty — po dosunięciu do {price:.2} leżałby za dalszą krawędzią strefy {:.2}", "Level {:.2} skipped — moving it to {price:.2} would place it beyond far zone edge {:.2}"],
+  ["koszyk-rynkowy", "market-basket"],
+  ["reżim zmienności ×{:.2}: +{placed} / −{removed} limitów", "Volatility regime ×{:.2}: +{placed} / −{removed} limits"],
+  ["TP{stage} bez naszej pozycji ({src}) — etap koszyka NIE rusza", "TP{stage} without our position ({src}) — basket stage does NOT advance"],
+  ["TP{st} osiągnięty ({src})", "TP{st} reached ({src})"],
+  ["BANK CAŁOŚCI na TP{target_stage} — zamknięto {n} ({suma:+.2} $), skasowano {sk} limitów", "BANK ALL at TP{target_stage} — closed {n} ({suma:+.2} $), removed {sk} limits"],
+  ["ZDJĘTY SUFIT po TP{target_stage} — {zdjete} pozycji bez celu", "CEILING REMOVED after TP{target_stage} — {zdjete} positions without a target"],
+  ["PIRAMIDA: TP{target_stage} potwierdził ruch — dokładka {vol:.2} lota limitem na {px:.2} (cofnięcie do TP1)", "PYRAMID: TP{target_stage} confirmed the move — add {vol:.2} lots by limit at {px:.2} (pullback to TP1)"],
+  ["PIRAMIDA odrzucona przez brokera: {e:?}", "PYRAMID rejected by broker: {e:?}"],
+  ["skasowano {n} niezafillowanych limitów", "Removed {n} unfilled limits"],
+  ["TP{stage} ({level:.2}) osiągnięty bez wejścia — skasowano {n} limitów", "TP{stage} ({level:.2}) reached without entry — removed {n} limits"],
+  ["SMART SL: przesunięto {moved} stopów (etap {stage})", "SMART SL: moved {moved} stops (stage {stage})"],
+  ["koszyk zamknięty ({}) — {zamkniete}/{ile_bylo} poz. {wynik:+.2} $, skasowano {skasowane} limitów", "Basket closed ({}) — {zamkniete}/{ile_bylo} positions {wynik:+.2} $, removed {skasowane} limits"],
+  ["wyjście {} ({}): zamknięto {closed}, anulowano {cancelled}, wynik {profit:+.2} $; pozostaje {left_pos} pozycji / {left_pending} zleceń", "Exit {} ({}): closed {closed}, cancelled {cancelled}, result {profit:+.2} $; {left_pos} positions / {left_pending} orders remain"],
+  ["„take partials\" — koszyk nie ma czym inkasować", "“take partials\" — basket has nothing to realize"],
+  ["„take partials\" z kanału: {pct:.0}% wolumenu z {done} poz.", "Channel “take partials\": {pct:.0}% volume from {done} positions"],
+  ["„take partials\" z kanału: {limit} poz.", "Channel “take partials\": {limit} positions"],
+  ["RISK FREE — skasowano {n} wiszących limitów", "RISK FREE — removed {n} pending limits"],
+  ["RISK FREE @ {reference:.2} ({:?}) · zamknięto {closed} ({realized:+.2} $) · SL na BE: {armed}", "RISK FREE @ {reference:.2} ({:?}) · closed {closed} ({realized:+.2} $) · SL at BE: {armed}"],
+  ["OUT AT ENTRY pominięty — koszyk już zabezpieczony (RISK FREE)", "OUT AT ENTRY skipped — basket already protected (RISK FREE)"],
+  ["OUT AT ENTRY ({:?}) — zamknięto {n}", "OUT AT ENTRY ({:?}) — closed {n}"],
+  ["SL HIT z kanału — skasowano {n} limitów", "Channel SL HIT — removed {n} limits"],
+  ["SL HIT z kanału — zamknięto koszyk", "Channel SL HIT — closed basket"],
+  ["SL HIT odrzucony — rynek {dist:.2} $ po stronie zysku", "SL HIT rejected — market {dist:.2} $ on the profit side"],
+  ["SL HIT zweryfikowany — skasowano {n} limitów", "SL HIT verified — removed {n} limits"],
+  ["SL na {:.0} % drogi wejście→cena: {n} poz.", "SL at {:.0} % of entry→price distance: {n} positions"],
+  ["SL przepisany na {zmienione} zleceń oczekujących", "SL copied to {zmienione} pending orders"],
+  ["SL koszyka → {sl:.2}", "Basket SL → {sl:.2}"],
+  ["zamknięcie zbiorcze: pominięto {unowned} pozycji i {unowned_pending} zleceń bez własnego koszyka; wymagają ręcznej rekoncyliacji", "Bulk close: skipped {unowned} positions and {unowned_pending} orders without an owned basket; manual reconciliation required"],
+  ["zamknięcie zbiorcze ({}) · {n} pozycji · {vol:.2} lota · wynik {suma:+.2} $ · skasowano {skasowane} limitów", "Bulk close ({}) · {n} positions · {vol:.2} lots · result {suma:+.2} $ · removed {skasowane} limits"],
+  ["zamknięto #{} · {} · {:+.2} $", "Closed #{} · {} · {:+.2} $"],
+  ["BE kryje {ile} pozycji wypełnionych PO komendzie kanału", "BE protects {ile} positions filled AFTER the channel command"],
+  ["ROZJAZD KREDYTU · ręcznie {:.2} $ · terminal {:.2} $ · lot liczony od {:.2} $ (kwota ręczna wygrywa). Jeśli broker zdjął bonus, wyzeruj pole ręczne — zero znaczy AUTOMAT.", "CREDIT MISMATCH · manual {:.2} $ · terminal {:.2} $ · lot calculated from {:.2} $ (manual value takes priority). If the broker removed the bonus, clear the manual field — zero means AUTO."],
+  ["nowa doba handlowa · saldo {:.2} $ · equity {:.2} $ · poprzedni dzień {:+.2} $", "New trading day · balance {:.2} $ · equity {:.2} $ · previous day {:+.2} $"],
+  ["nowa doba — blokada obsunięcia zdjęta", "New day — drawdown block lifted"],
+  ["PODŁOGA EQUITY ŁAŃCUCHA: {:.2} $ ≤ {:.2} $", "CHAIN EQUITY FLOOR: {:.2} $ ≤ {:.2} $"],
+  ["OBSUNIĘCIE RACHUNKU {dd_konta_pct:.1}% ≥ {:.1}% (pułap łańcucha)", "ACCOUNT DRAWDOWN {dd_konta_pct:.1}% ≥ {:.1}% (chain cap)"],
+  ["OBSUNIĘCIE RACHUNKU {dd_konta:.2} $ ≥ {:.2} $ (pułap łańcucha)", "ACCOUNT DRAWDOWN {dd_konta:.2} $ ≥ {:.2} $ (chain cap)"],
+  ["CEL DZIENNY osiągnięty: +{today:.2} $", "DAILY TARGET reached: +{today:.2} $"],
+  ["CEL DZIENNY {:.2} % osiągnięty: +{dzis:.2} $ z {baza:.2} $ (próg {prog:.2} $)", "DAILY TARGET {:.2} % reached: +{dzis:.2} $ from {baza:.2} $ (threshold {prog:.2} $)"],
+  ["DOBA ZAMKNIĘTA dla wejść — do północy silnika", "DAY CLOSED for entries — until engine midnight"],
+  ["#{t}: wyjście czeka na {target:.2} zamiast rynku {rynek:.2} (spread {spread:.2} $, do {} s)", "#{t}: exit waits for {target:.2} instead of market {rynek:.2} (spread {spread:.2} $, up to {} s)"],
+  ["wypełnione po lepszej cenie", "Filled at a better price"],
+  ["czas minął — wyjście po rynku", "Timeout — exit at market"],
+  ["cel koszyka {:.2} $ osiągnięty", "Basket target {:.2} $ reached"],
+  ["sygnał anulowany — czekał ponad {:.0} min bez wejścia (skasowano {n} limitów)", "Signal cancelled — waited over {:.0} min without entry (removed {n} limits)"],
+  ["expo_cap_pct {:.4}%: anulowano ticket {t} koszyka {} poziom {lvl}; ekspozycja {:.4} -> {:.4} $, limit {:.4} $", "expo_cap_pct {:.4}%: cancelled ticket {t} basket {} level {lvl}; exposure {:.4} -> {:.4} $, limit {:.4} $"],
+  ["bez koszyka", "no basket"],
+  ["runner domknięty po {wiek_min:.0} min OD UWOLNIENIA — limit {:.0} min (przewaga sygnału zmienia znak po ok. 90 min)", "Runner closed {wiek_min:.0} min AFTER RELEASE — limit {:.0} min (signal edge changes sign after about 90 min)"],
+  ["RISK FREE (reguła) PRZERWANY — broker odmówił zamknięcia {zostalo} z {} pozycji (zabankowano {zabankowane:+.2} $); koszyk NIE jest zabezpieczony, reguła ponowi na następnym przebiegu", "RISK FREE (rule) INTERRUPTED — broker refused to close {zostalo} of {} positions (banked {zabankowane:+.2} $); basket is NOT protected, rule will retry next pass"],
+  ["zysk koszyka {wynik:.2} $ ≥ {:.2} $", "Basket profit {wynik:.2} $ ≥ {:.2} $"],
+  ["zysk koszyka {wynik:.2} $ ≥ {:.1}R ({:.2} $ przy ryzyku {ryzyko:.2} $)", "Basket profit {wynik:.2} $ ≥ {:.1}R ({:.2} $ at risk {ryzyko:.2} $)"],
+  ["ze stopem na własnym wejściu każdej warstwy (BeOwn)", "with each layer's stop at its own entry (BeOwn)"],
+  ["RISK FREE (reguła): {powod} · zabankowano {zamkniete} poz. {zabankowane:+.2} $ · {uzbrojone} runner(ów) {opis_stopu} (średnia ważona wejść {srednia:.2})", "RISK FREE (rule): {powod} · banked {zamkniete} positions {zabankowane:+.2} $ · {uzbrojone} runner(s) {opis_stopu} (weighted average entry {srednia:.2})"],
+  ["koszyk B{id} uwolniony od ryzyka: {powod}, zabankowano {zabankowane:+.2} $, runner {opis_stopu}", "Basket B{id} released from risk: {powod}, banked {zabankowane:+.2} $, runner {opis_stopu}"],
+  ["okno łaski {:.0} min minęło", "Grace period {:.0} min elapsed"],
+  ["cena dalej niż {:.0} $ od strefy", "Price more than {:.0} $ from zone"],
+  ["{powod} — skasowano {n} limitów", "{powod} — removed {n} limits"],
+  ["wygaśnięcie ODRZUCONE przez brokera — {zostalo} z {ile_bylo} pozycji nadal otwarte (zamknięto {zamkniete}); koszyk zostaje żywy i spróbuje ponownie. Najczęstsza przyczyna: poziom zamrożenia u brokera", "Expiry REJECTED by broker — {zostalo} of {ile_bylo} positions still open (closed {zamkniete}); basket remains active and will retry. Common cause: broker freeze level"],
+  ["koszyk B{id}: broker odmówił zamknięcia {zostalo} z {ile_bylo} pozycji przy wygaśnięciu po {wiek:.0} min", "Basket B{id}: broker refused to close {zostalo} of {ile_bylo} positions on expiry after {wiek:.0} min"],
+  ["koszyk wygasł po {wiek:.0} min (limit {:.0}) — {zamkniete} poz. {wynik:+.2} $, skasowano {skasowane} limitów; przewaga sygnału nie żyje tak długo", "Basket expired after {wiek:.0} min (limit {:.0}) — {zamkniete} positions {wynik:+.2} $, removed {skasowane} limits; signal edge does not last this long"],
+  ["koszyk B{id} wygasł po {wiek:.0} min — twardy limit wieku {:.0} min", "Basket B{id} expired after {wiek:.0} min — hard age limit {:.0} min"],
+  ["limit pozycji osiągnięty ({ile}/{}) — skasowano {razem} niewypełnionych zleceń, żeby limit obowiązywał także po wypełnieniach", "Position limit reached ({ile}/{}) — removed {razem} unfilled orders so the limit also holds after fills"],
+  ["limit pozycji: {ile} pozycji + wiszące ponad {limit} — skasowano {skasowane} zleceń nadmiaru (najdalsze od ceny), reszta zostaje", "Position limit: {ile} positions + pending above {limit} — removed {skasowane} excess orders (farthest from price), others retained"],
+  ["FILTR TEMPA (miękki): {potrzeba} warstw w {sek:.1} s (próg {:.0} s) — cena przeleciała przez strefę; siatka skasowana ({skasowane} limitów), życie skrócone do {skrocone:.0} min, pozycje zostają", "SPEED FILTER (soft): {potrzeba} layers in {sek:.1} s (threshold {:.0} s) — price crossed the zone; grid removed ({skasowane} limits), lifetime shortened to {skrocone:.0} min, positions retained"],
+  ["odrzut tempa PRZERWANY — broker odmówił zamknięcia {zostalo} z {ile_bylo} pozycji; koszyk zostaje żywy (pozycje pilnowane dalej)", "Speed rejection INTERRUPTED — broker refused to close {zostalo} of {ile_bylo} positions; basket remains active (positions still managed)"],
+  ["koszyk odrzucony: {potrzeba} warstw w {sek:.1} s (próg {:.0} s) — cena przeleciała przez strefę zamiast o nią zaczepić; {zamkniete} poz. {wynik:+.2} $, skasowano {skasowane} limitów", "Basket rejected: {potrzeba} layers in {sek:.1} s (threshold {:.0} s) — price crossed the zone instead of holding; {zamkniete} positions {wynik:+.2} $, removed {skasowane} limits"],
+  ["koszyk B{id} odrzucony — {potrzeba} warstw w {sek:.1} s, próg {:.0} s", "Basket B{id} rejected — {potrzeba} layers in {sek:.1} s, threshold {:.0} s"],
+  ["DOKŁADKA TEMPOWA: licznik odzyskany z migawki brokera → {observed}", "SPEED ADD-ON: counter recovered from broker snapshot → {observed}"],
+  ["DOKŁADKA TEMPOWA pominięta i zużyta: TP {tp:.2} jest już za rynkiem", "SPEED ADD-ON skipped and consumed: TP {tp:.2} is already behind the market"],
+  ["DOKŁADKA TEMPOWA: cena przebiegła {:.2} $ w {:.0} s — dokładka {vol:.2} lota rynkiem", "SPEED ADD-ON: price moved {:.2} $ in {:.0} s — add {vol:.2} lots at market"],
+  ["DOKŁADKA TEMPOWA odrzucona: {e:?}", "SPEED ADD-ON rejected: {e:?}"],
+  ["wyjście ze strefy PRZERWANE — broker odmówił zamknięcia {zostalo} z {ile_bylo} pozycji; koszyk zostaje żywy, ponowienie po {:.0} s", "Zone exit INTERRUPTED — broker refused to close {zostalo} of {ile_bylo} positions; basket remains active, retry after {:.0} s"],
+  ["WYJŚCIE ZE STREFY {}: cena poza strefą {:.0} s — {zamkniete} poz. {wynik:+.2} $, skasowano {skasowane} limitów", "ZONE EXIT {}: price outside zone for {:.0} s — {zamkniete} positions {wynik:+.2} $, removed {skasowane} limits"],
+  ["koszyk B{id} — trwałe wyjście ze strefy {} ({:.0} s)", "Basket B{id} — sustained zone exit {} ({:.0} s)"],
+  ["SESJA USYPIA {n} limitów (poza oknem {})", "SESSION SLEEPS {n} limits (outside window {})"],
+  ["SESJA BUDZI {n} limitów (okno {})", "SESSION WAKES {n} limits (window {})"],
+  ["REŻIM USYPIA {n} limitów (próg przy cenie szczebla {odniesienie:.2})", "REGIME SLEEPS {n} limits (threshold at level price {odniesienie:.2})"],
+  ["REŻIM PRZYWRACA {n} limitów (cena szczebla {odniesienie:.2})", "REGIME RESTORES {n} limits (level price {odniesienie:.2})"],
+  ["siatka przezbrojona ({dostawione} zleceń) — cena wróciła do strefy przy {px:.2}, koszyk {wynik:+.2} $ (przezbrojenie {ile})", "Grid rearmed ({dostawione} orders) — price returned to zone at {px:.2}, basket {wynik:+.2} $ (rearm {ile})"],
+  ["koszyk B{id}: siatka przezbrojona ({dostawione} zleceń) — powrót ceny do strefy przy wyniku {wynik:+.2} $", "Basket B{id}: grid rearmed ({dostawione} orders) — price returned to zone at result {wynik:+.2} $"],
+  ["dokładka pominięta — budżet ryzyka koszyka wyczerpany (zostało {c:.2} $, dokładka kosztuje {ryzyko:.2} $)", "Add-on skipped — basket risk budget exhausted ({c:.2} $ left, add-on costs {ryzyko:.2} $)"],
+  ["RE-ENTRY @ {px:.2} (etap {stage}, powrót do strefy)", "RE-ENTRY @ {px:.2} (stage {stage}, return to zone)"],
+  ["oczekiwanie na zaksięgowanie potwierdzonych zamknięć; nowe wejścia wstrzymane", "Waiting for confirmed closes to be booked; new entries held"],
+  ["hamulec SL-HIT: {} stopów kanału w dobie", "SL-HIT brake: {} channel stops today"],
+  ["poza sesją ({})", "outside session ({})"],
+  ["cel dzienny osiągnięty", "Daily target reached"],
+  ["cel dzienny {:.2} % osiągnięty", "Daily target {:.2} % reached"],
+  ["pułap pozycji rachunku ({razem})", "account position cap ({razem})"],
+  ["limit koszyków ({wlasne})", "basket limit ({wlasne})"],
+  ["pułap koszyków rachunku ({razem})", "account basket cap ({razem})"],
+  ["pułap ekspozycji kierunkowej rachunku", "Account directional exposure cap"],
+  ["pułap łańcucha: {:.2} lota na rachunku", "Chain cap: {:.2} lots on account"],
+  ["pułap ryzyka łańcucha: {ryzyko:.2} $ ≥ {sufit:.2} $ ({:.1} % equity)", "Chain risk cap: {ryzyko:.2} $ ≥ {sufit:.2} $ ({:.1} % equity)"],
+  ["podłoga equity {floor:.2} $", "equity floor {floor:.2} $"],
+  ["podłoga equity łańcucha: {eq:.2} $ ≤ {:.2} $", "chain equity floor: {eq:.2} $ ≤ {:.2} $"],
+  ["cel dnia łańcucha: +{dzis:.2} $", "chain day target: +{dzis:.2} $"],
+  ["cel dnia łańcucha: +{dzis:.2} $ ≥ {prog:.2} $", "chain day target: +{dzis:.2} $ ≥ {prog:.2} $"],
+  ["dzienny limit straty łańcucha: −{strata:.2} $", "chain daily loss limit: −{strata:.2} $"],
+  ["dzienny limit straty łańcucha: −{strata:.2} $ ≥ {prog:.2} $", "chain daily loss limit: −{strata:.2} $ ≥ {prog:.2} $"],
+  ["poziom marginu {poziom:.0} % ≤ {:.0} % (wezwanie do uzupełnienia)", "Margin level {poziom:.0} % ≤ {:.0} % (margin call)"],
+  [" (po wypełnieniu wiszących)", " (after pending fills)"],
+  ["tag pominięty: {t}", "excluded tag: {t}"],
+  ["nie wznowiono: CONTINUATION REVIEW wymaga uzgodnienia stanu; strażnik ryzyka pozostaje bez zmian", "Not resumed: CONTINUATION REVIEW requires state reconciliation; risk guard unchanged"],
+  ["wznowiono handel mimo: {r} (strażnik wyłączony)", "Trading resumed despite: {r} (guard disabled)"],
+  ["strażnik ryzyka uzbrojony ponownie", "Risk guard rearmed"],
+  ["   ⛔ BEZPIECZNIK OSŁABIONY", "   ⛔ SAFETY GUARD WEAKENED"],
+  ["obserwacja pytana o chwilę sprzed ostatniego ticka — to byłoby zaglądanie w przyszłość", "Observation requested before the latest tick — this would introduce look-ahead"],
+  ["Kanał {kanal}{} nie ma przypisanego FORMATU, więc sygnał nie trafił do żadnego silnika. Wejdź w Kanały i wybierz format dla tego źródła; pusty wybór znaczy „nasłuchuj, ale nie handluj”.", "Channel {kanal}{} has no FORMAT assigned, so the signal reached no engine. Open Channels and select a format for this source; an empty selection means “listen, but do not trade”."],
+  ["Format „{format}” nie ma przypisanego presetu w aktywnym łańcuchu „{lancuch}”, więc ten kanał jest wyłącznie nasłuchiwany. To jest stan POPRAWNY, jeśli tak został ustawiony — wybierz preset dla tego formatu, żeby zacząć nim handlować.", "Format “{format}” has no preset assigned in active chain “{lancuch}”, so this channel is only monitored. This is VALID if configured intentionally — choose a preset for this format to start trading it."],
+  ["Aktywny łańcuch przypisuje formatowi „{format}” preset „{preset}”, którego NIE MA w katalogu presetów. Sygnał przepadł. Sprawdź nazwę presetu w łańcuchu albo wgraj brakujący plik.", "The active chain assigns format “{format}” preset “{preset}”, which is MISSING from the preset directory. The signal was missed. Check the preset name in the chain or import the missing file."],
+  ["łańcuch nie ma ani jednej nogi", "Chain has no strategies"],
+  ["{} nóg bez pliku presetu", "{} strategies without a preset file"],
+  ["AWARYJNY: łańcuch „{}” nie dał ani jednego silnika ({przyczyna}) — tylko zarządzanie zastanym", "FALLBACK: chain “{}” produced no engines ({przyczyna}) — only existing positions are managed"],
+  ["{f}: {n} koszyk(ów)\n", "{f}: {n} basket(s)\n"],
+  ["⚠ Koszyki bez własnego slotu oddane silnikowi ZAPASOWEMU: {:?}\nTo są albo numery sprzed wprowadzenia formatów (B1, B2, …), albo koszyki formatu, który wypadł z aktywnego łańcucha. Zarządza nimi preset silnika zapasowego, dopóki się nie domkną.\n", "⚠ Baskets without an owned slot assigned to the FALLBACK engine: {:?}\nThese are either IDs from before formats existed (B1, B2, …), or baskets whose format left the active chain. The fallback engine preset manages them until they close.\n"],
+  ["⛔ Koszyki BEZ OPIEKI (żaden format nie handluje): {:?}\nPozycje zostają na rachunku z żywym ryzykiem i NIKT nimi nie zarządza.\n", "⛔ UNMANAGED baskets (no format is trading): {:?}\nPositions remain on the account with live risk and NOBODY managing them.\n"],
+  ["nie było czego rozdzielać", "Nothing to distribute"],
+  ["runner_partial_pct nie ma wykonawczego czytelnika; ta wartość NIE steruje inkasem. Użyj sprawdzonego harmonogramu/partial_close albo pozostaw 0.", "runner_partial_pct has no execution reader; this value does NOT control partial profit taking. Use a verified schedule/partial_close or leave 0."],
+  ["tp_price_only_strict dotyczy wyłącznie PriceOnly; nie zmienia innych źródeł TP.", "tp_price_only_strict applies only to PriceOnly; other TP sources are unchanged."],
+  ["Ta korekta retarget działa tylko przy cele_na_ostatnim; nie zmienia innych harmonogramów.", "This retarget adjustment applies only to cele_na_ostatnim; other schedules are unchanged."],
+  ["{pole} nie działa — ustaw `market_hybrid_now_units > 0`", "{pole} is inactive — set `market_hybrid_now_units > 0`"],
+  ["hybryda `teraz + limity` nie działa przy `auto_limit = false` — włącz `auto_limit`", "The `now + limits` hybrid is inactive with `auto_limit = false` — enable `auto_limit`"],
+  ["hybryda obsługuje sygnały bez `LIMITS`, ale `only_limit_signals = true` odrzuca je przed wykonaniem", "The hybrid supports signals without `LIMITS`, but `only_limit_signals = true` rejects them before execution"],
+  ["oś sprząta wyłącznie niewypełnione sygnały bez `LIMITS`, które `only_limit_signals = true` odrzuca wcześniej", "This axis only clears unfilled signals without `LIMITS`, which `only_limit_signals = true` rejects earlier"],
+  ["{pole} = {wart} nie działa — włącz `adaptive_params`", "{pole} = {wart} is inactive — enable `adaptive_params`"],
+  ["units_by_hour nie działa — włącz `adaptive_params`", "units_by_hour is inactive — enable `adaptive_params`"],
+  ["tryb miękki filtra tempa nie działa — ustaw próg `fast_fill_reject_s`", "The soft speed filter is inactive — set the `fast_fill_reject_s` threshold"],
+  ["limit ponownych wejść nie działa — włącz `reenter_after_tp`", "Re-entry limit is inactive — enable `reenter_after_tp`"],
+  ["odstęp ponownego wejścia nie działa — włącz `reenter_after_tp`", "Re-entry gap is inactive — enable `reenter_after_tp`"],
+  ["mnożnik piramidy nie działa — ustaw `pyramid_after_stage`", "Pyramid multiplier is inactive — set `pyramid_after_stage`"],
+  ["{pole} nie działa — próg `{wlacznik}` wynosi 0, więc bramka kapitałowa jest wyłączona", "{pole} is inactive — threshold `{wlacznik}` is 0, so the capital gate is disabled"],
+  ["godziny sesji nie działają — włącz `session_filter`", "Session hours are inactive — enable `session_filter`"],
+  ["punkty swapu nie są naliczane — włącz `swap_enabled`", "Swap points are not charged — enable `swap_enabled`"],
+  ["riskfree_runner_max_hold_min = {} min nie ma czego domykać — `runner_max_hold_rule_only` zawęża limit do koszyków uwolnionych REGUŁĄ (`secured_by_rule`), a przy `riskfree_enabled = false` reguła nie uwalnia ani jednego koszyka. Wyłącz `rule_only` albo włącz regułę.", "riskfree_runner_max_hold_min = {} min has nothing to close — `runner_max_hold_rule_only` restricts the limit to baskets released by the RULE (`secured_by_rule`), while `riskfree_enabled = false` means no baskets are released by it. Disable `rule_only` or enable the rule."],
+  ["riskfree_runner_max_hold_min = {} min nie działa — limit siedzi w regule `riskfree_enabled`, która jest wyłączona. Włącz `runner_max_hold_bez_reguly`, żeby dotyczył koszyków uwolnionych KOMUNIKATEM kanału.", "riskfree_runner_max_hold_min = {} min is inactive — the limit belongs to the disabled `riskfree_enabled` rule. Enable `runner_max_hold_bez_reguly` to include baskets released by a channel MESSAGE."],
+  ["domykanie pozycji pod próg nie działa — oba progi (`expo_cap_pct` i `expo_cap_ml_pct`) są zerowe", "Closing positions to the cap is inactive — both thresholds (`expo_cap_pct` and `expo_cap_ml_pct`) are zero"],
+  ["kadencja pułapu ekspozycji nie działa — oba progi (`expo_cap_pct` i `expo_cap_ml_pct`) są zerowe", "Exposure cap cadence is inactive — both thresholds (`expo_cap_pct` and `expo_cap_ml_pct`) are zero"],
+  ["kadencja przeliczania lotów w zleceniach nie działa — włącz `pending_resize_on_vol`", "Order lot recalculation cadence is inactive — enable `pending_resize_on_vol`"],
+  ["{pole} nie działa — włącz `merge_same_side`", "{pole} is inactive — enable `merge_same_side`"],
+  ["{pole} nie działa — włącz `smart_exit`", "{pole} is inactive — enable `smart_exit`"],
+  ["{pole} nie działa — włącz `trail_adaptive_enabled`", "{pole} is inactive — enable `trail_adaptive_enabled`"],
+  ["adaptacja mnoży lukę tylko w trybach Gap/Atr/Chandelier; obecna konfiguracja nie ma takiej ścieżki", "Adaptation multiplies the gap only in Gap/Atr/Chandelier modes; the current configuration has no such path"],
+  ["{pole} nie działa — włącz `trail_sr_enabled`", "{pole} is inactive — enable `trail_sr_enabled`"],
+  ["próg zysku nie działa — czytany wyłącznie przy `trail_sr_activation = Gain`", "Profit threshold is inactive — read only with `trail_sr_activation = Gain`"],
+  ["okres ATR jest czytany dopiero po włączeniu co najmniej jednej dynamicznej osi S/R", "ATR period is read only after at least one dynamic S/R axis is enabled"],
+  ["{pole} nie działa — włącz `trend_filter_enabled`", "{pole} is inactive — enable `trend_filter_enabled`"],
+  ["docelowy zasięg nie działa — ustaw `vol_size_mode = Target`", "Target range is inactive — set `vol_size_mode = Target`"],
+  ["okno percentyla nie działa — ustaw `vol_size_mode = Percentile`", "Percentile window is inactive — set `vol_size_mode = Percentile`"],
+  ["{pole} nie działa — włącz `rearm_grid_on_return`", "{pole} is inactive — enable `rearm_grid_on_return`"],
+  ["{pole} nie działa — ustaw próg `slhit_pause_n`", "{pole} is inactive — set the `slhit_pause_n` threshold"],
+  ["{pole} nie działa — ustaw `regime_filter` inny niż Off", "{pole} is inactive — set `regime_filter` to a value other than Off"],
+  ["{pole} nie działa — ustaw `pyramid_after_stage`", "{pole} is inactive — set `pyramid_after_stage`"],
+  ["{pole} nie działa — ustaw próg `fast_addon_move_usd`", "{pole} is inactive — set the `fast_addon_move_usd` threshold"],
+  ["krok okrągłych poziomów nie działa — ustaw `exit_round_dist`", "Round-level step is inactive — set `exit_round_dist`"],
+  ["{pole} nie działa — włącz `riskfree_enabled`", "{pole} is inactive — enable `riskfree_enabled`"],
+  ["ujemny front-run jest normalizowany do 0 i nie działa — ustaw wartość > 0", "Negative front-run is normalized to 0 and inactive — set a value > 0"],
+  ["harmonogram procentowy nie działa — ustaw `tp_schedule = OfficialPct`", "Percentage schedule is inactive — set `tp_schedule = OfficialPct`"],
+  ["harmonogram liczbowy nie działa — ustaw `tp_schedule = OfficialCounts`", "Count schedule is inactive — set `tp_schedule = OfficialCounts`"],
+  ["próg pewności odczytu nie działa — włącz `parser_geometryczny`", "Parse confidence threshold is inactive — enable `parser_geometryczny`"],
+  ["{pole} nie działa — włącz `ea_enabled` (warstwa EA)", "{pole} is inactive — enable `ea_enabled` (EA layer)"],
+  ["próg wyjścia z obrony nie działa — `ea_defense_enter = 0` znaczy OBRONA NIGDY, więc nie ma z czego wychodzić", "Defense exit threshold is inactive — `ea_defense_enter = 0` means NEVER DEFEND, so there is no state to exit"],
+  ["próg wyjścia z agresji nie działa — `ea_offense_enter = 0` znaczy AGRESJA NIGDY, więc nie ma z czego wychodzić", "Offense exit threshold is inactive — `ea_offense_enter = 0` means NEVER ATTACK, so there is no state to exit"],
+  ["minimalny czas trwania stanu nie ma czego pilnować — oba progi wejścia (`ea_defense_enter`, `ea_offense_enter`) są zerowe, więc stan zostaje `Neutral` na zawsze", "Minimum state duration has nothing to enforce — both entry thresholds (`ea_defense_enter`, `ea_offense_enter`) are zero, so the state remains `Neutral` forever"],
+  ["{pole} (rodzina A) działa tylko przy `ea_enabled` ALBO w trybie AUTO-EA — w zwykłym AUTO/MANUAL/AI jest martwe co do bitu", "{pole} (family A) works only with `ea_enabled` OR in AUTO-EA mode — inactive in regular AUTO/MANUAL/AI"],
+  ["próg powrotu nie działa — `ea_stop_dokladek_przy_stracie = 0` znaczy STOP DOKŁADKOM NIGDY, więc nie ma czego zdejmować", "Return threshold is inactive — `ea_stop_dokladek_przy_stracie = 0` means NEVER STOP ADD-ONS, so there is no block to lift"],
+  ["histereza odwrócona — próg powrotu musi być MNIEJ dotkliwy niż próg wejścia, inaczej weto zdejmuje się w tej samej chwili, w której się zatrzasnęło", "Reversed hysteresis — the return threshold must be LESS severe than the entry threshold, otherwise the veto clears immediately when it latches"],
+  ["podłoga mnożnika nie działa — nachylenie zagęszczenia jest zerowe, więc mnożnik zostaje 1,0 na zawsze", "Multiplier floor is inactive — density slope is zero, so the multiplier remains 1.0 forever"],
+  ["próg i mnożnik stanu dnia nie działają — `ea_stan_dnia = Off`", "Daily-state threshold and multiplier are inactive — `ea_stan_dnia = Off`"],
+  ["mnożnik > 1 jest PRZYCINANY do 1,0 — „ryzyko nie rośnie po stracie\" jest niezmiennikiem osi A4, nie ustawieniem", "A multiplier > 1 is CLAMPED to 1.0 — “risk does not increase after loss\" is an A4 invariant, not a setting"],
+  ["trail_adaptive_window_s: okno musi być skończone i > 0; w przeciwnym razie adaptacja nie dostaje snapshotu i pozostaje no-opem.", "trail_adaptive_window_s: window must be finite and > 0; otherwise adaptation receives no snapshot and remains inactive."],
+  ["trail_adaptive_min_samples: wartości < 2 są normalizowane do 2; wpisana liczba nie opisuje więc faktycznego działania.", "trail_adaptive_min_samples: values < 2 are normalized to 2; the entered number therefore does not describe actual behavior."],
+  ["trail_adaptive_fast_vol_s/trail_adaptive_slow_vol_s: oba okna prędkości muszą być skończone i > 0, inaczej mnożnik ekspansji zmienności nie zadziała.", "trail_adaptive_fast_vol_s/trail_adaptive_slow_vol_s: both speed windows must be finite and > 0, otherwise the volatility expansion multiplier is inactive."],
+  ["trail_adaptive_fast_vol_s musi być krótsze niż trail_adaptive_slow_vol_s; inaczej iloraz prędkości nie mierzy ekspansji krótkoterminowej względem tła.", "trail_adaptive_fast_vol_s must be shorter than trail_adaptive_slow_vol_s; otherwise the speed ratio does not measure short-term expansion against the background."],
+  ["trail_adaptive_*_er: progi ER muszą należeć do [0, 1]; silnik normalizuje wartości spoza zakresu, więc preset nie działałby dokładnie tak, jak zapisano.", "trail_adaptive_*_er: ER thresholds must be within [0, 1]; the engine normalizes out-of-range values, so the preset would not behave exactly as saved."],
+  ["{pole}: mnożnik musi być skończony i >= 0; wartość ujemna/NaN jest normalizowana i nie opisuje faktycznego działania.", "{pole}: multiplier must be finite and >= 0; a negative/NaN value is normalized and does not describe actual behavior."],
+  ["trail_adaptive_vol_ratio: próg musi być skończony i >= 0; zero jawnie wyłącza drugi mnożnik zmienności.", "trail_adaptive_vol_ratio: threshold must be finite and >= 0; zero explicitly disables the second volatility multiplier."],
+  ["trail_adaptive_min_gap > trail_adaptive_max_gap: odwrócone klamry są bezpiecznie normalizowane do min_gap, ale faktycznie tworzą jedną stałą podłogę zamiast zakresu.", "trail_adaptive_min_gap > trail_adaptive_max_gap: reversed bounds are safely normalized to min_gap, but effectively create a fixed floor instead of a range."],
+  ["pending_relot_reconcile_target: pełny checked plan zastępuje pending_relot_wg_planu; sync/rearm rewalidują legalny wolumen obu trybów. RequiresReview blokuje nowe wejścia danego poziomu, nie jest kolejką zleceń po restarcie.", "pending_relot_reconcile_target: a full checked plan replaces pending_relot_wg_planu; sync/rearm revalidate legal volume in both modes. RequiresReview blocks new entries at that level; it is not an order queue after restart."],
+  ["pending_relot_reconcile_target: cykliczny relot jest wyłączony przez pending_relot_on_balance=false; kontrola bezpiecznego sync/rearm i zapisane RequiresReview nadal obowiązują.", "pending_relot_reconcile_target: periodic relot is disabled by pending_relot_on_balance=false; safe sync/rearm validation and persisted RequiresReview still apply."],
+  ["entry_edit_geometry_v2: wymaga źródłowego snapshotu. Kosmetyczna edycja nie zmienia zleceń. Working/partial geometry i niepotwierdzony cancel/fill przechodzą w RequiresReview tylko danego koszyka; obecny live nie potwierdza automatycznej wymiany geometrii. Zapisany review nie jest kolejką replay ani gwarancją atomic restart.", "entry_edit_geometry_v2: requires a source snapshot. Cosmetic edits leave orders unchanged. Working/partial geometry and unconfirmed cancel/fill enter RequiresReview only for that basket; current live does not confirm automatic geometry replacement. Persisted review is not a replay queue or an atomic-restart guarantee."],
+  ["order_volume_contract_v2: niepoprawne min/max lub dzielnik kapitału; nowe wejścia zostaną odrzucone (fail-closed), bez zamiany granic i bez podnoszenia resztkowego wolumenu.", "order_volume_contract_v2: invalid min/max or capital divisor; new entries will be rejected (fail-closed), without swapping bounds or increasing residual volume."],
+  ["order_volume_contract_v2 wymaga znanego dodatniego min/step/max brokera i kroku reprezentowalnego do 8 miejsc. lot_max=0 wyłącza tylko limit użytkownika, nie limit brokera. Wolumen jest zaokrąglany w dół; zlecenie poniżej minimum nie powstanie.", "order_volume_contract_v2 requires known positive broker min/step/max and a step representable to 8 decimals. lot_max=0 disables only the user cap, not the broker cap. Volume is rounded down; no order is created below the minimum."],
+  ["PriceOnly ma aktywny wyjątek legacy: +N PIPS HIT może awansować etap po kontroli ceny. tp_price_only_strict=true usuwa ten wyjątek, nie wyłączając RF/SPP/SL.", "PriceOnly has an active legacy exception: +N PIPS HIT can advance a stage after a price check. tp_price_only_strict=true removes this exception without disabling RF/SPP/SL."],
+  ["`tp_source = SignalOnly`, ale `tp_price_front_run_usd = {}` celowo dodaje niezależną drogę CENOWĄ dla koszyków z pozycją. Telegram nie jest potrzebny; zero przywraca czyste SignalOnly.", "`tp_source = SignalOnly`, but `tp_price_front_run_usd = {}` intentionally adds an independent PRICE path for baskets with positions. Telegram is not required; zero restores pure SignalOnly."],
+  ["`tp_price_front_run_usd = {}` wykonuje zarządzanie etapem przed TP, ale `assign_tp_per_position = true` pozostawia brokerowe TP na pełnym poziomie. Gdy zlecenie front-run zostanie odrzucone, broker zamknie pozycję dopiero na jej zwykłym TP; dziennik musi pokazać wynik close.", "`tp_price_front_run_usd = {}` manages stages before TP, but `assign_tp_per_position = true` leaves broker TP at the full level. If the front-run order is rejected, the broker closes the position only at its regular TP; the journal must show the close result."],
+  ["`trail_mode = Off` NIE wyłącza trailingu runnerów — `trail_runner_mode = {:?}` może działać przez trail_split lub kanałowy risk_free_trail; próg wynosi {} $ zysku. Zmierzony koszt tej niespodzianki: 1054 $.", "`trail_mode = Off` does NOT disable runner trailing — `trail_runner_mode = {:?}` can operate through trail_split or channel risk_free_trail; the threshold is {} $ profit. Measured cost of this surprise: 1054 $."],
+  ["RUNNER NIE MA WYJŚCIA: `risk_free_runner_target = NoTpTrailOnly` zdejmuje cel i deleguje pilnowanie do trailingu, `trail_mode`/`trail_runner_mode = Off` trailing wyłączają, `be_offset = {}` sprawia, że `sl_is_valid` odrzuca stop na BE, a limit `riskfree_runner_max_hold_min` nie obowiązuje. Po RISK FREE pozycja nie ma ANI celu, ANI zapadki, ANI terminu. Najtańsze wyjście: `runner_max_hold_bez_reguly = true` (nie stawia sufitu i nie dotyka stopu).", "RUNNER HAS NO EXIT: `risk_free_runner_target = NoTpTrailOnly` removes the target and delegates management to trailing, `trail_mode`/`trail_runner_mode = Off` disable trailing, `be_offset = {}` makes `sl_is_valid` reject a BE stop, and `riskfree_runner_max_hold_min` does not apply. After RISK FREE the position has NO target, NO ratchet, and NO deadline. Cheapest exit: `runner_max_hold_bez_reguly = true` (does not cap profit or move the stop)."],
+  ["`equity_floor_pct = {}` blokuje NOWE wejścia poniżej progu i jest STANEM POCHŁANIAJĄCYM: konto zamiera i nie wznowi się samo, wymaga ręcznej decyzji. Na VPS oznacza cichy stop.", "`equity_floor_pct = {}` blocks NEW entries below the threshold and creates an ABSORBING STATE: the account freezes and will not resume by itself; a manual decision is required. On a VPS this means a silent stop."],
+  ["`max_dd_pct = {}` / `max_dd_usd = {}` ZAMYKA WSZYSTKO po cenie dna i wstrzymuje wejścia (także dokładki i odbudowę siatki). Zmierzone na kwietniu-maju: już DWA zadziałania pogarszają i zysk, i dno equity (30,76 $ wobec 31,56 $ bez hamulca), a próg 40 % zbija dno do 6,93 $. Rozważ `max_portfolio_risk_pct` — dławi zamiast zatrzymywać.", "`max_dd_pct = {}` / `max_dd_usd = {}` CLOSES EVERYTHING at the low price and pauses entries (including add-ons and grid rebuilds). Measured in April–May: just TWO activations worsen both profit and minimum equity (30.76 $ versus 31.56 $ without the brake), while a 40 % threshold lowers the minimum to 6.93 $. Consider `max_portfolio_risk_pct` — throttles instead of halting."],
+  ["`dd_guard_scope = LifetimePeakDailyReset` mierzy obsunięcie od szczytu WSZECH CZASÓW, a blokadę zdejmuje o północy. Jeśli equity trwale spadło poniżej progu, strażnik zapala się PONOWNIE na pierwszym ticku każdego dnia — zwolnienie jest pozorne, blokada dożywotnia.", "`dd_guard_scope = LifetimePeakDailyReset` measures drawdown from the ALL-TIME peak and lifts the block at midnight. If equity remains below the threshold, the guard triggers AGAIN on the first tick each day — release is only apparent and the block permanent."],
+  ["`dd_soft_pct`/`dd_hard_pct` mnożą BUDŻET RYZYKA KOSZYKA, a `risk_per_basket_pct = 0` znaczy, że tego budżetu nie ma. Dławik jest wtedy martwy — ustaw `risk_per_basket_pct` albo użyj `max_portfolio_risk_pct`.", "`dd_soft_pct`/`dd_hard_pct` multiply the BASKET RISK BUDGET, while `risk_per_basket_pct = 0` means no such budget exists. The throttle is then inactive — set `risk_per_basket_pct` or use `max_portfolio_risk_pct`."],
+  ["`max_open_positions = {}` jest sprawdzany TYLKO w chwili nadejścia sygnału. Wypełnienia wiszących limitów już mu nie podlegają, więc jeden koszyk potrafi mieć więcej pozycji niż limit. Włącz `enforce_position_limit_on_fill`, jeśli limit ma naprawdę obowiązywać.", "`max_open_positions = {}` is checked ONLY when a signal arrives. Pending limit fills are outside this check, so one basket can exceed the position limit. Enable `enforce_position_limit_on_fill` to enforce the limit after fills."],
+  ["`ea_tick_s = 0` NIE znaczy \"zegar wyłączony\" — znaczy \"BEZ WŁASNEGO ZEGARA, czyli puls na KAŻDYM tiku\". To jest najdroższe z możliwych ustawień warstwy EA: zmierzone +162 % czasu przebiegu (STORM 17–24.08: 2,23 s → 5,83 s), a na żywo dodatkowo jeden odczyt rachunku z terminala na tik. Kadencja `1` kosztuje +23 %, `5` — +5 % (podłoga szumu).", "`ea_tick_s = 0` does NOT mean \"clock disabled\" — it means \"NO OWN CLOCK, a pulse on EVERY tick\". This is the most expensive EA-layer setting: measured +162 % runtime (STORM 17–24.08: 2.23 s → 5.83 s), plus a terminal account read on each live tick. Cadence `1` costs +23 %, `5` — +5 % (noise floor)."],
+  ["ustawienia_formatu: scalenie pól rachunku NIE weszło, noga gra SAMYM presetem (dźwignia/swap/stop-out z pliku, nie z konta): {b}", "ustawienia_formatu: account fields were NOT merged; strategy uses ONLY its preset (leverage/swap/stop-out from file, not account): {b}"],
+  ["rachunek nie serializuje się do obiektu", "Account does not serialize to an object"],
+  ["preset nie serializuje się do obiektu", "Preset does not serialize to an object"],
+  ["każdy dzień osobno", "Each day separately"],
+  ["nie znalazłem pliku sygnałów: {}", "Signal file not found: {}"],
+  ["{} · {} · kapitał {:.0} $ · {}", "{} · {} · capital {:.0} $ · {}"],
+  ["przemiał {} presetów", "Sweep of {} presets"],
+  ["całość danych", "All data"],
+  ["ostatni miesiąc", "Last month"],
+  ["ostatni tydzień", "Last week"],
+  ["{:.1} mln ticków/s", "{:.1} million ticks/s"],
+  ["wczytywanie ticków…", "Loading ticks…"],
+  ["wczytywanie sygnałów…", "Loading signals…"],
+  ["{} przebiegów × {} mln ticków", "{} runs × {} million ticks"],
+  ["kapitał startowy", "Starting capital"],
+  ["0 z {g} — żaden", "0 of {g} — none"],
+  ["Porównanie konfiguracji · {naglowek}", "Configuration comparison · {naglowek}"],
+  ["ŻADEN wariant nie przeszedł progu bezwzględnego — każdy pełny przebieg doprowadził konto do ruiny", "NO variant passed the absolute threshold — every full run ruined the account"],
+  ["brak przebiegu policzonego do końca — wyniki są wyłącznie cząstkowe", "No run completed — results are partial only"],
+  ["brak wyników", "No results"],
+  [" · CZTERY TRYBY: {przeszlo} z {} presetów przeżyło we wszystkich czterech", " · FOUR MODES: {przeszlo} of {} presets survived all four"],
+  [" · POZA PRÓBĄ {suma:+.0} $ w {} oknach", " · OUT OF SAMPLE {suma:+.0} $ across {} windows"],
+  [" · PRZERWANE — wyniki cząstkowe zapisane", " · INTERRUPTED — partial results saved"],
+  ["przerwane — zapisano", "Interrupted — saved"],
+  ["laboratorium jest zajęte — najpierw zatrzymaj bieżące zadanie", "Laboratory is busy — stop the current task first"],
+  ["nie mogę utworzyć katalogu wyników {}: {e}", "Cannot create results directory {}: {e}"],
+  ["Zadanie przerwane — postęp zapisany", "Task interrupted — progress saved"],
+  ["Zadanie zakończone", "Task completed"],
+  ["Zadanie nie powiodło się", "Task failed"],
+  ["nie udało się uruchomić wątku zadania: {e}", "Could not start task thread: {e}"],
+  ["dzień po dniu · lot stały", "Day by day · fixed lot"],
+  ["dzień po dniu · compounding", "Day by day · compounding"],
+  ["długoterminowo · lot stały", "Long term · fixed lot"],
+  ["długoterminowo · compounding", "Long term · compounding"],
+  ["Nie znalazłem pliku ticków. Sprawdziłem po kolei:\n{}\n\nJak to naprawić (dowolny sposób):\n1. połóż `ticks.bin` i `signals.json` w jednym z tych katalogów,\n2. albo zapisz ścieżkę do katalogu z danymi w pliku `{}`,\n3. albo uruchom program ze zmienną `CONDUIT_DATA=<katalog>`.", "Tick file not found. Searched in order:\n{}\n\nHow to fix (choose any):\n1. place `ticks.bin` and `signals.json` in one of these directories,\n2. or save the data directory path in `{}`,\n3. or start the program with `CONDUIT_DATA=<directory>`."],
+  ["nie znam katalogu presetów „{name}”", "Unknown preset directory “{name}”"],
+  ["data musi mieć format RRRR-MM-DD, dostałem „{s}”", "Date must use YYYY-MM-DD, received “{s}”"],
+  ["nie ma katalogu wyników zadania „{job_id}”", "No results directory for task “{job_id}”"],
+  ["nieznany podział „{}” (chrono | interleave)", "Unknown split “{}” (chrono | interleave)"],
+  ["liczba pokoleń musi być większa od zera", "Generation count must be greater than zero"],
+  ["populacja musi mieć co najmniej 4 osobniki", "Population must contain at least 4 individuals"],
+  ["początek treningu", "Training start"],
+  ["początek walidacji", "Validation start"],
+  ["nie ma punktu kontrolnego do wznowienia", "No checkpoint to resume"],
+  ["{} · pop {} · {} pokoleń · ziarno {} · trening {} … {} / walidacja {} … {}", "{} · pop {} · {} generations · seed {} · training {} … {} / validation {} … {}"],
+  ["zakres walidacyjny ({}) zachodzi na treningowy (koniec {}) — wyniki byłyby bezwartościowe", "Validation range ({}) overlaps training (ends {}) — results would be invalid"],
+  ["przeplatany: {} bloków w zakresie {} … {}", "Interleaved: {} blocks within {} … {}"],
+  ["nie udało się zbudować okien — zakres jest krótszy niż długość okna", "Could not build windows — range is shorter than window length"],
+  ["{:.1} s/pokolenie · zostało {zostalo}", "{:.1} s/generation · {zostalo} remaining"],
+  ["Nie udało się wznowić — trening rusza od zera", "Could not resume — training starts from zero"],
+  ["przerwane — model i punkt kontrolny zapisane", "Interrupted — model and checkpoint saved"],
+  [" · PRZERWANE — wznów z punktu kontrolnego", " · INTERRUPTED — resume from checkpoint"],
+  ["eksport HTML z Telegrama — rozpoznany, ale odtwarzanie go NIE używa: eksport HTML gubi edycje i skasowane wiadomości. Użyj signals.json albo eksportu JSON.", "Telegram HTML export detected but NOT used for replay: HTML loses edits and deleted messages. Use signals.json or a JSON export."],
+  ["nagłówek CDTK jest, ale plik nie ma ani jednego ticka", "CDTK header found, but the file contains no ticks"],
+  ["plik obcięty: nagłówek zapowiada {count} ticków, w pliku jest {realne}. {opis}", "Truncated file: header declares {count} ticks, file contains {realne}. {opis}"],
+  ["dobowa przerwa sesyjna zaczyna się o {h:02}:00 w zegarze pliku → {opis}", "Daily session break starts at {h:02}:00 in the file clock → {opis}"],
+  ["znaczniki są już w czasie serwera brokera", "Timestamps already use broker server time"],
+  ["przesunięcie wiadomości UTC: {:+} h", "UTC message offset: {:+} h"],
+  ["nie udało się rozpoznać zegara (za mało dobowych przerw w danych)", "Clock could not be identified (too few daily breaks in the data)"],
+  ["plik JSON ma {} MB — za dużo, żeby go wczytać w całości", "JSON file is {} MB — too large to load in full"],
+  ["natywny eksport sygnałów, {} komunikatów zarządzających; `ts` w sekundach UTC", "Native signal export, {} management messages; `ts` in UTC seconds"],
+  ["eksport JSON z Telegrama, {} wiadomości", "Telegram JSON export, {} messages"],
+  ["CSV z tickami (separator „{}”). Odtwarzanie w trybie demo wymaga formatu binarnego CDTK — przekonwertuj plik (analiza/convert_ticks.py).", "Tick CSV (separator “{}”). Demo replay requires binary CDTK format — convert the file (analiza/convert_ticks.py)."],
+  ["ten klient Telegrama nie przyjmuje poświadczeń", "This Telegram client does not accept credentials"],
+  ["Klient MTProto nie jest wbudowany w tę binarkę — logowanie do Telegrama niedostępne.", "MTProto client is not included in this binary — Telegram login is unavailable."],
+  ["PROFIT BUDGET: zlecenie ręczne odrzucone ({reason:?}); maksymalny dozwolony wolumen: 0.00000000", "PROFIT BUDGET: manual order rejected ({reason:?}); maximum allowed volume: 0.00000000"],
+  ["PROFIT BUDGET: zlecenie ręczne odrzucone; maksymalny dozwolony wolumen: {maximum:.8}; żądany wolumen pozostaje bez zmian", "PROFIT BUDGET: manual order rejected; maximum allowed volume: {maximum:.8}; requested volume is unchanged"],
+  ["PROFIT BUDGET: {reason:?}; nowe zlecenie wstrzymane", "PROFIT BUDGET: {reason:?}; new order withheld"],
+  ["PROFIT BUDGET: {reason:?}; żadna legalna siatka nie mieści się w bieżącej rezerwie", "PROFIT BUDGET: {reason:?}; no legal grid fits the current reserve"]
+];

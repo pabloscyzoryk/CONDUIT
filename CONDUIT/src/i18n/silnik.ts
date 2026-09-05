@@ -1,7 +1,18 @@
 
 
 import { EN } from "./en";
-import { t } from "./index";
+import { PL } from "./pl";
+import { getLanguage, t } from "./index";
+import { presentEngineText } from "./enginePresentation";
+
+// Exact known interface copy can also arrive as a log/toast title. Resolving
+// both languages on render keeps these labels responsive to PL ↔ EN changes.
+const KNOWN_COPY = new Map<string, string>();
+for (const key of Object.keys(EN) as (keyof typeof EN)[]) {
+  for (const value of [EN[key], PL[key]]) {
+    if (value.length >= 8 && !value.includes("{")) KNOWN_COPY.set(value, key);
+  }
+}
 
 /** Czy klucz w ogóle istnieje w słowniku (EN = źródło prawdy).
  *  Potrzebne, bo `t()` dla nieznanego klucza zwraca sam klucz — a tu
@@ -121,6 +132,8 @@ const WZORCE: { re: RegExp; klucz: string; zmienne: string[] }[] = [
  */
 export function tSilnik(tekst: string | undefined | null): string {
   if (!tekst) return "";
+  const known = KNOWN_COPY.get(tekst);
+  if (known) return t(known);
   const doslowny = DOSLOWNE[tekst];
   if (doslowny && maKlucz(doslowny)) return t(doslowny);
   for (const w of WZORCE) {
@@ -131,5 +144,5 @@ export function tSilnik(tekst: string | undefined | null): string {
       return t(w.klucz, vars);
     }
   }
-  return tekst;
+  return presentEngineText(tekst, getLanguage());
 }

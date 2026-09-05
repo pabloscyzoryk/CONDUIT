@@ -1,3 +1,4 @@
+import { getLanguage } from "@/i18n";
 import type { Candle, Quote, Timeframe } from "@/types";
 import { getSymbol } from "@/data/symbols";
 
@@ -236,7 +237,7 @@ export function getQuote(symbol: string): Quote {
 export function fmtPrice(symbol: string, v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "—";
   const d = getSymbol(symbol).digits;
-  return v.toLocaleString("pl-PL", { minimumFractionDigits: d, maximumFractionDigits: d });
+  return v.toLocaleString(getLanguage() === "pl" ? "pl-PL" : "en-GB", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
 /** Ile USD daje ruch o `pts` punktow ceny przy danym wolumenie. */

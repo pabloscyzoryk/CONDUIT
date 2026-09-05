@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { useState } from "react";
 import { Badge, Button, Card, Field, NumberInput, Segmented } from "@/components/ui";
 import { NogiLotu } from "@/components/panels/LotAuto";
@@ -174,7 +175,7 @@ function ManualnyLot({ onLot }: { onLot: (v: number) => void }) {
       />
 
       {app.lot.mode === "fixed" ? (
-        <Field label={tt("lot.size")} hint={tt("lot.size.hint")}>
+        <Field label={tt("lot.size")} hint={tt("lot.manual.size.hint")}>
           <NumberInput value={fixed} onChange={setFixed} step={0.01} min={0.01} unit="lot" />
         </Field>
       ) : (
@@ -271,7 +272,7 @@ function PodstawaLota() {
 export function LotPanel() {
   const tt = useT();
   return (
-    <Card title={tt("lotauto.card.title")} icon="layers" accent="var(--info)">
+    <Card id="lot-auto" title={tt("lotauto.card.title")} icon="layers" accent="var(--info)">
       <NogiLotu />
     </Card>
   );
@@ -481,7 +482,7 @@ export function SimulateMessagePanel() {
           </>
         )}
 
-        {bladRozbioru && <div className="hint" style={{ color: "var(--short-text)" }}>{bladRozbioru}</div>}
+        {bladRozbioru && <div className="hint" style={{ color: "var(--short-text)" }}>{tSilnik(bladRozbioru)}</div>}
         {rozbior && <RozbiorSygnalu w={rozbior} />}
 
         <div className="row">

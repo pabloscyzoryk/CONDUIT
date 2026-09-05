@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 /* ============================================================
    KRONIKA — rejestrator strumienia z Telegrama.
 
@@ -203,7 +204,7 @@ export function KronikaView() {
         </div>
         {blad && (
           <Card title={tt("kron.noRecorder")} icon="alert" accent="var(--danger)">
-            <p className="hint">{blad}</p>
+            <p className="hint">{tSilnik(blad)}</p>
           </Card>
         )}
       </div>
@@ -253,7 +254,7 @@ export function KronikaView() {
       {blad && (
         <div className="kron__blad">
           <Icon name="alert" size={15} />
-          <span>{blad}</span>
+          <span>{tSilnik(blad)}</span>
         </div>
       )}
       {komunikat && (

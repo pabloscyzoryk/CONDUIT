@@ -1,3 +1,4 @@
+import { tSilnik } from "@/i18n/silnik";
 import { Icon } from "@/components/ui";
 import { useApp } from "@/store/AppStore";
 import { useT } from "@/i18n";
@@ -22,21 +23,21 @@ export function Toasts() {
             <Icon name={ICON[t.kind]} size={14} strokeWidth={2.4} />
           </span>
           <div className="toast__body">
-            <span className="toast__title">{t.title}</span>
-            {t.text && <span className="toast__text">{t.text}</span>}
+            <span className="toast__title">{tSilnik(t.title)}</span>
+            {t.text && <span className="toast__text">{tSilnik(t.text)}</span>}
             {}
             {!!t.actions?.length && (
               <span className="toast__actions">
                 {t.actions.map((a) => (
                   <button
-                    key={a.label}
+                    key={tSilnik(a.label)}
                     className="toast__action"
                     onClick={() => {
                       a.onClick();
                       dismissToast(t.id);
                     }}
                   >
-                    {a.label}
+                    {tSilnik(a.label)}
                   </button>
                 ))}
               </span>

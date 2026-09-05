@@ -170,6 +170,7 @@ impl<B: Broker> Broker for Widok<'_, B> {
     fn volume_max(&self) -> f64 {
         self.inner.volume_max()
     }
+    fn normalize_order_price(&self, price:f64)->f64 { self.inner.normalize_order_price(price) }
     fn close_receipt_reconciliation_active(&self) -> bool {
         self.inner.close_receipt_reconciliation_active()
     }

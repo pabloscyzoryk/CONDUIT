@@ -1,3 +1,4 @@
+import { useT } from "@/i18n";
 import { useMemo } from "react";
 
 /* ============================================================
@@ -69,6 +70,7 @@ function buildMatrix(seed: number): boolean[][] {
 }
 
 export function QrCode({ seed = 42, size = 232, hole = true }: { seed?: number; size?: number; hole?: boolean }) {
+  const t = useT();
   const m = useMemo(() => buildMatrix(seed), [seed]);
   const cell = size / (SIZE + 2);
   const off = cell;
@@ -96,7 +98,7 @@ export function QrCode({ seed = 42, size = 232, hole = true }: { seed?: number; 
   }
 
   return (
-    <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} className="qr" role="img" aria-label="Kod QR do logowania">
+    <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} className="qr" role="img" aria-label={t("login.qr.aria")}>
       <rect width={size} height={size} rx={18} fill="var(--qr-bg, #fff)" />
       <g fill="var(--qr-fg, #0b0e14)">{rects}</g>
     </svg>

@@ -5,6 +5,7 @@ import { useApp } from "@/store/AppStore";
 import { useT } from "@/i18n";
 import { api } from "@/store/transport";
 import { money, num, pct } from "@/lib/format";
+import { strategyOrderCeiling } from "@/lib/orderLimits";
 import {
   brakiRachunku,
   kontraktSymbolu,
@@ -132,7 +133,8 @@ function EdytorLota({
     setBlad(null);
     api
       .savePresetSettings(noga.preset, pola as unknown as Record<string, unknown>)
-      .then(() => {
+      .then((result) => {
+        if (!result.ok) throw new Error(tt("set.save.failed", { name: noga.preset }));
         app.toast("success", tt("lotauto.saved", { p: noga.preset }), tt("lotauto.saved.text"));
         setBrudne(false);
         onClose();
@@ -697,6 +699,15 @@ export function NogiLotu() {
       <p className="hint lotauto__intro">{tt("lotauto.card.intro")}</p>
 
       <SufitEkspozycji />
+      <section className="context-help order-limits">
+        <b>{tt("lotauto.limits.title")}</b>
+        <p>{tt("lotauto.limits.scope")}</p>
+        {app.ustawieniaNog.filter(n => n.handluje).map(n => {
+          const limit = strategyOrderCeiling(n.doc.lot_max, n.doc.lot_max_z_salda, app.stats.lotBase);
+          return <div className="order-limits__row" key={`${n.format}|${n.preset}`}><span>{n.format} · {n.preset}</span><b className="num">{limit.known ? limit.ceiling === null ? tt("lotauto.limits.unlimited") : `${num(limit.ceiling, 2)} lot` : "—"}</b></div>;
+        })}
+        <p>{tt("lotauto.limits.broker")}</p>
+      </section>
 
       {grajace.length === 0 && <div className="lotauto__alarm">{tt("lotauto.warn.none")}</div>}
 

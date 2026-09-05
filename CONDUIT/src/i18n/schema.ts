@@ -47,6 +47,7 @@ function przetlumaczPole(f: FieldDef, pole: PoleEn | undefined, grupa: string): 
     ...f,
     label: pole.label ?? f.label,
     hint: pole.hint !== undefined ? pole.hint : f.hint,
+    unit: f.unit === "pkt" ? "pt" : f.unit === "dni" ? "days" : f.unit === "lot" ? "lots" : f.unit,
     options: pole.options
       ? f.options?.map((o) => ({ ...o, label: pole.options![o.value] ?? o.label }))
       : f.options,

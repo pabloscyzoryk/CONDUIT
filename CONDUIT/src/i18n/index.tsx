@@ -217,7 +217,12 @@ export function useT(): typeof t {
  */
 export function RichT({ k, vars }: { k: string; vars?: Record<string, string | number> }) {
   useSyncExternalStore(subscribe, getLanguage, getLanguage);
-  return <span dangerouslySetInnerHTML={{ __html: t(k, vars) }} />;
+  // Only dictionary markup is trusted. Paths, account names and API diagnostics
+  // inserted into a translation remain text, including <, &, and quotes.
+  const safe = vars && Object.fromEntries(Object.entries(vars).map(([key, value]) => [key,
+    String(value).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!)),
+  ]));
+  return <span dangerouslySetInnerHTML={{ __html: t(k, safe) }} />;
 }
 
 /** Pełny dostęp: język bieżący + akcje. Do selektora w „Wygląd". */
