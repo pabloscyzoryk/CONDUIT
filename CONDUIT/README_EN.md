@@ -13,8 +13,8 @@ topic identifiers, logs, ticks, chat exports, sweep results, or executables.
 `config/presets/` contains **109 public presets** accumulated during
 development. `GOD-X7.json` is the current recommended reference for the
 Synergy format, but it is not a separate bot and it does not exhaust the
-project. CONDUIT exposes **515
-core axes** covering entries and grids, sizing, exposure, TP/SL, partials,
+project. CONDUIT exposes **520
+core settings** covering entries and grids, sizing, exposure, TP/SL, partials,
 break-even/risk-free, runners, trailing, re-entry, regime/session filters,
 broker costs, pending-order semantics, journaling, and live/backtest parity
 contracts. An axis affects behavior only when enabled and not shadowed by a
@@ -155,7 +155,7 @@ A preset is JSON containing axis values. A defensible workflow is:
 
 No included preset proves an optimum for another broker, month, format, or
 risk budget. GOD-X7 is the current recommendation, not a performance
-guarantee. A 515-axis search space has strong interaction and overfitting risk.
+guarantee. This large search space has strong interaction and overfitting risk.
 
 ## Safety: DEMO → REAL
 
