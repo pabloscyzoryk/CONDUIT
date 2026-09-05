@@ -552,7 +552,9 @@ def stage(source: Path, template: Path, executable: Path, preset: Path, selectio
     put("START_CONDUIT.vbs", (launcher + 'shell.Run command, 0, False\r\n').encode("ascii"))
     put("START_BROWSER.vbs", (launcher + 'shell.Run command & " --headless --open", 0, False\r\n').encode("ascii"))
     put('README.txt', package_readme(kind))
-    sidecar_root = source / "rust/crates/mt5/sidecar"
+    # python_closure returns checked, absolute files. Compare like domains even
+    # when the CLI source root is relative; file checks remain in the closure.
+    sidecar_root = (source / "rust/crates/mt5/sidecar").resolve(strict=True)
     for helper in helpers:
         put(helper.relative_to(sidecar_root).as_posix(), helper.read_bytes())
     put("verify_package.py", Path(__file__).read_bytes())
@@ -717,7 +719,10 @@ def export_source(repo: Path, revision: str, destination: Path, template: Path) 
                 fail("unsafe_source_archive_member")
             if name.parts[0] not in {"CONDUIT", "tools", "docs", "report", "README.md", ".gitignore", ".gitattributes", ".github", "LICENSE", "LICENSE.md"} or DISALLOWED_PARTS.intersection(name.parts) or any(p.upper().startswith("VPSREADY") for p in name.parts):
                 fail("source_member_outside_allowlist")
-            if name.name in DISALLOWED_NAMES or (name.name.startswith("secrets.") and name.as_posix() != "CONDUIT/config/examples/secrets.example.json") or ".session" in name.name or name.suffix.lower() in {".exe", ".dll", ".pdb", ".zip", ".bin", ".pyc"}:
+            # Exact source paths only. The Rust module is code, not a secret
+            # document; both exceptions still pass the public payload scan.
+            secret_name_source_exceptions = {"CONDUIT/config/examples/secrets.example.json", "CONDUIT/rust/crates/server/src/secrets.rs"}
+            if name.name in DISALLOWED_NAMES or (name.name.startswith("secrets.") and name.as_posix() not in secret_name_source_exceptions) or ".session" in name.name or name.suffix.lower() in {".exe", ".dll", ".pdb", ".zip", ".bin", ".pyc"}:
                 fail("private_or_build_artifact_in_source")
             data = zipped.read(info)
             if name.as_posix() == "CONDUIT/config/examples/secrets.example.json":

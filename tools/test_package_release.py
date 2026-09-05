@@ -146,6 +146,25 @@ class SyntheticFixture(unittest.TestCase):
 
 
 class PackageTests(SyntheticFixture):
+    def test_cli_stage_accepts_relative_inputs_without_changing_payload_or_identity(self):
+        for kind in ('public', 'private'):
+            with self.subTest(kind=kind), contextlib.chdir(self.root), contextlib.redirect_stdout(io.StringIO()):
+                destination = 'PUBLIC_RELATIVE' if kind == 'public' else 'VPSREADY_RELATIVE'
+                argv = ['stage', '--source-root', 'source', '--private-template', 'VPSREADY_TEMPLATE',
+                    '--executable', 'inert.exe', '--preset', 'selected.json', '--selection', 'selection.json',
+                    '--destination', destination, '--kind', kind, '--runtime', 'runtime-fixture',
+                    '--monitor', 'inert-monitor.exe', '--report', kind + '-relative-report.json']
+                self.assertEqual(pkg.main(argv), 0)
+                package = self.root / destination
+                self.assertTrue(pkg.verify(package, self.template if kind == 'private' else None)['ok'])
+                for helper in ('mt5_sidecar.py', 'local_receipts.py', 'local_optional.py'):
+                    self.assertEqual((package / helper).read_bytes(), (self.source / 'rust/crates/mt5/sidecar' / helper).read_bytes())
+                self.assertEqual((package / 'runtime/python.exe').read_bytes(), (self.runtime / 'python.exe').read_bytes())
+                self.assertFalse((package / 'INCOMPLETE').exists())
+                self.assertTrue(pkg.read_json(self.root / (kind + '-relative-report.json'))['ok'])
+                if kind == 'private':
+                    self.assertEqual((package / 'secrets.json').read_bytes(), (self.template / 'secrets.json').read_bytes())
+
     def test_readme_is_bilingual_actionable_and_bound_to_the_manifest(self):
         for kind in ('private', 'public'):
             with self.subTest(kind=kind):
@@ -509,23 +528,26 @@ class PackageTests(SyntheticFixture):
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for immutable source export tests")
 class SourceExportTests(SyntheticFixture):
-    def make_repo(self, extra=None):
-        repo = self.root / "git-source"
+    def make_repo(self, extra=None, directory="git-source"):
+        repo = self.root / directory
         repo.mkdir()
         files = {"README.md": b"Synthetic source export\n", "CONDUIT/src/example.ts": b"export const value = 1;\n",
                  "CONDUIT/config/examples/secrets.example.json": b'{"telegram":{"apiId":0,"apiHash":"","sessionString":""},"mt5":{"password":""}}\n'}
         files.update(extra or {})
         for relative, data in files.items():
-            self.write("git-source/"+relative, data)
+            self.write(directory+"/"+relative, data)
         def git(*argv):
             return subprocess.check_output(["git", "-C", str(repo), *argv], stderr=subprocess.PIPE).decode().strip()
         git("init", "--quiet")
+        git("config", "core.autocrlf", "false")
+        git("config", "core.eol", "lf")
         git("add", ".")
         git("-c", "user.name=Synthetic Test", "-c", "user.email=synthetic@example.com", "commit", "--quiet", "-m", "Synthetic fixture")
         return repo, git("rev-parse", "HEAD")
 
     def test_source_export_uses_only_immutable_commit_and_allows_sanitized_example(self):
-        repo, revision = self.make_repo()
+        module = b'pub struct SecretStore; // Synthetic public source module.\n'
+        repo, revision = self.make_repo({"CONDUIT/rust/crates/server/src/secrets.rs":module})
         (repo / "README.md").write_text("uncommitted change")
         (repo / "untracked.txt").write_text("must not escape")
         target = self.root / "PUBLIC_SOURCE"
@@ -534,6 +556,7 @@ class SourceExportTests(SyntheticFixture):
         self.assertEqual((target / "README.md").read_text(), "Synthetic source export\n")
         self.assertFalse((target / "untracked.txt").exists())
         self.assertTrue((target / "CONDUIT/config/examples/secrets.example.json").is_file())
+        self.assertEqual((target / "CONDUIT/rust/crates/server/src/secrets.rs").read_bytes(), module)
         self.assert_code("destination_already_exists", pkg.export_source, repo, revision, target, self.template)
 
     def test_source_export_rejects_nonempty_secrets_example(self):
@@ -557,6 +580,35 @@ class SourceExportTests(SyntheticFixture):
     def test_source_export_rejects_identity_embedded_in_source(self):
         repo, revision = self.make_repo({"CONDUIT/src/leak.ts":self.identity["mt5_login"].encode()})
         self.assert_code("private_value_in_public_payload", pkg.export_source, repo, revision, self.root/"PUBLIC_SOURCE", self.template)
+
+    def test_allowed_secrets_rust_module_still_rejects_private_payload(self):
+        repo, revision = self.make_repo({"CONDUIT/rust/crates/server/src/secrets.rs":self.identity['mt5_login'].encode()})
+        target = self.root / 'PUBLIC_SOURCE'
+        self.assert_code('private_value_in_public_payload', pkg.export_source, repo, revision, target, self.template)
+        self.assertFalse(target.exists())
+
+    def test_actual_public_secrets_module_exports_through_real_git_archive(self):
+        module = (Path(__file__).resolve().parents[1] / 'CONDUIT/rust/crates/server/src/secrets.rs').read_bytes()
+        repo, revision = self.make_repo({'CONDUIT/rust/crates/server/src/secrets.rs':module})
+        target = self.root / 'PUBLIC_SOURCE'
+        result = pkg.export_source(repo, revision, target, self.template)
+        self.assertTrue(result['ok'])
+        self.assertEqual((target / 'CONDUIT/rust/crates/server/src/secrets.rs').read_bytes(), module)
+
+    def test_source_exception_does_not_allow_neighbor_data_or_build_files(self):
+        module = b'pub struct SecretStore;\n'
+        # Each immutable fixture also contains the allowed module. Reject the
+        # entire archive before writing even when that source path is present.
+        cases = ['CONDUIT/rust/crates/server/src/secrets.json',
+                 'CONDUIT/rust/crates/server/src/telegram.session',
+                 'CONDUIT/rust/crates/server/src/secrets.exe',
+                 'CONDUIT/rust/crates/other/src/secrets.rs']
+        for index, forbidden in enumerate(cases):
+            with self.subTest(path=forbidden):
+                repo, revision = self.make_repo({'CONDUIT/rust/crates/server/src/secrets.rs':module, forbidden:b'{}'}, directory='git-source-' + str(index))
+                target = self.root / ('PUBLIC_REJECTED_' + str(index))
+                self.assert_code('private_or_build_artifact_in_source', pkg.export_source, repo, revision, target, self.template)
+                self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":
