@@ -1224,7 +1224,7 @@ export const EN = {
   "aim.feat.bk_age": "Age of the basket (log scale, 1 = a day)",
   "aim.feat.bk_n_open": "Open positions in the basket (÷5)",
   "aim.feat.bk_n_pend": "Pending orders in the basket (÷5)",
-  "aim.feat.bk_realized": "Result already realised on the basket",
+  "aim.feat.bk_realized": "Basket strategy realised result",
   "aim.feat.bk_floating": "Floating result of the whole basket",
   "aim.feat.bk_is_limit": "Whether the entry was by limits or at market",
   "aim.feat.bk_armed": "Whether the basket is armed",

@@ -58,6 +58,7 @@ impl Fixture {
             let mut fail_positions = false;
             let mut partial_cap = None::<f64>;
             let mut profit_per_lot = 50.0;
+            let mut account_currency = "USD".to_owned();
             let mut pending_orders = Vec::<Value>::new();
             let mut extra_positions = Vec::<Value>::new();
             let mut position_kind=0i64;
@@ -90,7 +91,7 @@ impl Fixture {
                 let mut result = match req["cmd"].as_str().unwrap() {
                     "account" => json!({"login":42,"server":"fixture-demo","trade_mode":0,
                         "balance":balance,"equity":balance,"margin":0.,"margin_free":balance,"leverage":1000,
-                        "currency":if net_costs {"USD"}else{""}}),
+                        "currency":account_currency}),
                     "symbol_info" => json!({"symbol":"XAUUSD","digits":2,"point":0.01,
                         "stops_level_points":0.,"volume_min":0.01,"volume_max":100.,"volume_step":0.01,
                         "contract_size":100.,"trade_mode":4}),
@@ -129,8 +130,11 @@ impl Fixture {
                         volume = (volume - cut).max(0.); balance += cut * profit_per_lot;
                         let sl = req["cmd"] == "probe_sl";
                         let tp = req["cmd"] == "probe_tp";
+                        // The fake broker's confirmed execution geometry must
+                        // agree with its synthetic gross amount, including loss tests.
+                        let closed_price=4000.0+profit_per_lot/100.0;
                         let mut frame=json!({"ev":"closed","account":account(),"deal":deal,
-                            "position":identifier,"deal_type":1,"volume":cut,"price":4000.5,
+                            "position":identifier,"deal_type":1,"volume":cut,"price":closed_price,
                             "time_msc":TS+deal as i64,"profit":cut*profit_per_lot,"commission":0.,"swap":0.,
                             "reason":if sl {4}else if tp {5}else{3},"magic":777,"comment":"close","symbol":"XAUUSD",
                             "price_open":4000.,"time_open_msc":TS-1000});
@@ -142,10 +146,11 @@ impl Fixture {
                         }
                         frames.push(frame);
                         let result = json!({"retcode":10009,"deal":deal,"position":ticket,
-                            "position_identifier":identifier,"volume":cut,"price":4000.5,"profit":cut*profit_per_lot});
+                            "position_identifier":identifier,"volume":cut,"price":closed_price,"profit":cut*profit_per_lot});
                         deal += 1;
                         result
                     }
+                    "probe_currency" => {account_currency=args["value"].as_str().unwrap().to_owned();json!({})}
                     "probe_emit" => {
                         for f in &frames { write(&mut stream, f); }
                         last_frames = std::mem::take(&mut frames);
@@ -448,6 +453,30 @@ impl Drop for Fixture {
 fn near(a:f64,b:f64) { assert!((a-b).abs()<1e-8, "{a} != {b}"); }
 fn req() -> OrderReq { OrderReq { side:Side::Buy, volume:0.01, sl:None, tp:None,
     basket:Some(1), level:0, is_toucher:false, comment:"fixture".into() } }
+
+#[test]
+fn live_producer_keeps_broker_profit_and_marks_confirmed_strategy_geometry() {
+    let mut f=Fixture::new(true,0.08);
+    f.call("probe_profit_per_lot",json!({"value":-201.0}));
+    f.bridge.close_position(ID,CloseReason::RiskFree).unwrap();f.emit();
+    let rows=f.bridge.drain_closed();assert_eq!(rows.len(),1);let t=&rows[0];
+    assert_eq!(t.profit_basis,Some(conduit_core::cost_receipt::ProfitBasis::PriceOnlyGross));
+    near(t.profit,-16.08);
+    let actual=t.profit.to_bits();let strategy=t.strategy_realized_profit(false).unwrap();
+    assert_eq!(strategy.to_bits(),((3997.99_f64-4000.0)*100.0*0.08).to_bits());
+    assert_ne!(strategy.to_bits(),actual,"strategy does not inherit broker cent rounding");
+    assert_eq!(t.profit.to_bits(),actual);assert_eq!(t.net_profit(),Some(t.profit));
+}
+
+#[test]
+fn unsupported_live_strategy_currency_holds_new_orders_but_keeps_protective_close() {
+    let mut f=Fixture::new(true,0.01);
+    f.call("probe_currency",json!({"value":"EUR"}));f.bridge.refresh_account().unwrap();
+    assert!(f.bridge.open_market(req()).is_err());
+    assert!(f.bridge.close_receipt_issue().unwrap().contains("USD"));
+    assert!(f.bridge.close_position(ID,CloseReason::Manual).is_ok());
+}
+
 fn engine() -> Engine {
     let mut cfg = Settings::default();
     cfg.basket_realized_broker_only = true; cfg.confirmed_exit_retry = true;

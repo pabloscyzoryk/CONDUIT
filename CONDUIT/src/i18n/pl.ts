@@ -1211,7 +1211,7 @@ export const PL: Record<keyof typeof EN, string> = {
   "aim.feat.bk_age": "Wiek koszyka (skala logarytmiczna, 1 = doba)",
   "aim.feat.bk_n_open": "Otwarte pozycje w koszyku (÷5)",
   "aim.feat.bk_n_pend": "Oczekujące zlecenia w koszyku (÷5)",
-  "aim.feat.bk_realized": "Wynik już zrealizowany na koszyku",
+  "aim.feat.bk_realized": "Zrealizowany wynik strategii koszyka",
   "aim.feat.bk_floating": "Wynik otwarty całego koszyka",
   "aim.feat.bk_is_limit": "Czy wejście było limitami, czy rynkowe",
   "aim.feat.bk_armed": "Czy koszyk jest uzbrojony",

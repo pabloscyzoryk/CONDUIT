@@ -1190,6 +1190,20 @@ impl Obserwator {
         self.kanal.przytnij(ts);
     }
 
+    /// Only the existing bounded strategy-result tail; market warm-up is separate.
+    pub fn closed_strategy_observation_bits(&self) -> Vec<(Ts,u64)> {
+        self.kanal.wyniki.iter().map(|(ts,p)|(*ts,p.to_bits())).collect()
+    }
+
+    pub fn restore_closed_strategy_observation_bits(&mut self, rows:&[(Ts,u64)]) -> bool {
+        if rows.len()>50 || rows.iter().any(|(ts,bits)|*ts<=0 || !f64::from_bits(*bits).is_finite()) {
+            return false;
+        }
+        self.kanal.wyniki=rows.iter().map(|(ts,bits)|(*ts,f64::from_bits(*bits))).collect();
+        self.kanal.ostatnie_zamkniecie_ts=rows.last().map(|(ts,_)|*ts);
+        true
+    }
+
     /// Kasuje ślad zamkniętego koszyka.
     pub fn zapomnij(&mut self, basket_id: u32) {
         self.slady.remove(&basket_id);

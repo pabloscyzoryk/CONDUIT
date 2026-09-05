@@ -420,8 +420,17 @@ pub struct MarketSnapshot {
     pub dd_abs: f64,
     /// to samo w procentach szczytu
     pub dd_pct: f64,
-    /// wynik zrealizowany od początku doby handlowej
+    /// Wynik zarządzania strategii od początku doby, nie saldo brokera.
     pub realized_today: f64,
+    #[serde(default)]
+    pub realized_today_basis: RealizedSnapshotBasis,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RealizedSnapshotBasis {
+    #[default]
+    UnknownLegacy,
+    StrategyRealizedNotAccountCash,
 }
 
 impl MarketSnapshot {
@@ -459,6 +468,7 @@ impl MarketSnapshot {
             dd_abs: r4(dd),
             dd_pct: r4(dd / peak_equity.max(1.0) * 100.0),
             realized_today: r4(realized_today),
+            realized_today_basis: RealizedSnapshotBasis::StrategyRealizedNotAccountCash,
         }
     }
 }
@@ -1234,6 +1244,7 @@ mod testy {
                 dd_abs: 4.5,
                 dd_pct: 1.87,
                 realized_today: 36.75,
+                realized_today_basis: RealizedSnapshotBasis::StrategyRealizedNotAccountCash,
             }))
             .close(CloseDetail::new(&trade, exc).unwrap())
             .put("stage", 1u64)

@@ -549,7 +549,7 @@ impl Mt5Bridge {
     }
 
     pub fn close_receipt_issue(&self) -> Option<&str> {
-        self.runtime_entry_hold.as_deref().or(self.receipts.fault.as_deref()).or_else(|| {
+        self.runtime_entry_hold.as_deref().or(self.legacy_strategy_scope_issue()).or(self.receipts.fault.as_deref()).or_else(|| {
             self.receipts.volumes.scope_mismatch(self.execution_session().as_ref())
                 .then_some("oczekiwania wolumenu należą do innej sesji/konta; wymagana rekoncyliacja")
         }).or_else(|| {
@@ -579,6 +579,20 @@ impl Mt5Bridge {
         if self.runtime_entry_hold.is_none() {
             warn!(reason, "MT5 runtime entry HOLD; protective operations remain available");
             self.runtime_entry_hold = Some(reason.to_owned());
+        }
+    }
+
+    fn legacy_strategy_scope_issue(&self) -> Option<&'static str> {
+        if self.tr.config().closed_profit_net_costs { return None; }
+        conduit_core::strategy_profit::legacy_scope_issue(&self.sym.symbol,&self.ident.currency,self.sym.contract_size)
+    }
+
+    fn validate_strategy_tranche(&mut self, trade: &ClosedTrade) {
+        if self.tr.config().closed_profit_net_costs { return; }
+        if let Some(reason)=self.legacy_strategy_scope_issue() {
+            self.hold_new_entries(reason);
+        } else if trade.strategy_realized_profit(false).is_err() {
+            self.hold_new_entries("STRATEGY P/L HOLD: confirmed entry/exit geometry and allocated swap required");
         }
     }
 
@@ -739,7 +753,8 @@ impl Mt5Bridge {
         }
     }
 
-    fn receipt_entry_gate(&self) -> BResult<()> {
+    fn receipt_entry_gate(&mut self) -> BResult<()> {
+        if let Some(reason)=self.legacy_strategy_scope_issue() { self.hold_new_entries(reason); }
         if self.close_receipts_pending() {
             return Err(BrokerError::Rejected);
         }
@@ -1353,14 +1368,14 @@ impl Mt5Bridge {
             let open_price = if c.price_open > 0.0 {
                 c.price_open
             } else {
-                known.as_ref().map(|p| p.open_price).unwrap_or(c.price)
+                known.as_ref().map(|p| p.open_price).unwrap_or(0.0)
             };
             let open_ts = if c.time_open_msc > 0 {
                 c.time_open_msc
             } else {
-                known.as_ref().map(|p| p.open_ts).unwrap_or(c.time_msc)
+                known.as_ref().map(|p| p.open_ts).unwrap_or(0)
             };
-            self.closed.push(ClosedTrade {
+            let trade = ClosedTrade {
                 profit_basis: Some(conduit_core::cost_receipt::ProfitBasis::PriceOnlyGross), cost_receipt: None,
                 ticket: c.position,
                 side,
@@ -1374,7 +1389,9 @@ impl Mt5Bridge {
                 swap: c.swap,
                 reason,
                 basket: known.as_ref().and_then(|p| p.basket),
-            });
+            };
+            self.validate_strategy_tranche(&trade);
+            self.closed.push(trade);
             // częściowe zamknięcie zmniejsza wolumen, pełne — usuwa pozycję
             if let Some(i) = self.positions.iter().position(|p| p.ticket == c.position) {
                 let left = self.positions[i].volume - c.volume;
@@ -1475,6 +1492,7 @@ impl Mt5Bridge {
             if let Err(reason)=volume_result {
                 self.receipt_fault(reason);self.receipts.incomplete.push(c);continue;
             }
+            self.validate_strategy_tranche(&trade);
             self.closed.push(trade);
             self.receipts.seen.insert(c.deal, c);
         }
@@ -1769,18 +1787,20 @@ impl Broker for Mt5Bridge {
     fn report_cost_consumer_fault(&mut self, reason: &str) {
         if self.tr.config().closed_profit_net_costs {
             self.receipt_fault(format!("kanoniczny ledger kosztów odrzucony przez konsumenta: {reason}"));
+        } else {
+            self.hold_new_entries(reason);
         }
     }
 
     fn close_receipts_pending(&self) -> bool {
-        self.runtime_entry_hold.is_some() || (self.close_receipt_reconciliation_active()
+        self.runtime_entry_hold.is_some() || self.legacy_strategy_scope_issue().is_some() || (self.close_receipt_reconciliation_active()
             && (self.close_receipt_issue().is_some() || self.tr.receipt_decode_issue().is_some())
         )
     }
 
     fn receipt_barrier(&self) -> conduit_core::broker::ReceiptBarrier {
         use conduit_core::broker::ReceiptBarrier;
-        if self.runtime_entry_hold.is_some() || (self.close_receipt_reconciliation_active()
+        if self.runtime_entry_hold.is_some() || self.legacy_strategy_scope_issue().is_some() || (self.close_receipt_reconciliation_active()
             && (self.receipts.fault.is_some() || self.tr.receipt_decode_issue().is_some() || !self.tr.is_connected()
                 || self.receipts.volumes.scope_mismatch(self.execution_session().as_ref()))) {
             ReceiptBarrier::RequiresReview

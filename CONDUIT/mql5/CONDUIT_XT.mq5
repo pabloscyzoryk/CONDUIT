@@ -539,6 +539,8 @@ struct Basket
    bool     source_explicit;
    bool     source_withdrawn;
    bool     entry_review; // session-retained: unresolved legacy edit may not add risk
+   bool     realized_review; // confirmed close geometry missing; block additional risk
+   bool     realized_owner_missing;
    NativeEntryPlanSource entry_source;
    double   review_requested_lo, review_requested_hi;
    double   entry_lo, entry_hi;   // strefa Z SYGNAŁU (przed offsetami)
@@ -705,6 +707,7 @@ ulong    g_rej_tk[MAXREJ];
 int      g_rej_bid[MAXREJ];
 long     g_rej_msg[MAXREJ];
 double   g_rej_booked[MAXREJ]; // confirmed cumulative OUT PnL, including partials
+bool     g_rej_realized_review[MAXREJ];
 int      g_nrej = 0;
 
 // ---- STAN PER POZYCJA (odpowiednik pól Position silnika) ----
@@ -951,6 +954,7 @@ void ZapiszWlasciciela(ulong t, int bi)
    if(g_nrej >= MAXREJ) return;
    g_rej_tk[g_nrej] = t; g_rej_bid[g_nrej] = g_b[bi].id; g_rej_msg[g_nrej] = g_b[bi].msg_id;
    g_rej_booked[g_nrej] = 0.0;
+   g_rej_realized_review[g_nrej] = false;
    g_nrej++;
   }
 
@@ -958,28 +962,81 @@ void ZapiszWlasciciela(ulong t, int bi)
 // basket while the residual position is still alive; its later final close
 // must not book that partial a second time. This runs at receipt reconciliation
 // before management/re-entry, matching the engine's drain_closed boundary.
+bool NativeStrategyRealized(int side,double open_price,double close_price,double volume,
+                            double swap,double broker_net,bool net_mode,double &value)
+  {
+   if(net_mode)
+     { if(!MathIsValidNumber(broker_net))return false;value=broker_net;return true; }
+   if((side!=0 && side!=1) || !MathIsValidNumber(open_price) || open_price<=0.0
+      || !MathIsValidNumber(close_price) || close_price<=0.0
+      || !MathIsValidNumber(volume) || volume<=0.0 || !MathIsValidNumber(swap))return false;
+   // Legacy strategy basis matches SimBroker PricePlusSwap; broker cash and
+   // the exported deal ledger remain the actual confirmed MT5 amounts.
+   value=(close_price-open_price)*SideSign(side)*XAU_CONTRACT*volume+swap;
+   return MathIsValidNumber(value);
+  }
+bool NativeRealizedBarrier(int bi,ulong ticket,string why)
+  {
+   bool found=false;
+   for(int i=0;i<g_nrej;i++)if(g_rej_tk[i]==ticket && g_rej_bid[i]==g_b[bi].id)
+     {g_rej_realized_review[i]=true;found=true;}
+   if(!found)g_b[bi].realized_owner_missing=true;
+   if(!g_b[bi].realized_review && In_Diag && g_handle_diag!=INVALID_HANDLE)
+      FileWrite(g_handle_diag,"STRATEGY_REALIZED_BARRIER",(string)g_now,(string)g_b[bi].id,
+                (string)ticket,why);
+   g_b[bi].realized_review=true;
+   return false;
+  }
 bool ReconcilePositionRealized(int bi, ulong t, double &last_price, bool &was_tp)
   {
    int ri = -1;
    for(int i = g_nrej - 1; i >= 0; i--)
       if(g_rej_tk[i] == t && g_rej_bid[i] == g_b[bi].id) { ri = i; break; }
-   if(ri < 0 || !HistorySelectByPosition(t)) return false;
+   if(ri < 0 || !HistorySelectByPosition(t))return NativeRealizedBarrier(bi,t,"history_or_owner_missing");
+   double entry_price=0.0,entry_volume=0.0;
+   int entry_side=-1,entries=0;
+   for(int d=0;d<HistoryDealsTotal();d++)
+     {
+      ulong dt=HistoryDealGetTicket(d);long entry,type;
+      if(dt==0 || !HistoryDealGetInteger(dt,DEAL_ENTRY,entry))return NativeRealizedBarrier(bi,t,"entry_read");
+      if(entry!=DEAL_ENTRY_IN)continue;
+      if(++entries!=1 || !HistoryDealGetInteger(dt,DEAL_TYPE,type)
+         || !HistoryDealGetDouble(dt,DEAL_PRICE,entry_price)
+         || !HistoryDealGetDouble(dt,DEAL_VOLUME,entry_volume)
+         || (type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL))return NativeRealizedBarrier(bi,t,"entry_geometry");
+      entry_side=type==DEAL_TYPE_BUY ? 0 : 1;
+     }
+   if(entries!=1 || !MathIsValidNumber(entry_price) || entry_price<=0.0
+      || !MathIsValidNumber(entry_volume) || entry_volume<=0.0)
+      return NativeRealizedBarrier(bi,t,"entry_geometry_missing");
    double total = 0.0;
+   double closed_volume=0.0;
    last_price = 0.0; was_tp = false;
    for(int d = 0; d < HistoryDealsTotal(); d++)
      {
       ulong dt = HistoryDealGetTicket(d);
       long entry = HistoryDealGetInteger(dt, DEAL_ENTRY);
       if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) continue;
-      total += HistoryDealGetDouble(dt, DEAL_PROFIT)
-             + HistoryDealGetDouble(dt, DEAL_SWAP)
-             + HistoryDealGetDouble(dt, DEAL_COMMISSION);
-      last_price = HistoryDealGetDouble(dt, DEAL_PRICE);
+      double close_price,volume,swap,value;
+      if(!HistoryDealGetDouble(dt,DEAL_PRICE,close_price)
+         || !HistoryDealGetDouble(dt,DEAL_VOLUME,volume)
+         || !HistoryDealGetDouble(dt,DEAL_SWAP,swap)
+         || !NativeStrategyRealized(entry_side,entry_price,close_price,volume,swap,0.0,false,value))
+         return NativeRealizedBarrier(bi,t,"close_geometry_or_swap_missing");
+      closed_volume+=volume;
+      if(closed_volume>entry_volume+1e-9)return NativeRealizedBarrier(bi,t,"close_volume_exceeds_entry");
+      total += value;
+      last_price = close_price;
       if((ENUM_DEAL_REASON)HistoryDealGetInteger(dt, DEAL_REASON) == DEAL_REASON_TP) was_tp = true;
      }
+   if(!MathIsValidNumber(total))return NativeRealizedBarrier(bi,t,"strategy_total_overflow");
    double delta = total - g_rej_booked[ri];
    g_b[bi].realized += delta;
    g_rej_booked[ri] = total;
+   g_rej_realized_review[ri]=false;
+   g_b[bi].realized_review=g_b[bi].realized_owner_missing;
+   for(int i=0;i<g_nrej;i++)
+      if(g_rej_bid[i]==g_b[bi].id && g_rej_realized_review[i])g_b[bi].realized_review=true;
    if(MathAbs(delta) > 1e-10 && In_Diag && g_handle_diag != INVALID_HANDLE)
       FileWrite(g_handle_diag, "REALIZED_RECEIPT", (string)g_now, (string)g_b[bi].id,
                 (string)t, DoubleToString(delta, 8), DoubleToString(g_b[bi].realized, 8));
@@ -1199,7 +1256,7 @@ bool SourceWithdrawn(int bi)
   }
 bool EntryReviewBlocked(int bi)
   {
-   return bi >= 0 && bi < g_nb && g_b[bi].entry_review;
+   return bi >= 0 && bi < g_nb && (g_b[bi].entry_review || g_b[bi].realized_review);
   }
 bool KeepExplicitPending(int bi)
   {
@@ -1283,7 +1340,7 @@ bool NativeEnsureBasketCapacity(string entry_kind)
    bool retain[MAXB];
    for(int i=0;i<g_nb;i++)
      {
-      retain[i]=Alive(i) || g_b[i].exit_pending || g_b[i].entry_review;
+      retain[i]=Alive(i) || g_b[i].exit_pending || g_b[i].entry_review || g_b[i].realized_review;
       if(!retain[i])
         {
          ulong positions[],orders[];
@@ -7362,6 +7419,30 @@ void CorrectionWireScenarioTick()
    ExitTestFinish(true,"TP_CORRECTION_PENDING_STAGE_AND_ZERO_INDEX");
   }
 
+void StrategyRealizedScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   double opens[5]={4595.80,4594.43,4593.44,4592.19,4591.13};
+   double cash[5]={1.77,0.40,-0.59,-1.84,-2.90};
+   double raw=0.0,rounded=0.0,value=0.0;
+   for(int i=0;i<5;i++)
+     {
+      if(!ExitTestRequire(NativeStrategyRealized(1,opens[i],4594.03,0.01,0.0,cash[i],false,value),"confirmed strategy geometry rejected"))return;
+      raw+=value;rounded+=cash[i];
+     }
+   double floating=(4593.57-4596.73)*(-1.0)*XAU_CONTRACT*0.01;
+   PrintFormat("CEXIT_TEST_EVENT|strategy_realized_boundary|raw=%.17g|cash=%.17g|floating=%.17g|raw_total=%.17g|cash_total=%.17g",raw,rounded,floating,raw+floating,rounded+floating);
+   if(!ExitTestRequire(raw+floating>=0.0 && rounded+floating<0.0,"B1045 confirmed binary threshold not reproduced"))return;
+   double swapped=0.0,partial=0.0,net=0.0;
+   if(!ExitTestRequire(NativeStrategyRealized(0,4000.0,4001.0,0.04,-0.75,999.0,false,swapped)
+                      && NativeStrategyRealized(0,4000.0,4001.0,0.02,-0.25,999.0,false,partial)
+                      && swapped==3.25 && partial==1.75,"allocated swap or partial volume changed basis"))return;
+   if(!ExitTestRequire(NativeStrategyRealized(-1,0,0,0,0,12.345,true,net) && net==12.345,
+                      "canonical net mode was re-derived"))return;
+   if(!ExitTestRequire(!NativeStrategyRealized(0,0,4001,0.01,0,0,false,value),"missing entry geometry accepted"))return;
+   ExitTestFinish(true,"CONFIRMED_PRICE_PLUS_SWAP_STRATEGY_BASIS_WITH_ACTUAL_CASH_PRESERVED");
+  }
+
 void ExitFaultScenarioTick()
   {
    if(!MQLInfoInteger(MQL_TESTER) || In_TestExitScenario == 0 || g_test_exit_finished) return;
@@ -7375,6 +7456,7 @@ void ExitFaultScenarioTick()
    if(In_TestExitScenario == 18) { EntryReceiptBarrierScenarioTick(); return; }
    if(In_TestExitScenario == 19) { EmptySppScenarioTick(); return; }
    if(In_TestExitScenario == 20) { CorrectionWireScenarioTick(); return; }
+   if(In_TestExitScenario == 21) { StrategyRealizedScenarioTick(); return; }
    if(In_TestExitScenario == 11 || In_TestExitScenario == 12) { SourceRecoveryScenarioTick(); return; }
    if(In_TestExitScenario == 6) { PartialReceiptScenarioTick(); return; }
    if(In_TestExitScenario == 7 || In_TestExitScenario == 8) { EditReviewScenarioTick(); return; }
@@ -7474,7 +7556,7 @@ int OnInit()
      }
    if(!TestSppTargetPlanReset()) return INIT_FAILED;
    if(!TestBeRetargetContract()) return INIT_FAILED;
-   if(In_TestExitScenario < 0 || In_TestExitScenario > 20) return INIT_PARAMETERS_INCORRECT;
+   if(In_TestExitScenario < 0 || In_TestExitScenario > 21) return INIT_PARAMETERS_INCORRECT;
    if(In_TestExitScenario > 0
       && (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       return INIT_PARAMETERS_INCORRECT;
@@ -7485,6 +7567,13 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
      }
 
+   if(AccountInfoString(ACCOUNT_CURRENCY)!="USD"
+      || SymbolInfoString(_Symbol,SYMBOL_CURRENCY_PROFIT)!="USD"
+      || SymbolInfoDouble(_Symbol,SYMBOL_TRADE_CONTRACT_SIZE)!=XAU_CONTRACT)
+     {
+      Print("CONDUIT_XT: strategy realized requires confirmed USD profit and contract 100.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
    long maska = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
    if((maska & SYMBOL_FILLING_FOK) != 0)      g_fill_deal = ORDER_FILLING_FOK;
    else if((maska & SYMBOL_FILLING_IOC) != 0) g_fill_deal = ORDER_FILLING_IOC;

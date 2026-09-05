@@ -7063,20 +7063,28 @@ impl Engine {
         }
 
         for c in &closed {
+            let profit = match c.strategy_realized_profit(self.cfg.closed_profit_net_costs) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.latch_cost_fault(b, ts, format!("STRATEGY P/L: unverified closed tranche ({error:?})"));
+                    self.cost_quarantine.push(c.clone());
+                    continue;
+                }
+            };
             self.stats.trades += 1;
-            if c.profit > 0.0 {
+            if profit > 0.0 {
                 self.stats.wins += 1;
-                self.stats.gross_win += c.profit;
+                self.stats.gross_win += profit;
             } else {
                 self.stats.losses += 1;
-                self.stats.gross_loss += -c.profit;
+                self.stats.gross_loss += -profit;
             }
-            self.stats.realized_today += c.profit;
-            self.closed_today.push(c.profit);
-            self.obs.na_zamknieciu(c.close_ts, c.profit);
+            self.stats.realized_today += profit;
+            self.closed_today.push(profit);
+            self.obs.na_zamknieciu(c.close_ts, profit);
             if let Some(bid) = c.basket {
                 if let Some(bk) = self.basket_mut(bid) {
-                    bk.realized += c.profit;
+                    bk.realized += profit;
                     bk.tickets.retain(|t| *t != c.ticket);
                 }
             }
@@ -12197,7 +12205,7 @@ mod testy_pakiet_a {
         q: Quote,
         positions: Vec<Position>,
         pendings: Vec<PendingOrder>,
-        closed: Vec<ClosedTrade>,
+        pub(super) closed: Vec<ClosedTrade>,
         next: Ticket,
         pub(super) stops: f64,
         cancel_failures: usize,
@@ -13281,6 +13289,45 @@ mod testy_pakiet_b {
                 assert_eq!(snapshot.open_volume, 0.04);
             }
         }
+    }
+
+    #[test]
+    fn confirmed_strategy_profit_is_shared_by_basket_day_and_observation_consumers() {
+        let mut b=Atrapa::nowa();
+        let mut e=silnik(|c| {c.auto_limit=true;c.entry_units=4;c.basket_realized_broker_only=true;});
+        e.on_tick(&mut b,&Quote {ts:TS0,bid:3998.0,ask:3998.3});
+        e.on_message(&mut b,&wiad(1,1,None,WEJSCIE));
+        let basket=e.baskets[0].id;
+        let mut expected=0.0;
+        for (i,(open,profit)) in [4591.13,4592.19,4593.44,4594.43,4595.8].into_iter()
+            .zip([-2.90,-1.84,-0.59,0.40,1.77]).enumerate() {
+            let trade=ClosedTrade {ticket:100+i as u64,side:Side::Sell,volume:0.01,
+                open_price:open,close_price:4594.03,open_ts:TS0-1000,close_ts:TS0+1,
+                profit,commission:0.0,swap:0.0,reason:CloseReason::RiskFree,basket:Some(basket),
+                profit_basis:Some(crate::cost_receipt::ProfitBasis::PriceOnlyGross),cost_receipt:None};
+            expected+=trade.strategy_realized_profit(false).unwrap(); b.closed.push(trade);
+        }
+        b.ustaw_cene(TS0+1,3998.0,3998.3);let q=b.quote();e.on_tick(&mut b,&q);
+        assert_eq!(e.basket(basket).unwrap().realized.to_bits(),expected.to_bits());
+        assert_eq!(e.stats.realized_today.to_bits(),expected.to_bits());
+        assert_eq!(e.closed_today.iter().sum::<f64>().to_bits(),expected.to_bits());
+        assert_eq!(e.stats.trades,5);assert!(e.cost_reconciliation_required.is_none());
+        assert_eq!(b.account().balance,400.0,"strategy bookkeeping never mutates broker cash");
+    }
+
+    #[test]
+    fn missing_confirmed_strategy_geometry_latches_entry_hold_without_invented_profit() {
+        let mut b=Atrapa::nowa();let mut e=silnik(|c|c.basket_realized_broker_only=true);
+        let q=b.quote();e.on_tick(&mut b,&q);
+        b.closed.push(ClosedTrade {ticket:100,side:Side::Sell,volume:0.01,open_price:0.0,
+            close_price:4000.0,open_ts:0,close_ts:TS0,profit:2.0,commission:0.0,swap:0.0,
+            reason:CloseReason::RiskFree,basket:None,
+            profit_basis:Some(crate::cost_receipt::ProfitBasis::PriceOnlyGross),cost_receipt:None});
+        e.on_tick(&mut b,&q);
+        assert!(e.cost_reconciliation_required.as_deref().unwrap().contains("STRATEGY P/L"));
+        assert_eq!(e.cost_quarantine.len(),1);assert_eq!(e.stats.realized_today,0.0);
+        e.on_message(&mut b,&wiad(1,1,None,WEJSCIE));
+        assert!(b.positions().is_empty() && b.pendings().is_empty());
     }
 
     #[test]

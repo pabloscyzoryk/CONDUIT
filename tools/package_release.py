@@ -445,6 +445,34 @@ def safe_destination(destination: Path, kind: str) -> Path:
     return result
 
 
+def package_readme(kind: str) -> bytes:
+    pl = ("CONDUIT — SZYBKI START\n\n"
+          "1. Rozpakuj cały folder. Nie przenoś pojedynczego pliku EXE.\n"
+          "2. Uruchom START_CONDUIT.vbs. Jeśli okno się nie otwiera, użyj START_BROWSER.vbs.\n"
+          "3. Python i moduły MT5 są dołączone w runtime/; globalny Python nie jest wymagany.\n"
+          "4. Terminal MetaTrader 5 musi być zainstalowany i zalogowany na wybrane konto.\n"
+          "5. Instrumenty: PUPrime — XAUUSD.s; Vantage — XAUUSD. Sprawdź instrument w panelu.\n")
+    en = ("CONDUIT — QUICK START\n\n"
+          "1. Extract the entire folder. Do not move the EXE on its own.\n"
+          "2. Run START_CONDUIT.vbs. If the window does not open, use START_BROWSER.vbs.\n"
+          "3. Python and the MT5 modules are included in runtime/; no global Python is required.\n"
+          "4. MetaTrader 5 must be installed and signed in to the intended account.\n"
+          "5. Symbols: PUPrime — XAUUSD.s; Vantage — XAUUSD. Check the symbol in the panel.\n")
+    if kind == 'private':
+        pl += ("\nVPS: zachowano konfigurację prywatną. Przy FOLLOW_TERMINAL pozostaw uruchomiony\n"
+               "dokładnie jeden zalogowany terminal albo jawnie wybierz jego ścieżkę w panelu.\n"
+               "Przed startem sprawdź wybrane konto. Uruchomienie może wznowić tryb AUTO.\n"
+               "Ten folder jest prywatny: nie udostępniaj go innym osobom.\n")
+        en += ("\nVPS: the private configuration is preserved. With FOLLOW_TERMINAL, keep exactly\n"
+               "one signed-in terminal running, or explicitly select its path in the panel.\n"
+               "Check the selected account before starting. Startup may resume AUTO mode.\n"
+               "This folder is private: do not share it with other people.\n")
+        return (pl + '\n' + en).encode('utf-8')
+    en += "\nPUBLIC: starts in MANUAL mode. Configure Telegram and the intended terminal\nbefore enabling AUTO. This package contains no login data or Telegram session.\n"
+    pl += "\nPUBLIC: startuje w trybie MANUAL. Skonfiguruj Telegram i wybrany terminal\nprzed włączeniem AUTO. Paczka nie zawiera danych logowania ani sesji Telegrama.\n"
+    return (en + '\n' + pl).encode('utf-8')
+
+
 def stage(source: Path, template: Path, executable: Path, preset: Path, selection: Path,
           destination: Path, kind: str, runtime: Path, monitor: Path) -> dict:
     if kind not in {"private", "public"}:
@@ -523,6 +551,7 @@ def stage(source: Path, template: Path, executable: Path, preset: Path, selectio
                 'command = Chr(34) & folder & "\\conduit.exe" & Chr(34)\r\n')
     put("START_CONDUIT.vbs", (launcher + 'shell.Run command, 0, False\r\n').encode("ascii"))
     put("START_BROWSER.vbs", (launcher + 'shell.Run command & " --headless --open", 0, False\r\n').encode("ascii"))
+    put('README.txt', package_readme(kind))
     sidecar_root = source / "rust/crates/mt5/sidecar"
     for helper in helpers:
         put(helper.relative_to(sidecar_root).as_posix(), helper.read_bytes())

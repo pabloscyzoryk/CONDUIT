@@ -146,6 +146,23 @@ class SyntheticFixture(unittest.TestCase):
 
 
 class PackageTests(SyntheticFixture):
+    def test_readme_is_bilingual_actionable_and_bound_to_the_manifest(self):
+        for kind in ('private', 'public'):
+            with self.subTest(kind=kind):
+                package = self.stage(kind)
+                readme = (package / 'README.txt').read_text(encoding='utf-8')
+                self.assertTrue(readme.startswith('CONDUIT — SZYBKI START' if kind == 'private' else 'CONDUIT — QUICK START'))
+                for required in ('START_CONDUIT.vbs', 'START_BROWSER.vbs', 'runtime/', 'PUPrime', 'XAUUSD.s', 'Vantage', 'XAUUSD'):
+                    self.assertIn(required, readme)
+                self.assertIn('FOLLOW_TERMINAL' if kind == 'private' else 'before enabling AUTO', readme)
+                manifest = pkg.read_json(package / 'PACKAGE_MANIFEST.json')
+                self.assertEqual(manifest['public_files']['README.txt']['sha256'], pkg.sha((package / 'README.txt').read_bytes()))
+                for secret in (*self.identity.values(), self.secrets['telegram']['apiHash']):
+                    if isinstance(secret, str) and secret:
+                        self.assertNotIn(secret, readme)
+                (package / 'README.txt').write_text(readme + '\nChanged', encoding='utf-8')
+                self.assert_code('runtime_or_public_payload_changed', pkg.verify, package, self.template if kind == 'private' else None)
+
     def test_string_session_requires_the_full_production_serde_shape(self):
         (self.template / 'telegram.session').unlink()
         mutations = [lambda s:s.pop('peers'), lambda s:s.pop('updates'),

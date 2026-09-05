@@ -2,6 +2,7 @@
 pub mod broker;
 /// Versioned pure cost arithmetic only; not wired into ClosedTrade or trading.
 pub mod cost_receipt;
+pub mod strategy_profit;
 /// Pure conditional nominal-floor evaluator; not connected to trading yet.
 pub mod rf_protection;
 /// Pure session-only pending no-fill evidence; no live capability is enabled.

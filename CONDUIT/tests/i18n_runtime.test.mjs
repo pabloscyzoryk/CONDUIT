@@ -139,6 +139,41 @@ test('existing dynamic notifications also follow the current display language', 
   assert.ok(!presentEngineText('RISK FREE @ 2400 · closed 2 positions (5 $, entry VWAP 2400) · runners: 1, SL 2400', 'pl').includes('{'));
 });
 
+test('strategy summaries retain their accounting scope and signed values in both languages', () => {
+  const cases = [
+    ['Podsumowanie strategii: -123.45 $ dzisiaj', 'Strategy summary: -123.45 $ today'],
+    ['Dzisiaj · wynik strategii +0.00 $ · obsunięcie dnia 12.30 $ · transakcji 7', 'Today · strategy result +0.00 $ · daily drawdown 12.30 $ · trades 7'],
+    ['Skuteczność strategii od startu · 3 z 7 (43 %) · profit factor 0.75', 'Strategy win rate since startup · 3 of 7 (43 %) · profit factor 0.75'],
+  ];
+  for (const [polish, english] of cases) {
+    i18n.setLanguage('en');
+    assert.equal(tSilnik(polish), english);
+    i18n.setLanguage('pl');
+    assert.equal(tSilnik(english), polish);
+  }
+  assert.equal(i18n.t('aim.feat.bk_realized'), 'Zrealizowany wynik strategii koszyka');
+  i18n.setLanguage('en');
+  assert.equal(i18n.t('aim.feat.bk_realized'), 'Basket strategy realised result');
+  // Legacy logs remain translatable without relabelling their source facts.
+  assert.equal(tSilnik('Podsumowanie: +10.00 $ dzisiaj'), 'Summary: +10.00 $ today');
+});
+
+test('strategy accounting holds retain the concrete verification reason and diagnostic enum', () => {
+  const cases = [
+    ['WYNIK STRATEGII HOLD: wymagane potwierdzone XAUUSD, rachunek w USD i kontrakt 100 jednostek', 'STRATEGY P/L HOLD: verified XAUUSD, USD account and 100-unit contract required'],
+    ['WYNIK STRATEGII HOLD: wymagane potwierdzone parametry wejścia i wyjścia oraz przypisany swap', 'STRATEGY P/L HOLD: confirmed entry/exit geometry and allocated swap required'],
+    ['WYNIK STRATEGII HOLD: zapisany wynik zarządzania ma niezweryfikowaną podstawę', 'STRATEGY P/L HOLD: saved management result has an unverified basis'],
+    ...['MissingGeometry', 'InvalidValue', 'CanonicalReceipt'].map(reason => [
+      `WYNIK STRATEGII: niezweryfikowana zamknięta transza (${reason})`,
+      `STRATEGY P/L: unverified closed tranche (${reason})`,
+    ]),
+  ];
+  for (const [polish, english] of cases) {
+    i18n.setLanguage('pl'); assert.equal(tSilnik(english), polish);
+    i18n.setLanguage('en'); assert.equal(tSilnik(polish), english);
+  }
+});
+
 test('RichT preserves dictionary markup but escapes untrusted interpolation', () => {
   i18n.setLanguage('en');
   const rendered = i18n.RichT({ k: 'path.newName' });

@@ -1,5 +1,21 @@
 [
   [
+    "WYNIK STRATEGII HOLD: wymagane potwierdzone XAUUSD, rachunek w USD i kontrakt 100 jednostek",
+    "STRATEGY P/L HOLD: verified XAUUSD, USD account and 100-unit contract required"
+  ],
+  [
+    "WYNIK STRATEGII HOLD: wymagane potwierdzone parametry wejścia i wyjścia oraz przypisany swap",
+    "STRATEGY P/L HOLD: confirmed entry/exit geometry and allocated swap required"
+  ],
+  [
+    "WYNIK STRATEGII: niezweryfikowana zamknięta transza ({error:?})",
+    "STRATEGY P/L: unverified closed tranche ({error:?})"
+  ],
+  [
+    "WYNIK STRATEGII HOLD: zapisany wynik zarządzania ma niezweryfikowaną podstawę",
+    "STRATEGY P/L HOLD: saved management result has an unverified basis"
+  ],
+  [
     "Koszty netto są obecnie trybem badawczym: brak certyfikowanej migracji i trwałego ACK. LIVE nie włącza nowego księgowania. Nowe wejścia HOLD; działająca sesja zachowuje poprzednie księgowanie oraz close/SL/TP/cancel. Nie zeruję koszyków ani DD. Przy starcie ON nie łączę MT5; ochronę istniejących pozycji sprawdź w terminalu.",
     "Net costs are currently a research mode: certified migration and durable ACK are unavailable. LIVE does not enable the new accounting. New entries are on HOLD; an active session keeps its previous accounting and protective close/SL/TP/cancel. Baskets and DD are not reset. If ON at startup, MT5 is not connected; check protection of existing positions in the terminal."
   ],
@@ -1536,6 +1552,10 @@
     "Summary: {dzis:+.2} $ today"
   ],
   [
+    "Podsumowanie strategii: {dzis:+.2} $ dzisiaj",
+    "Strategy summary: {dzis:+.2} $ today"
+  ],
+  [
     "Rachunek · saldo {0} $ · equity {1} $ · wolny margines {2} $",
     "Account · balance {0} $ · equity {1} $ · free margin {2} $"
   ],
@@ -1544,12 +1564,20 @@
     "Today · realized {0} $ · daily drawdown {1} $ · trades {2}"
   ],
   [
+    "Dzisiaj · wynik strategii {0} $ · obsunięcie dnia {1} $ · transakcji {2}",
+    "Today · strategy result {0} $ · daily drawdown {1} $ · trades {2}"
+  ],
+  [
     "Teraz · pozycji {0} (pływające {1} $) · zleceń oczekujących {2} · koszyków {3}",
     "Now · positions {0} (floating {1} $) · pending orders {2} · baskets {3}"
   ],
   [
     "Skuteczność od startu · {0} z {1} ({2} %) · profit factor {3}",
     "Win rate since startup · {0} of {1} ({2} %) · profit factor {3}"
+  ],
+  [
+    "Skuteczność strategii od startu · {0} z {1} ({2} %) · profit factor {3}",
+    "Strategy win rate since startup · {0} of {1} ({2} %) · profit factor {3}"
   ],
   [
     "UWAGA: HANDEL ZATRZYMANY — {powod}",

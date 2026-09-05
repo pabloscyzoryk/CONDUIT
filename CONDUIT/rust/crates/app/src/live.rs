@@ -2329,6 +2329,8 @@ struct Trwale {
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct TrwalySilnik {
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    strategy_realized: Option<crate::strategy_realized_memory::StrategyRealizedMemory>,
     stats: Option<conduit_core::types::Stats>,
     halted: Option<String>,
     risk_override: bool,
@@ -2437,7 +2439,7 @@ fn save_follow_memory(st: &StateHandle, silniki: &routing::Silniki, toz: &condui
             };
             (!rest.is_empty()).then(|| rest.to_string())
         });
-        (s.format.clone(),TrwalySilnik{stats:Some(s.engine.stats.clone()),halted,
+        (s.format.clone(),TrwalySilnik{strategy_realized:Some(crate::strategy_realized_memory::StrategyRealizedMemory::capture(&s.engine)),stats:Some(s.engine.stats.clone()),halted,
             risk_override:s.engine.risk_override,closed_today:s.engine.closed_today.clone(),
             stopped_trading_day:s.engine.stopped_trading_day(),
             profit_budget_anchor:(s.engine.cfg.profit_budget_arm_pct!=0.0).then(|| (&s.engine.stats).into()),
@@ -2798,6 +2800,7 @@ fn handel(
     // dopisuje pozycje do koszyków, które już istnieją, więc koszyk musi tam
     // być, zanim przyjdzie pierwsze kwotowanie.
     let mut zrzut_ostatni = wznow_koszyki(st, &mut silniki, &broker, &toz, symbol, trwale);
+    restore_strategy_realized_memory(&mut silniki,trwale,broker.quote().ts);
     let continuation_origin=live_continuation_origin(st,&broker,&toz,symbol,trwale);
     let continuation_reports=restore_strategy_memory(&mut silniki,trwale,&broker,continuation_origin);
     log_continuation_reports(st,&continuation_reports);
@@ -3641,6 +3644,17 @@ fn przenies_pamiec(
     blokady
 }
 
+fn restore_strategy_realized_memory(silniki:&mut routing::Silniki,trwale:&Trwale,ts:i64) {
+    for slot in &mut silniki.lista {
+        let memory=trwale.silniki.get(&slot.format).and_then(|x|x.strategy_realized.as_ref());
+        let day=conduit_core::types::day_of(ts,slot.engine.cfg.session_offset());
+        if let Err(reason)=crate::strategy_realized_memory::restore(&mut slot.engine,memory,day) {
+            slot.engine.cost_reconciliation_required=Some(reason.into());
+            slot.engine.halted=Some(reason.into());
+        }
+    }
+}
+
 /// Stage A: always AFTER broker-backed basket adoption. This shared helper is
 /// exercised by the actual recovery differential, not a hand-copied model.
 fn restore_strategy_memory<B:Broker>(silniki:&mut routing::Silniki,trwale:&Trwale,
@@ -3854,6 +3868,7 @@ fn przebuduj_lancuch(
 
     rozgrzej_historie(st, broker, &mut nowe, symbol);
     let zrzut_json = wznow_koszyki(st, &mut nowe, broker, toz, symbol, trwale);
+    restore_strategy_realized_memory(&mut nowe,trwale,broker.quote().ts);
     let continuation_reports=restore_strategy_memory(&mut nowe,trwale,broker,ContinuationOrigin::Memory);
     log_continuation_reports(st,&continuation_reports);
 
@@ -4003,6 +4018,7 @@ fn zapamietaj_silniki(
     trwale.koszyki.clear();
     trwale.next_basket_id = silniki.next_basket_id();
     for s in silniki.lista.iter_mut() {
+        let strategy_realized=Some(crate::strategy_realized_memory::StrategyRealizedMemory::capture(&s.engine));
         trwale.koszyki.extend(std::mem::take(&mut s.engine.baskets));
         let halted = s.engine.halted.as_deref().and_then(|r| {
             let reszta = if diagnoza.is_empty() || r == diagnoza {
@@ -4021,6 +4037,7 @@ fn zapamietaj_silniki(
         trwale.silniki.insert(
             s.format.clone(),
             TrwalySilnik {
+                strategy_realized,
                 stats: Some(s.engine.stats.clone()),
                 halted,
                 risk_override: s.engine.risk_override,
@@ -4680,13 +4697,13 @@ fn podsumowanie(
     }
 
     let otwarte: f64 = broker.positions().iter().map(|p| p.profit_usd(&q)).sum();
-    let temat = format!("Podsumowanie: {dzis:+.2} $ dzisiaj");
+    let temat = format!("Podsumowanie strategii: {dzis:+.2} $ dzisiaj");
     let tresc = format!(
         "Rachunek · saldo {:.2} $ · equity {:.2} $ · wolny margines {:.2} $\n\
-         Dzisiaj · zrealizowane {:+.2} $ · obsunięcie dnia {:.2} $ · transakcji {}\n\
+         Dzisiaj · wynik strategii {:+.2} $ · obsunięcie dnia {:.2} $ · transakcji {}\n\
          Teraz · pozycji {} (pływające {:+.2} $) · zleceń oczekujących {} · koszyków {}\n\
          {symbol} · bid {:.2} / ask {:.2}\n\
-         Skuteczność od startu · {} z {} ({:.0} %) · profit factor {:.2}{}",
+         Skuteczność strategii od startu · {} z {} ({:.0} %) · profit factor {:.2}{}",
         acc.balance,
         acc.equity,
         acc.free_margin,

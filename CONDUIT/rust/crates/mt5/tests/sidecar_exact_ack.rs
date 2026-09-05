@@ -99,9 +99,9 @@ fn actual_python_ack_then_delayed_receipt_is_owned_and_credited_once_for_both_co
         assert!(f.bridge.close_receipts_pending());assert!(f.bridge.open_market(req()).is_err());
         f.emit();assert!(f.bridge.close_receipts_pending(),"decoded is not owner-consumed");
         e.on_tick(&mut f.bridge,&q);
-        assert_eq!(e.baskets[0].realized,7.0,"legacy gross receipt is one booking, NOT canonical NET");
+        assert_eq!(e.baskets[0].realized,9.7,"confirmed price movement plus swap is booked once for strategy; broker gross remains 7");
         f.emit();e.on_tick(&mut f.bridge,&q);
-        assert_eq!(e.baskets[0].realized,7.0,"duplicate receipt cannot book again");
+        assert_eq!(e.baskets[0].realized,9.7,"duplicate receipt cannot book strategy profit again");
         assert_eq!(f.bridge.account().balance,1006.4,"cash remains broker truth, not ACK components");
     }
 }
