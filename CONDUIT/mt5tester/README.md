@@ -96,9 +96,31 @@ effective settings must remain explicit and identical in both systems.
   tombstone prevents new orders and retries broker-refused pending removal.
 - Daily trailing can use total peak equity or peak daily profit. Day, EOD
   and weekend guards include exposure consisting only of pending orders.
-- Native fault scenarios 1–8 in XT exercise confirmed exits, broker refusal,
+- Native fault scenarios 1–13 in XT exercise confirmed exits, broker refusal,
   cancellation/fill races, residual partials, partial accounting, refused
   grid edits and clean replacement, including legacy and no-fault controls.
+  Further scenarios cover known special grid legs, profit-budget flooring
+  against acknowledged exposure, a standalone portfolio cap before profit
+  reserve activation, receive-time source recovery and legacy orphan rejection.
+  Source identity and aliases survive basket pruning within
+  a native run. XT accepts one source channel per experiment; its fresh tester
+  state does not claim the live application's persisted account restart proof.
+- Fast addons apply the lot ceiling after their multiplier. Local invalid-TP
+  checks preserve capacity and start the configured cooldown; transmitted
+  refusals consume an attempt. The
+  `OPEN_VOLUME_AUDIT` record measures final transmitted and accepted-request
+  maxima, including refusals, rather than inferring volume from partial closes.
+- Comparator schema v2 reads SimBroker profit as already including realized
+  swap. Canonical receipts include all costs and must reconcile. Commission
+  and swap breakdown fields are never added a second time. Earlier immutable
+  comparator reports need a separately labelled measurement correction.
+- Strategy rankings and gross floating-profit thresholds use the same raw
+  mark-to-market formula as core, excluding swap and broker cash rounding.
+  Account equity and realized receipts retain their actual costs.
+- `experiment.py --trade-sessions profile.json` validates observed native
+  sessions against an explicit broker execution profile, without filtering
+  quotes or source messages. See [the execution contract](../docs/BROKER_TRADE_SESSIONS.md).
+  `--native-source` can pin an immutable MQ5 snapshot for the comparison.
 - Adaptive trailing uses the same sampled path efficiency, fast/slow movement
   ratio and directional gap multipliers as core. A contract error rejects a
   requested adaptive window beyond shared history retention. It still needs

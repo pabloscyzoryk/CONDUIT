@@ -9,6 +9,7 @@ mod mt5_guard;
 /// Rozdzielanie sygnałów na wiele silników (jeden na format) i widok brokera,
 /// dzięki któremu silnik zarządza wyłącznie własnymi pozycjami.
 mod routing;
+mod runtime_python;
 #[cfg(feature = "window")]
 mod window;
 mod wznowienie;

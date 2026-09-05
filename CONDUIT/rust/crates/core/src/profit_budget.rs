@@ -1,4 +1,4 @@
-//! Opt-in daily profit reserve for NEW exposure only. All inputs are observed
+//! Configured portfolio cap and opt-in daily profit reserve for NEW exposure. All inputs are observed
 //! now; it is not a stop order and cannot promise a floor across gaps or costs.
 use crate::{Broker, Settings, Side, Stats};
 use crate::types::{day_of, XAU_CONTRACT};
@@ -40,30 +40,42 @@ fn downside(side:Side, current:f64, stop:Option<f64>, volume:f64)->Result<f64,Bu
     if !risk.is_finite(){Err(BudgetError::InvalidExposure)}else{Ok(risk)}
 }
 
-/// None = disabled/not armed, preserving the legacy portfolio arithmetic.
-/// `reclaim_pending` is exclusively a PLANNING allowance for modifiable orders
-/// of one basket; actual sends MUST always pass None and remeasure the broker.
+/// None = portfolio cap disabled and profit reserve disabled/not armed.
+/// Both capacities use ONE measured downside pool. `reclaim_pending` is only
+/// a planning allowance; actual sends pass None and remeasure the broker.
 pub fn available<B:Broker>(cfg:&Settings, anchor:BudgetAnchor, b:&B,
     reclaim_pending:Option<u32>)->Result<Option<AvailableBudget>,BudgetError> {
-    if cfg.profit_budget_arm_pct==0.0 {return Ok(None);}
-    if !positive(cfg.profit_budget_arm_pct)
+    if !cfg.max_portfolio_risk_pct.is_finite(){return Err(BudgetError::InvalidSettings);}
+    let portfolio_enabled=cfg.max_portfolio_risk_pct>0.0;
+    let reserve_enabled=cfg.profit_budget_arm_pct!=0.0;
+    if !reserve_enabled && !portfolio_enabled {return Ok(None);}
+    if reserve_enabled && (!positive(cfg.profit_budget_arm_pct)
         || !cfg.profit_budget_keep_pct.is_finite() || !(0.0..=100.0).contains(&cfg.profit_budget_keep_pct)
-        || !cfg.profit_budget_deploy_pct.is_finite() || !(0.0..=100.0).contains(&cfg.profit_budget_deploy_pct) {
+        || !cfg.profit_budget_deploy_pct.is_finite() || !(0.0..=100.0).contains(&cfg.profit_budget_deploy_pct)) {
         return Err(BudgetError::InvalidSettings);
     }
     let q=b.quote(); let equity=b.account().equity;
     if !equity.is_finite() {return Err(BudgetError::InvalidAccount);}
-    if anchor.day!=day_of(q.ts,cfg.session_offset()) || !positive(anchor.start)
-        || !positive(anchor.peak) {return Err(BudgetError::UnknownDayAnchor);}
-    let peak=anchor.peak.max(equity); let profit=(peak-anchor.start).max(0.0);
-    if profit<=0.0 || profit<anchor.start*cfg.profit_budget_arm_pct/100.0 {return Ok(None);}
-    if !positive(q.bid) || !positive(q.ask) || q.ask<q.bid {return Err(BudgetError::InvalidQuote);}
-    let floor=anchor.start+profit*cfg.profit_budget_keep_pct/100.0;
-    let mut capacity=(equity-floor).max(0.0)*cfg.profit_budget_deploy_pct/100.0;
-    if !cfg.max_portfolio_risk_pct.is_finite(){return Err(BudgetError::InvalidSettings);}
-    if cfg.max_portfolio_risk_pct>0.0 {
-        capacity=capacity.min(equity.max(0.0)*cfg.max_portfolio_risk_pct/100.0);
+    let mut floor=0.0;
+    let mut reserve_capacity=None;
+    if reserve_enabled {
+        if anchor.day!=day_of(q.ts,cfg.session_offset()) || !positive(anchor.start)
+            || !positive(anchor.peak) {return Err(BudgetError::UnknownDayAnchor);}
+        let peak=anchor.peak.max(equity); let profit=(peak-anchor.start).max(0.0);
+        if profit>0.0 && profit>=anchor.start*cfg.profit_budget_arm_pct/100.0 {
+            floor=anchor.start+profit*cfg.profit_budget_keep_pct/100.0;
+            reserve_capacity=Some((equity-floor).max(0.0)*cfg.profit_budget_deploy_pct/100.0);
+        }
     }
+    let portfolio_capacity=portfolio_enabled.then(|| equity.max(0.0)*cfg.max_portfolio_risk_pct/100.0);
+    if portfolio_capacity.is_some_and(|v|!v.is_finite()) || reserve_capacity.is_some_and(|v|!v.is_finite()) {
+        return Err(BudgetError::InvalidAccount);
+    }
+    let capacity=match (portfolio_capacity,reserve_capacity) {
+        (None,None)=>return Ok(None),
+        (Some(p),None)=>p,(None,Some(r))=>r,(Some(p),Some(r))=>p.min(r),
+    };
+    if !positive(q.bid) || !positive(q.ask) || q.ask<q.bid {return Err(BudgetError::InvalidQuote);}
     let mut used=0.0;
     for p in b.positions().iter().chain(b.ukryte_pozycje()) {
         used+=downside(p.side,q.exit(p.side),p.sl.or(p.vsl),p.volume)?;
@@ -250,4 +262,42 @@ pub(crate) mod tests {
         b.pendings[0].frozen=true;near(available(&c,a,&b,Some(7)).unwrap().unwrap().remaining,10.0);
         b.pendings.clear();near(limit_open_volume(&c,a,&b,Side::Buy,3990.0,Some(3980.0),1.0).unwrap(),0.05);
     }
+    #[test]
+    fn portfolio_only_uses_live_downside_without_a_day_anchor_and_before_reserve_arm() {
+        let mut c=cfg();let mut b=broker();c.profit_budget_arm_pct=0.0;c.max_portfolio_risk_pct=5.0;
+        b.hidden_positions.push(position(Side::Buy,3000.0,Some(3999.0),0.1));
+        let value=available(&c,BudgetAnchor::default(),&b,None).unwrap().unwrap();
+        near(value.capacity,35.0);near(value.downside,10.0);near(value.remaining,25.0);
+        near(limit_open_volume(&c,BudgetAnchor::default(),&b,Side::Buy,4000.2,Some(3990.0),1.0).unwrap(),0.02);
+        c.profit_budget_arm_pct=100.0;let a=anchor(&b,&c);
+        near(available(&c,a,&b,None).unwrap().unwrap().remaining,25.0);
+        assert_eq!(available(&c,BudgetAnchor::default(),&b,None),Err(BudgetError::UnknownDayAnchor),
+            "enabling reserve still requires its own trustworthy anchor");
+    }
+    #[test]
+    fn portfolio_only_rejects_missing_stop_and_invalid_quote_while_zero_is_passthrough() {
+        let mut c=cfg();let mut b=broker();c.profit_budget_arm_pct=0.0;c.max_portfolio_risk_pct=5.0;
+        b.positions.push(position(Side::Sell,4100.0,None,0.01));
+        assert_eq!(available(&c,BudgetAnchor::default(),&b,None),Err(BudgetError::MissingStop));
+        b.positions.clear();b.q.ask=f64::NAN;
+        assert_eq!(available(&c,BudgetAnchor::default(),&b,None),Err(BudgetError::InvalidQuote));
+        c.max_portfolio_risk_pct=0.0;
+        assert_eq!(limit_open_volume(&c,BudgetAnchor::default(),&b,Side::Buy,f64::NAN,None,3.14159),Ok(3.14159));
+        c.max_portfolio_risk_pct=f64::NAN;
+        assert_eq!(available(&c,BudgetAnchor::default(),&b,None),Err(BudgetError::InvalidSettings));
+    }
+    #[test]
+    fn portfolio_only_never_reclaims_pending_risk_before_actual_disappearance() {
+        let mut c=cfg();let mut b=broker();c.profit_budget_arm_pct=0.0;c.max_portfolio_risk_pct=5.0;
+        b.pendings.push(pending(7,Side::Buy,3990.0,Some(3980.0),0.03));
+        let a=BudgetAnchor::default();
+        near(available(&c,a,&b,Some(7)).unwrap().unwrap().remaining,35.0);
+        near(available(&c,a,&b,None).unwrap().unwrap().remaining,5.0);
+        assert_eq!(limit_open_volume(&c,a,&b,Side::Buy,3990.0,Some(3980.0),1.0),Err(BudgetError::Exhausted));
+        // A failed/unconfirmed cancellation leaves the actual broker snapshot unchanged.
+        assert_eq!(limit_open_volume(&c,a,&b,Side::Buy,3990.0,Some(3980.0),1.0),Err(BudgetError::Exhausted));
+        b.cancel_pending(1).unwrap();
+        near(limit_open_volume(&c,a,&b,Side::Buy,3990.0,Some(3980.0),1.0).unwrap(),0.03);
+    }
+
 }

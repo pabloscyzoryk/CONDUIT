@@ -17,6 +17,9 @@ mod entry_edit;
 #[path = "pending_validity.rs"]
 mod pending_validity;
 pub use pending_validity::PendingSourceRecord;
+#[path = "entry_sources.rs"]
+mod entry_sources;
+pub use entry_sources::EntrySourceRecord;
 pub use entry_edit::EntryEditOutcome;
 
 #[path = "strategy_continuation.rs"]
@@ -465,6 +468,9 @@ pub struct EntrySourceObservation {pub has_full_entry:bool,pub first_seen_as_edi
 pub struct Engine {
     pub cfg: Settings,
     pending_sources: std::collections::BTreeMap<u32, PendingSourceRecord>,
+    entry_sources: HashMap<(SourceKey,i64),EntrySourceRecord>,
+    entry_source_aliases: HashMap<(SourceKey,i64),i64>,
+    entry_source_revision: u64,
     pending_source_revision: u64,
 
     pub regime_hist: Vec<(Ts, bool)>,
@@ -484,6 +490,10 @@ pub struct Engine {
     next_basket_id: u32,
     created_baskets_count: u32,
     entry_source_observations: HashMap<(SourceKey,i64),EntrySourceObservation>,
+    // Diagnostic dedup only; a local precheck has not consumed a broker intent.
+    fast_addon_invalid_tp_note: HashMap<u32,u64>,
+    // Engine-to-Broker call boundary, not a claim of terminal acceptance.
+    order_submission_sequence: u64,
     loss_streak: u32,
     paused_until: Ts,
     day_stop: i64,
@@ -537,6 +547,9 @@ impl Engine {
         let jcfg = cfg.journal_config();
         Engine {
             pending_sources: Default::default(),
+            entry_sources: Default::default(),
+            entry_source_aliases: Default::default(),
+            entry_source_revision: pending_validity::next_source_revision(),
             pending_source_revision: pending_validity::next_source_revision(),
             journal: JournalBuf::new(jcfg, "eng"),
             cfg,
@@ -556,6 +569,8 @@ impl Engine {
             next_basket_id: 1,
             created_baskets_count: 0,
             entry_source_observations: HashMap::new(),
+            fast_addon_invalid_tp_note: HashMap::new(),
+            order_submission_sequence: 0,
             loss_streak: 0,
             paused_until: 0,
             day_stop: i64::MIN,
@@ -1155,6 +1170,7 @@ impl Engine {
     pub fn adopt_baskets(&mut self, baskets: Vec<Basket>) {
         for bk in baskets {
             self.remember_pending_source(&bk);
+            self.remember_adopted_entry_source(&bk);
             self.next_basket_id = self.next_basket_id.max(bk.id.saturating_add(1));
             self.msg_to_basket
                 .insert((bk.source.clone(), bk.msg_id), bk.id);
@@ -1589,11 +1605,11 @@ impl Engine {
             Err(reason)=>{
                 let code=format!("ProfitBudget::{reason:?}");
                 *self.odrzuty.entry(code.clone()).or_insert(0)+=1;
-                self.log(b.quote().ts,1,format!("PROFIT BUDGET: {reason:?}; new order withheld"));
+                self.log(b.quote().ts,1,format!("RISK BUDGET: {reason:?}; new order withheld"));
                 if self.journal.wants(EventLevel::Info) {
                     let snap=self.jsnap(b);
                     let mut ev=Ev::new(b.quote().ts,EventLevel::Warn,EventCategory::Risk,EventKind::OrderRejected)
-                        .text(format!("PROFIT BUDGET: {reason:?}; new order withheld"))
+                        .text(format!("RISK BUDGET: {reason:?}; new order withheld"))
                         .reason(RejectCode::RiskBudgetExhausted).market(snap).put("code",code)
                         .put_f("requested_volume",requested).put_f("entry",entry);
                     if let Some(id)=basket {ev=ev.basket(id);}
@@ -1623,6 +1639,7 @@ impl Engine {
         }
         r.volume = self.final_open_volume(b, r.volume)?;
         r.volume = self.profit_budget_volume(b,r.basket,r.side,b.quote().entry(r.side),r.sl,r.volume)?;
+        self.order_submission_sequence=self.order_submission_sequence.wrapping_add(1);
         b.open_market(r)
     }
 
@@ -1645,6 +1662,7 @@ impl Engine {
         }
         r.volume = self.final_open_volume(b, r.volume)?;
         r.volume = self.profit_budget_volume(b,r.basket,r.kind.side(),r.price,r.sl,r.volume)?;
+        self.order_submission_sequence=self.order_submission_sequence.wrapping_add(1);
         b.place_pending(r)
     }
 
@@ -1814,6 +1832,24 @@ impl Engine {
             );
         }
 
+        self.observe_source_reply(m, &signals);
+        let withdrawn=self.entry_source_withdrawn(m);
+        let late_new=m.edit_of.is_none() && self.entry_source_record(&m.source,m.msg_id)
+            .is_some_and(|r|r.basket_id.is_some() && r.last_entry_edit_ts.is_some());
+        if withdrawn || late_new {
+            let entries=signals.iter().filter(|s|matches!(s,Signal::Entry(_) | Signal::MarketOpen{..})).count();
+            for _ in 0..entries {
+                if withdrawn {
+                    self.jreject(b,m,"entry",RejectCode::EntryGateBlocked,
+                        "ENTRY SOURCE: publisher withdrawal prevents reactivation");
+                } else {
+                    self.jignore(b,m,"entry",None,RejectCode::DuplicateEditedAction,
+                        "ENTRY SOURCE: late NEW cannot replace an already received entry edit");
+                }
+            }
+            signals.retain(|s|!matches!(s,Signal::Entry(_) | Signal::MarketOpen{..}));
+        }
+
         if self.deferred_message(b, m, &signals) {
             return;
         }
@@ -1826,6 +1862,7 @@ impl Engine {
                         _ => unreachable!("position() wskazało Entry"),
                     };
                     let edit_outcome = self.apply_entry_edit(b, bid, &entry, m.ts);
+                    if edit_outcome.source_handled() {self.remember_entry_edit(m);}
                     if !self.cfg.edycja_wykonuje_reszte_akcji {
                         return;
                     }
@@ -1838,23 +1875,20 @@ impl Engine {
                         done.push("entry".into());
                     }
                 }
-            } else if self.cfg.edycja_sieroty_nie_otwiera {
-                let ile_wejsc = signals
-                    .iter()
-                    .filter(|s| matches!(s, Signal::Entry(_) | Signal::MarketOpen { .. }))
-                    .count();
-                for _ in 0..ile_wejsc {
-                    self.jreject(
-                        b,
-                        m,
-                        "entry",
-                        RejectCode::EditOrphan,
-                        format!("edycja nieznanej wiadomości {orig} nie otwiera koszyka"),
-                    );
+            } else {
+                let mut filtered=Vec::with_capacity(signals.len());
+                for signal in signals {
+                    let is_entry=matches!(&signal,Signal::Entry(_) | Signal::MarketOpen{..});
+                    let complete=matches!(&signal,Signal::Entry(e) if entry_sources::complete_recoverable_entry(e));
+                    if is_entry && (self.cfg.edycja_sieroty_nie_otwiera || !complete) {
+                        self.jreject(b,m,"entry",RejectCode::EditOrphan,
+                            format!("ENTRY EDIT: source {orig} has no basket; recovery requires the preset policy and a complete protected entry"));
+                    } else {
+                        if complete {self.log(m.ts,0,"ENTRY EDIT: first complete protected source evaluated at receive time");}
+                        filtered.push(signal);
+                    }
                 }
-                if ile_wejsc > 0 {
-                    signals.retain(|s| !matches!(s, Signal::Entry(_) | Signal::MarketOpen { .. }));
-                }
+                signals=filtered;
             }
             if self.cfg.dedup_edited_signals {
                 let z_wartoscia = self.cfg.dedup_klucz_z_wartoscia;
@@ -2197,6 +2231,13 @@ impl Engine {
                 }
             }
             Signal::Cancel => {
+                if let Some(reply)=m.reply_to {
+                    if self.entry_source_record(&m.source,reply).is_some_and(|r|r.basket_id.is_none()) {
+                        self.jignore(b,m,"cancel",None,RejectCode::NoTargetBasket,
+                            "ENTRY SOURCE: bound CANCEL saved before its source entry; no unrelated basket selected");
+                        return;
+                    }
+                }
                 let explicit_target = self.target_basket(m).filter(|id| self.explicit_pending_source(*id));
                 let known_reply = m.reply_to.is_some_and(|r| self.msg_to_basket.contains_key(&(m.source.clone(), r)));
                 if explicit_target.is_some() && !known_reply {
@@ -2564,6 +2605,7 @@ impl Engine {
                         }
                     }
                     self.remember_pending_source_alias(id, m.msg_id);
+                    self.remember_entry_alias(id, m.msg_id);
                 }
                 Some(id)
             }
@@ -2629,14 +2671,15 @@ impl Engine {
         // A market command is an entry too. Its source identity survives the
         // volatile action/content caches through the persisted basket map.
         let source_id = m.edit_of.unwrap_or(m.msg_id);
-        if self.msg_to_basket.get(&(m.source.clone(), source_id))
+        if self.entry_source_withdrawn(m) || self.msg_to_basket.get(&(m.source.clone(), source_id))
             .is_some_and(|id| self.pending_source_cancelled(*id)) {
             self.jreject(b, m, "market", RejectCode::EntryGateBlocked,
                 "publisher cancelled this source; changing it to MARKET cannot reactivate it");
             return;
         }
 
-        if (self.cfg.entry_idempotencja || m.edit_of.is_some())
+        if (self.cfg.entry_idempotencja || m.edit_of.is_some()
+            || self.entry_source_record(&m.source,source_id).is_some_and(|r|r.first_entry_was_edit))
             && self.msg_to_basket.contains_key(&(m.source.clone(), source_id))
         {
             self.jignore(b, m, &format!("mkt{side:?}"),
@@ -2683,6 +2726,7 @@ impl Engine {
         });
         self.baskets.push(bk);
         self.msg_to_basket.insert((m.source.clone(), m.msg_id), id);
+        self.remember_entry_source(m,id);
         self.obs.na_sygnale(m.ts, side);
 
         let lot = self.lot_size(self.podstawa_lota());
@@ -2866,7 +2910,7 @@ impl Engine {
 
     fn handle_entry<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage, e: EntrySignal) {
         let ts = m.ts;
-        if self.msg_to_basket.get(&(m.source.clone(), m.edit_of.unwrap_or(m.msg_id)))
+        if self.entry_source_withdrawn(m) || self.msg_to_basket.get(&(m.source.clone(), m.edit_of.unwrap_or(m.msg_id)))
             .is_some_and(|id| self.pending_source_cancelled(*id)) {
             self.jreject(b, m, "entry", RejectCode::EntryGateBlocked,
                 "publisher cancelled this explicit pending source; re-delivery cannot reactivate it");
@@ -2887,7 +2931,8 @@ impl Engine {
             tp1: e.tps.first().copied(),
         });
 
-        if self.cfg.entry_idempotencja && m.edit_of.is_none() {
+        if (self.cfg.entry_idempotencja || self.entry_source_record(&m.source,m.msg_id)
+            .is_some_and(|r|r.first_entry_was_edit)) && m.edit_of.is_none() {
             if let Some(&bid) = self.msg_to_basket.get(&(m.source.clone(), m.msg_id)) {
                 self.log(
                     ts,
@@ -3276,6 +3321,7 @@ impl Engine {
                     (ts - self.basket(id).map(|x| x.created_ts).unwrap_or(ts)) as f64 / 60_000.0;
                 self.apply_entry_edit(b, id, &e, ts);
                 self.msg_to_basket.insert((m.source.clone(), m.msg_id), id);
+                self.remember_entry_source(m,id);
                 self.basket_note(
                     id,
                     ts,
@@ -3389,6 +3435,7 @@ impl Engine {
         });
         self.baskets.push(bk);
         self.msg_to_basket.insert((m.source.clone(), m.msg_id), id);
+        self.remember_entry_source(m,id);
         self.obs.na_sygnale(ts, e.side);
 
         if self.journal.wants(EventLevel::Info) {
@@ -4337,7 +4384,7 @@ impl Engine {
                 )
             } else if let Some(reason)=profit_block {
                 (format!("ProfitBudget::{reason:?}"),RejectCode::RiskBudgetExhausted,
-                    format!("PROFIT BUDGET: {reason:?}; no legal grid fits the current reserve"))
+                    format!("RISK BUDGET: {reason:?}; no legal grid fits the current reserve"))
             } else {
                 (
                     "BudzetRyzyka".to_string(),
@@ -10349,21 +10396,21 @@ impl Engine {
 
             if let Some(tp) = tp_ost {
                 if !tp_is_valid(side, tp, q, b.stops_level()) {
-                    if let Some(bk) = self.basket_mut(id) {
-                        bk.fast_addons = bk.fast_addons.saturating_add(1).min(maks);
-                        bk.last_addon_ts = ts;
+                    // No request has reached the broker: the slot remains free.
+                    // Preserve the preset's attempt cooldown, as in the archived
+                    // precheck-free broker-rejection path, before trying again.
+                    if let Some(bk)=self.basket_mut(id) {bk.last_addon_ts=ts;}
+                    // Deduplicate the note, not the executable opportunity.
+                    if self.fast_addon_invalid_tp_note.insert(id,tp.to_bits()) != Some(tp.to_bits()) {
+                        self.basket_note(id,ts,format!(
+                            "FAST ADDON: TP {tp:.2} is beyond the market; no order sent and capacity remains available"));
                     }
-                    self.basket_note(
-                        id,
-                        ts,
-                        format!(
-                            "DOKŁADKA TEMPOWA pominięta i zużyta: TP {tp:.2} jest już za rynkiem"
-                        ),
-                    );
                     continue;
                 }
             }
+            self.fast_addon_invalid_tp_note.remove(&id);
             cien::z(cakt::A_DOLOZENIE, id as u64, czr::Z_FAST_ADDON, 0);
+            let submitted_before=self.order_submission_sequence;
             let res = self.open_market_order(
                 b,
                 OrderReq {
@@ -10406,11 +10453,15 @@ impl Engine {
                     );
                 }
                 Err(e) => {
-                    if let Some(bk) = self.basket_mut(id) {
-                        bk.fast_addons = bk.fast_addons.saturating_add(1).min(maks);
-                        bk.last_addon_ts = ts;
+                    // Only an Engine->Broker submission can leave an uncertain
+                    // acknowledgement. A local risk/volume gate sent nothing.
+                    if self.order_submission_sequence!=submitted_before {
+                        if let Some(bk) = self.basket_mut(id) {
+                            bk.fast_addons = bk.fast_addons.saturating_add(1).min(maks);
+                            bk.last_addon_ts = ts;
+                        }
+                        self.basket_note(id, ts, format!("DOKŁADKA TEMPOWA odrzucona: {e:?}"));
                     }
-                    self.basket_note(id, ts, format!("DOKŁADKA TEMPOWA odrzucona: {e:?}"));
                 }
             }
         }
@@ -12150,6 +12201,8 @@ mod testy_pakiet_a {
         next: Ticket,
         pub(super) stops: f64,
         cancel_failures: usize,
+        pub(super) market_failures: usize,
+        pub(super) maximum_volume: f64,
     }
 
     impl Atrapa {
@@ -12166,6 +12219,8 @@ mod testy_pakiet_a {
                 next: 1,
                 stops: 0.0,
                 cancel_failures: 0,
+                market_failures: 0,
+                maximum_volume: f64::NAN,
             }
         }
 
@@ -12191,6 +12246,7 @@ mod testy_pakiet_a {
         fn stops_level(&self) -> f64 {
             self.stops
         }
+        fn volume_max(&self)->f64 {self.maximum_volume}
         fn positions(&self) -> &[Position] {
             &self.positions
         }
@@ -12204,6 +12260,7 @@ mod testy_pakiet_a {
             &mut self.pendings
         }
         fn open_market(&mut self, r: OrderReq) -> BResult<Ticket> {
+            if self.market_failures>0 {self.market_failures-=1;return Err(BrokerError::Rejected);}
             let t = self.next;
             self.next += 1;
             self.positions.push(Position {
@@ -16437,6 +16494,22 @@ mod profit_budget_send_tests {
         }
     }
     #[test]
+    fn configured_portfolio_cap_remeasures_every_market_and_pending_send_before_profit_arm() {
+        for arm in [0.0,100.0] {
+            for level in [0,-2,-4,-6] {
+                let (mut e,mut b)=rig();e.cfg.profit_budget_arm_pct=arm;e.cfg.max_portfolio_risk_pct=5.0;
+                e.open_market_order(&mut b,market(level)).unwrap();
+                assert_eq!(b.positions[0].volume,0.03);
+                assert!(e.open_market_order(&mut b,market(level)).is_err());assert_eq!(b.sends,1);
+                let (mut e,mut b)=rig();e.cfg.profit_budget_arm_pct=arm;e.cfg.max_portfolio_risk_pct=5.0;
+                e.place_pending_order(&mut b,pending_req(level)).unwrap();
+                assert_eq!(b.pendings[0].volume,0.03);
+                assert!(e.place_pending_order(&mut b,pending_req(level)).is_err());assert_eq!(b.sends,1);
+            }
+        }
+    }
+
+    #[test]
     fn profit_budget_manual_risk_resume_keeps_the_daily_profit_anchor() {
         let (mut e,mut b)=rig();e.stats.day_peak_equity=800.0;e.stats.equity=700.0;
         e.halted=Some("synthetic guard".into());e.resume_trading(b.q.ts);
@@ -16473,4 +16546,83 @@ mod entry_observation_tests {
         e.on_message(&mut b,&msg(-900002,10,true,"SELL LIMIT GOLD @ 4021/4026\nSL 4031\nTP 3990"));
         assert_eq!(e.entry_source_observations().len(),3,"material revisions are not new source IDs");
     }
+}
+
+#[cfg(test)]
+mod fast_addon_precheck_tests {
+    use super::*;
+    use super::testy_pakiet_a::{Atrapa,wiad,WEJSCIE,TS0};
+    fn prepared()->(Engine,Atrapa,Quote) {
+        let mut e=Engine::new(Settings {fast_addon_move_usd:1.0,fast_addon_max:1,
+            fast_addon_window_s:60.0,fast_addon_cooldown_s:0.0,fast_addon_min_stage:0,
+            fast_addon_lot_mult:3.0,lot_mode_percent:false,lot_fixed:0.05,lot_max:0.1,
+            max_open_positions:0,max_open_baskets:0,risk_per_basket_pct:0.0,
+            max_portfolio_risk_pct:0.0,order_volume_contract_v2:false,..Settings::default()},400.0);
+        let mut b=Atrapa::nowa();b.maximum_volume=100.0;
+        e.on_message(&mut b,&wiad(1,100,None,WEJSCIE));
+        assert!(b.positions().iter().any(|p|p.basket==Some(e.baskets[0].id)));
+        e.vol_hist=vec![(TS0+10_000,4000.0),(TS0+20_000,4001.0),(TS0+25_000,4002.0)];
+        b.ustaw_cene(TS0+30_000,4005.0,4005.2);let q=b.quote();
+        (e,b,q)
+    }
+    #[test]
+    fn invalid_tp_without_submission_does_not_consume_slot_and_later_revision_sends_once() {
+        let (mut e,mut b,q)=prepared();let id=e.baskets[0].id;
+        e.basket_mut(id).unwrap().tps=vec![4004.0];
+        let before=b.positions().len();
+        e.fast_addon_sweep(&mut b,&q);e.fast_addon_sweep(&mut b,&q);
+        assert_eq!(b.positions().len(),before);assert_eq!(e.baskets[0].fast_addons,0);
+        assert_eq!(e.baskets[0].last_addon_ts,q.ts,"invalid attempt preserves configured cooldown");
+        assert_eq!(e.baskets[0].events.iter().filter(|x|x.text.contains("capacity remains available")).count(),1);
+        e.basket_mut(id).unwrap().tps=vec![4030.0];
+        e.fast_addon_sweep(&mut b,&q);e.fast_addon_sweep(&mut b,&q);
+        let addons:Vec<_>=b.positions().iter().filter(|p|p.level==-4).collect();
+        assert_eq!(addons.len(),1);assert_eq!(addons[0].tp,Some(4030.0));
+        assert_eq!(addons[0].volume,0.1,"multiplier cannot exceed lot_max even with volume V2 off");
+        assert_eq!(e.baskets[0].fast_addons,1);assert_eq!(e.baskets[0].last_addon_ts,q.ts);
+    }
+    #[test]
+    fn submitted_broker_failure_keeps_the_existing_no_duplicate_retry_guard() {
+        let (mut e,mut b,q)=prepared();let before=b.positions().len();b.market_failures=1;
+        e.fast_addon_sweep(&mut b,&q);
+        assert_eq!(b.market_failures,0,"the broker must have received the request");
+        assert_eq!(e.baskets[0].fast_addons,1);assert_eq!(e.baskets[0].last_addon_ts,q.ts);
+        e.fast_addon_sweep(&mut b,&q);
+        assert_eq!(b.positions().len(),before,"ambiguous broker error cannot cause a second request");
+    }
+    #[test]
+    fn local_portfolio_rejection_preserves_addon_slot_until_existing_risk_is_released() {
+        let (mut e,mut b,q)=prepared();e.cfg.max_portfolio_risk_pct=10.0;
+        let before=b.positions().len();let submissions=e.order_submission_sequence;
+        e.fast_addon_sweep(&mut b,&q);
+        assert_eq!(e.baskets[0].fast_addons,0);assert_eq!(e.baskets[0].last_addon_ts,0);
+        assert_eq!(e.order_submission_sequence,submissions,"local budget gate called the broker");
+        assert_eq!(b.positions().len(),before);
+        for p in b.positions_mut(){p.sl=Some(4004.0);}
+        for p in b.pendings().to_vec(){b.cancel_pending(p.ticket).unwrap();}
+        let available=crate::profit_budget::available(&e.cfg,(&e.stats).into(),&b,None).unwrap().unwrap();
+        assert!(available.remaining>15.2,"fixture must free at least one new minimum lot: {available:?}");
+        e.fast_addon_sweep(&mut b,&q);e.fast_addon_sweep(&mut b,&q);
+        assert_eq!(e.order_submission_sequence,submissions.wrapping_add(1));
+        assert_eq!(b.positions().len(),before+1);assert_eq!(e.baskets[0].fast_addons,1);
+        assert_eq!(b.positions().last().unwrap().volume,0.02,"remaining live downside determines the safe lot step");
+    }
+
+    #[test]
+    fn local_invalid_tp_keeps_the_configured_attempt_cooldown_without_consuming_capacity() {
+        let (mut e,mut b,q)=prepared();e.cfg.fast_addon_cooldown_s=60.0;
+        let id=e.baskets[0].id;e.basket_mut(id).unwrap().tps=vec![4004.0];
+        let before=e.order_submission_sequence;e.fast_addon_sweep(&mut b,&q);
+        assert_eq!(e.baskets[0].fast_addons,0);assert_eq!(e.baskets[0].last_addon_ts,q.ts);
+        e.basket_mut(id).unwrap().tps=vec![4030.0];
+        b.ustaw_cene(q.ts+10_000,4005.0,4005.2);let next=b.quote();
+        e.fast_addon_sweep(&mut b,&next);
+        assert_eq!(e.order_submission_sequence,before,"valid TP cannot bypass configured cooldown");
+        e.vol_hist=vec![(q.ts+40_000,4000.0),(q.ts+50_000,4001.0),(q.ts+55_000,4002.0)];
+        b.ustaw_cene(q.ts+60_000,4005.0,4005.2);let later=b.quote();
+        e.fast_addon_sweep(&mut b,&later);
+        assert_eq!(e.order_submission_sequence,before.wrapping_add(1));
+        assert_eq!(e.baskets[0].fast_addons,1);assert_eq!(e.baskets[0].last_addon_ts,later.ts);
+    }
+
 }

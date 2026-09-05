@@ -20,6 +20,7 @@ MOST_ONLY = {'parser_geometryczny', 'parser_min_pewnosc', 'parser_luz_interpunkc
 BROKER_SPEC_FIELDS = {'stops_level', 'commission_per_lot', 'slippage_pts', 'slippage_pending_pts', 'swap_enabled', 'swap_long_points', 'swap_short_points', 'swap_point_value', 'swap_rollover_weekday', 'swap_rollover_mult', 'swap_pomijaj_weekend', 'swap_rollover_z_serwera', 'swap_rollover3days_mt5'}
 
 MAP += [('explicit_pending_until_cancel', 'In_ExplicitPendingUntilCancel', bool)]
+MAP += [('entry_idempotencja', 'In_EntryIdempotency', bool)]
 MAP += [('profit_budget_arm_pct', 'In_ProfitBudgetArmPct', float),
         ('profit_budget_keep_pct', 'In_ProfitBudgetKeepPct', float),
         ('profit_budget_deploy_pct', 'In_ProfitBudgetDeployPct', float)]

@@ -52,6 +52,8 @@ pub struct SimBroker {
     /// None preserves legacy cash-at-rollover arithmetic. Some(0..=8) keeps
     /// accrued swap outside Balance until close and quantizes swap in currency.
     native_swap_cash_digits: Option<u32>,
+    trade_sessions: Option<crate::trade_sessions::TradeSessionProfile>,
+    pub market_closed_rejections: u64,
     /// Jawna precyzja brokera tylko w symulacji; None zachowuje historyczne f64.
     pub price_digits: Option<u32>,
     pub q: Quote,
@@ -215,6 +217,8 @@ impl SimBroker {
             synthetic_continuation_session: None,
             last_physical_observation: None,
             native_swap_cash_digits: None,
+            trade_sessions: None,
+            market_closed_rejections: 0,
             price_digits: None,
             q: Quote {
                 ts: 0,
@@ -290,6 +294,24 @@ impl SimBroker {
     }
 
     pub fn native_swap_cash_digits(&self) -> Option<u32> { self.native_swap_cash_digits }
+
+    pub fn set_trade_sessions(&mut self, profile: Option<crate::trade_sessions::TradeSessionProfile>) -> Result<(), String> {
+        if let Some(p) = &profile { p.validate()?; }
+        if !self.positions.is_empty() || !self.pendings.is_empty() {
+            return Err("execution sessions may only be configured before exposure".into());
+        }
+        self.trade_sessions = profile;
+        Ok(())
+    }
+    fn trade_is_open(&self) -> bool {
+        self.trade_sessions.as_ref().is_none_or(|p| p.is_open(self.q.ts))
+    }
+    fn require_trade_open(&mut self) -> BResult<()> {
+        if self.trade_is_open() { Ok(()) } else {
+            self.market_closed_rejections += 1;
+            Err(BrokerError::MarketClosed)
+        }
+    }
 
     /// Bind before the first observation/exposure; never migrate an active
     /// account's cash convention. Repeating the already-bound value is a no-op.
@@ -642,6 +664,9 @@ impl SimBroker {
             .then(std::collections::HashSet::<Ticket>::new);
 
         // ---------- 1. wypełnienia zleceń oczekujących ----------
+        // Quotes remain observable during a closed trade session; native
+        // pending fills and server SL/TP wait for the first tradable tick.
+        if self.trade_is_open() {
         let mut i = 0;
         while i < self.pendings.len() {
             let o = self.pendings[i].clone();
@@ -756,7 +781,11 @@ impl SimBroker {
                 Side::Sell => exit <= t,
             });
             if tp_hit {
-                let px = p.tp.unwrap();
+                let target = p.tp.unwrap();
+                let improve = self.trade_sessions.as_ref().is_some_and(|p| p.take_profit_price_improvement);
+                let px = if improve { match p.side {
+                    Side::Buy => target.max(exit), Side::Sell => target.min(exit),
+                }} else { target };
                 self.settle(j, px, CloseReason::Tp);
                 closed += 1;
                 continue;
@@ -765,6 +794,7 @@ impl SimBroker {
         }
 
         // ---------- 3. kontrola konta ----------
+        }
         let eq = self.equity();
         if eq < self.min_equity {
             self.min_equity = eq;
@@ -1016,6 +1046,7 @@ impl Broker for SimBroker {
             }
         }
 
+        self.require_trade_open()?;
         let need = r.volume * XAU_CONTRACT * px / self.leverage as f64;
         if self.equity() - self.used_margin() < need {
             return Err(BrokerError::NotEnoughMargin);
@@ -1111,6 +1142,7 @@ impl Broker for SimBroker {
             }
         }
 
+        self.require_trade_open()?;
         let t = self.ticket();
         self.pendings.push(PendingOrder {
             ticket: t,
@@ -1131,6 +1163,7 @@ impl Broker for SimBroker {
     }
 
     fn modify_position(&mut self, t: Ticket, sl: Option<Px>, tp: Option<Px>) -> BResult<()> {
+        let trade_open = self.trade_is_open();
         let sl = sl.map(|p| self.norm_price(p));
         let tp = tp.map(|p| self.norm_price(p));
         let q = self.q;
@@ -1149,6 +1182,10 @@ impl Broker for SimBroker {
             if !tp_is_valid(p.side, v, &q, stops) {
                 return Err(BrokerError::InvalidStops);
             }
+        }
+        if !trade_open {
+            self.market_closed_rejections += 1;
+            return Err(BrokerError::MarketClosed);
         }
         p.sl = sl;
         p.tp = tp;
@@ -1198,6 +1235,7 @@ impl Broker for SimBroker {
                 return Err(BrokerError::InvalidStops);
             }
         }
+        self.require_trade_open()?;
         let o = self
             .pendings
             .iter_mut()
@@ -1216,6 +1254,7 @@ impl Broker for SimBroker {
             .position(|p| p.ticket == t)
             .ok_or(BrokerError::NoSuchTicket)?;
         let side = self.positions[idx].side;
+        self.require_trade_open()?;
         let px = self.q.exit(side);
         let before = self.balance;
         self.settle(idx, px, reason);
@@ -1231,6 +1270,7 @@ impl Broker for SimBroker {
         if !volume.is_finite() || volume <= 0.0 {
             return Err(BrokerError::InvalidVolume);
         }
+        self.require_trade_open()?;
         let current = self.positions[idx].volume;
         let Some(vol) = partial_close_volume(current, volume, self.volume_min, self.volume_step)
         else {
@@ -1265,6 +1305,7 @@ impl Broker for SimBroker {
     }
 
     fn cancel_pending(&mut self, t: Ticket) -> BResult<()> {
+        self.require_trade_open()?;
         let i = self
             .pendings
             .iter()

@@ -546,6 +546,8 @@ pub struct Settings {
     #[serde(default = "default_dedup_klucz_z_wartoscia")]
     pub dedup_klucz_z_wartoscia: bool,
     #[serde(default = "default_edycja_sieroty_nie_otwiera")]
+    /// true: legacy block. false: recover only a complete protected Entry at
+    /// receive time; orphan MarketOpen stays blocked. Source identity is durable.
     pub edycja_sieroty_nie_otwiera: bool,
     #[serde(default = "default_entry_idempotencja")]
     pub entry_idempotencja: bool,
@@ -762,6 +764,8 @@ pub struct Settings {
     pub max_dd_usd: f64,
     pub dd_guard_scope: DdGuardScope,
 
+    /// >0: account-wide live downside cap on every new order, including addons
+    /// and manual panel entries; <=0 disables it. Day profit arm is independent.
     pub max_portfolio_risk_pct: f64,
     pub dd_soft_pct: f64,
     pub dd_soft_mult: f64,

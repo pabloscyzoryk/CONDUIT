@@ -174,6 +174,7 @@ input bool    In_DedupKeyValue     = false;    // dedup_klucz_z_wartoscia (kontr
 input bool    In_DedupPelnyStatus  = false;    // dedup_pelny_status (false=legacy: zapisz ignored)
 input bool    In_EditRest          = true;     // edycja_wykonuje_reszte_akcji (true=legacy XT)
 input bool    In_EditOrphanNoEntry = false;    // edycja_sieroty_nie_otwiera
+input bool    In_EntryIdempotency = true;      // entry_idempotencja
 input bool    In_DedupMgmtReplay   = false;    // dedup_management_po_restarcie (re-delivery NEW w sesji)
 input double  In_RfLevelSanityUsd  = 0.0;      // rf_level_sanity_max_usd
 input double  In_SppMaxAgeH        = 12.0;     // spp_max_age_h
@@ -508,6 +509,7 @@ int      g_mi   = 0;       // indeks pierwszej NIEPRZETWORZONEJ wiadomości
 int      g_most_schema = 1;
 bool     g_most_dedup_value = false;
 bool     g_most_contract_seen = false;
+string   g_most_channel = "";
 
 //====================================================================
 //  KOSZYK
@@ -663,8 +665,15 @@ string   g_done_key[4000];
 int      g_ndone = 0;
 
 // mapa msg_id -> basket
-long     g_map_msg[MAXB];
-int      g_map_bid[MAXB];
+long     g_map_msg[];
+int      g_map_bid[];
+struct NativeEntrySource { long original; int basket; bool cancelled; bool had_edit; };
+NativeEntrySource g_sources[];
+long g_source_alias_msg[];
+int g_source_alias_record[];
+int g_nsources=0, g_nsource_alias=0;
+long g_source_message=0, g_source_original=0;
+bool g_source_edit=false;
 int      g_nmap = 0;
 
 // TRWALY rejestr pozycja -> koszyk (wyniki per koszyk po zamknięciu)
@@ -759,6 +768,17 @@ long     g_cnt_rf_rule = 0, g_cnt_rf_maxhold = 0, g_cnt_piramida = 0;
 long     g_cnt_rearm = 0, g_cnt_fastaddon = 0, g_cnt_revexit = 0, g_cnt_oae_timeout = 0;
 long     g_cnt_zoneexit = 0, g_cnt_enforce = 0, g_cnt_ttl = 0, g_cnt_grace = 0;
 int      g_kod[40]; long g_kod_n[40]; int g_nkod = 0;
+long     g_open_request_count = 0, g_open_request_cap_exceeded = 0;
+double   g_open_request_max_volume = 0.0, g_open_accepted_max_volume = 0.0;
+
+// Measure the final volume transmitted to the broker, including rejected
+// requests. Closed partial volumes cannot establish that an order cap held.
+void AuditOpenRequest(const double volume)
+  {
+   g_open_request_count++;
+   g_open_request_max_volume = MathMax(g_open_request_max_volume, volume);
+   if(In_LotMax > 0.0 && volume > In_LotMax + 1e-9) g_open_request_cap_exceeded++;
+  }
 ENUM_ORDER_TYPE_FILLING g_fill_deal    = ORDER_FILLING_FOK;
 ENUM_ORDER_TYPE_FILLING g_fill_pending = ORDER_FILLING_RETURN;
 long     g_zamk_blad = 0, g_mod_blad = 0;
@@ -1011,7 +1031,13 @@ bool WczytajMost()
       g_msg[g_nmsg].hints    = p[5];
       // pole 6: nazwa kanału (nowy format, bez dwukropka) albo pierwsza akcja
       int start = 6;
-      if(k > 6 && StringFind(p[6], ":") < 0) start = 7;
+      if(k > 6 && StringFind(p[6], ":") < 0)
+        {
+         start = 7;
+         if(g_most_channel=="")g_most_channel=p[6];
+         else if(g_most_channel!=p[6])
+           {Print("BLAD KONTRAKTU MOSTU: XT requires one source channel per experiment.");FileClose(h);return false;}
+        }
       int n = 0;
       for(int i = start; i < k; i++)
         {
@@ -1052,15 +1078,77 @@ void MapPut(long msg, int bid)
   {
    for(int i = 0; i < g_nmap; i++)
       if(g_map_msg[i] == msg) { g_map_bid[i] = bid; return; }
-   if(g_nmap < MAXB) { g_map_msg[g_nmap] = msg; g_map_bid[g_nmap] = bid; g_nmap++; }
-   else { for(int i = 0; i < g_nmap - 1; i++) { g_map_msg[i] = g_map_msg[i+1]; g_map_bid[i] = g_map_bid[i+1]; }
-          g_map_msg[g_nmap-1] = msg; g_map_bid[g_nmap-1] = bid; }
+   if(g_nmap>=ArraySize(g_map_msg)) {ArrayResize(g_map_msg,g_nmap+512);ArrayResize(g_map_bid,g_nmap+512);}
+   g_map_msg[g_nmap] = msg; g_map_bid[g_nmap] = bid; g_nmap++;
   }
 int MapGet(long msg)
   {
    for(int i = g_nmap - 1; i >= 0; i--)
       if(g_map_msg[i] == msg) return g_map_bid[i];
    return -1;
+  }
+
+int NativeSourceFind(long message)
+  {
+   for(int i=g_nsource_alias-1;i>=0;i--)
+      if(g_source_alias_msg[i]==message)return g_source_alias_record[i];
+   return -1;
+  }
+void NativeSourceAlias(long message,int record)
+  {
+   if(message==0 || record<0)return;
+   for(int i=g_nsource_alias-1;i>=0;i--)
+      if(g_source_alias_msg[i]==message){g_source_alias_record[i]=record;return;}
+   if(g_nsource_alias>=ArraySize(g_source_alias_msg))
+     {ArrayResize(g_source_alias_msg,g_nsource_alias+512);ArrayResize(g_source_alias_record,g_nsource_alias+512);}
+   g_source_alias_msg[g_nsource_alias]=message;g_source_alias_record[g_nsource_alias++]=record;
+   if(g_sources[record].basket>=0)MapPut(message,g_sources[record].basket);
+  }
+int NativeSourceEnsure(long original)
+  {
+   int i=NativeSourceFind(original);if(i>=0)return i;
+   if(g_nsources>=ArraySize(g_sources))ArrayResize(g_sources,g_nsources+512);
+   i=g_nsources++;g_sources[i].original=original;g_sources[i].basket=MapGet(original);
+   g_sources[i].cancelled=false;g_sources[i].had_edit=false;
+   NativeSourceAlias(original,i);return i;
+  }
+void NativeSourceAccept(long message,int basket)
+  {
+   long original=message==g_source_message ? g_source_original : message;
+   int i=NativeSourceEnsure(original);g_sources[i].basket=basket;
+   if(message==g_source_message && g_source_edit)g_sources[i].had_edit=true;
+   MapPut(original,basket);MapPut(message,basket);NativeSourceAlias(message,i);
+   for(int a=0;a<g_nsource_alias;a++)if(g_source_alias_record[a]==i)MapPut(g_source_alias_msg[a],basket);
+  }
+bool NativeSourceEntryBlocked(long original,bool is_new)
+  {
+   int i=NativeSourceFind(original);
+   return i>=0 && (g_sources[i].cancelled || (is_new && g_sources[i].had_edit));
+  }
+void NativeObserveSourceReply(int mi)
+  {
+   if(g_msg[mi].reply_to==0)return;
+   bool cancel=false,entry=false;
+   for(int a=0;a<g_msg[mi].n;a++)
+     {
+      string action=g_msg[mi].akcje[a];
+      if(StringFind(action,"ENTRY:")==0 || StringFind(action,"ENTRY2:")==0 || StringFind(action,"MKT:")==0)entry=true;
+      if(StringFind(action,"CANCEL:")==0)cancel=true;
+     }
+   if(entry || (!cancel && (In_EditOrphanNoEntry || !In_ReplyGraph)))return;
+   int i=NativeSourceEnsure(g_msg[mi].reply_to);
+   if(cancel)g_sources[i].cancelled=true;
+   NativeSourceAlias(g_msg[mi].msg_id,i);
+  }
+bool NativeCompleteRecovery(int side,bool is_limit,bool is_stop,double lo,double hi,
+                            double sl,bool has_sl,bool tp_open,double offset,bool has_offset,double &tps[],int ntp)
+  {
+   if(!MathIsValidNumber(lo) || !MathIsValidNumber(hi) || lo<=0 || hi<=0 || lo>hi || (is_limit&&is_stop))return false;
+   if(!has_sl || !MathIsValidNumber(sl) || sl<=0 || (side==0 ? sl>=lo : sl<=hi))return false;
+   if(ntp==0 && !tp_open)return false;
+   double edge=side==0 ? lo : hi;
+   for(int i=0;i<ntp;i++)if(!MathIsValidNumber(tps[i]) || tps[i]<=0 || (tps[i]-edge)*SideSign(side)<=0)return false;
+   return !has_offset || (MathIsValidNumber(offset) && offset>=0);
   }
 int BIdx(int id)
   {
@@ -1572,7 +1660,11 @@ int LiczZyweKoszyki()
 double PozZysk(ulong t)
   {
    if(!PositionSelectByTicket(t)) return 0.0;
-   return PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   // Position::profit_usd in core is gross mark-to-market, without swap or
+   // broker cash rounding. Receipt/account accounting remains net elsewhere.
+   int side=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 0 : 1;
+   return (ExitPx(side)-PositionGetDouble(POSITION_PRICE_OPEN))*SideSign(side)
+          *XAU_CONTRACT*PositionGetDouble(POSITION_VOLUME);
   }
 double PozPunkty(ulong t)
   {
@@ -1616,7 +1708,7 @@ void BonusEkspozycji(int &bonus_poz, int &bonus_kosz)
      {
       ulong t = PositionGetTicket(i);
       if(t == 0 || PositionGetInteger(POSITION_MAGIC) != In_Magic) continue;
-      plyw += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      plyw += PozZysk(t);
      }
    if(plyw >= prog) { bonus_poz = In_ExpoBonusPositions; bonus_kosz = In_ExpoBonusBaskets; }
   }
@@ -1957,26 +2049,42 @@ bool PbPositive(double x) { return MathIsValidNumber(x) && x > 0.0; }
 int ProfitBudgetAvailable(double &remaining, string &error)
   {
    remaining = 0.0; error = "";
-   if(In_ProfitBudgetArmPct == 0.0) return 0; // byte-for-byte legacy send path
-   if(!PbPositive(In_ProfitBudgetArmPct) || !MathIsValidNumber(In_ProfitBudgetKeepPct)
+   if(!MathIsValidNumber(In_MaxPortfolioRisk)) {error="InvalidSettings";return -1;}
+   bool portfolio_enabled=In_MaxPortfolioRisk>0.0;
+   bool reserve_enabled=In_ProfitBudgetArmPct!=0.0;
+   if(!portfolio_enabled && !reserve_enabled)return 0;
+   if(reserve_enabled && (!PbPositive(In_ProfitBudgetArmPct) || !MathIsValidNumber(In_ProfitBudgetKeepPct)
       || In_ProfitBudgetKeepPct < 0.0 || In_ProfitBudgetKeepPct > 100.0
       || !MathIsValidNumber(In_ProfitBudgetDeployPct)
-      || In_ProfitBudgetDeployPct < 0.0 || In_ProfitBudgetDeployPct > 100.0)
+      || In_ProfitBudgetDeployPct < 0.0 || In_ProfitBudgetDeployPct > 100.0))
      { error = "InvalidSettings"; return -1; }
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    if(!MathIsValidNumber(equity)) { error = "InvalidAccount"; return -1; }
-   if(g_day != DayOf(g_now) || !PbPositive(g_day_start_eq) || !PbPositive(g_day_peak_eq))
-     { error = "UnknownDayAnchor"; return -1; }
-   double peak = MathMax(g_day_peak_eq, equity);
-   double profit = MathMax(peak - g_day_start_eq, 0.0);
-   if(profit <= 0.0 || profit < g_day_start_eq * In_ProfitBudgetArmPct / 100.0) return 0;
+   double floor=0.0,reserve_capacity=0.0;
+   bool has_reserve=false;
+   if(reserve_enabled)
+     {
+      if(g_day != DayOf(g_now) || !PbPositive(g_day_start_eq) || !PbPositive(g_day_peak_eq))
+        { error = "UnknownDayAnchor"; return -1; }
+      double peak=MathMax(g_day_peak_eq,equity),profit=MathMax(peak-g_day_start_eq,0.0);
+      if(profit>0.0 && profit>=g_day_start_eq*In_ProfitBudgetArmPct/100.0)
+        {
+         floor=g_day_start_eq+profit*In_ProfitBudgetKeepPct/100.0;
+         reserve_capacity=MathMax(equity-floor,0.0)*In_ProfitBudgetDeployPct/100.0;
+         has_reserve=true;
+        }
+     }
+   double portfolio_capacity=portfolio_enabled ? MathMax(equity,0.0)*In_MaxPortfolioRisk/100.0 : 0.0;
+   // Validate each computed capacity before min: a finite second guard must
+   // never hide an overflow in the first guard.
+   if((portfolio_enabled && !MathIsValidNumber(portfolio_capacity))
+      || (has_reserve && !MathIsValidNumber(reserve_capacity)))
+     {error="InvalidAccount";return -1;}
+   if(!portfolio_enabled && !has_reserve)return 0;
+   double capacity=portfolio_enabled ? portfolio_capacity : reserve_capacity;
+   if(portfolio_enabled && has_reserve)capacity=MathMin(capacity,reserve_capacity);
    if(!PbPositive(g_bid) || !PbPositive(g_ask) || g_ask < g_bid)
      { error = "InvalidQuote"; return -1; }
-   if(!MathIsValidNumber(In_MaxPortfolioRisk)) { error = "InvalidSettings"; return -1; }
-   double floor = g_day_start_eq + profit * In_ProfitBudgetKeepPct / 100.0;
-   double capacity = MathMax(equity - floor, 0.0) * In_ProfitBudgetDeployPct / 100.0;
-   if(In_MaxPortfolioRisk > 0.0)
-      capacity = MathMin(capacity, MathMax(equity, 0.0) * In_MaxPortfolioRisk / 100.0);
    double used = 0.0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -2364,6 +2472,7 @@ bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
    if(hbsl) r.sl = NormPx(bsl);
    if(has_tp) r.tp = NormPx(tp);
    if(!ProfitBudgetLimit(bi, g_b[bi].side, r.price, r.sl, vol, r.volume)) return false;
+   AuditOpenRequest(r.volume);
    if(!OrderSend(r, res) ||
       (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED))
      {
@@ -2378,6 +2487,7 @@ bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
       return false;
      }
    ticket = res.order;
+   g_open_accepted_max_volume = MathMax(g_open_accepted_max_volume, r.volume);
    // wirtualny SL dla wejść rynkowych
    if(has_sl && (In_VirtualSl || In_VirtualSlAll))
      { int ip = PsEnsure(ticket); if(ip >= 0) g_ps_vsl[ip] = sl; }
@@ -2404,6 +2514,7 @@ bool WyslijLimit(int bi, double price, double vol, double sl, bool has_sl,
    if(hbsl) r.sl = NormPx(bsl);
    if(has_tp) r.tp = NormPx(tp);
    if(!ProfitBudgetLimit(bi, g_b[bi].side, r.price, r.sl, vol, r.volume)) return false;
+   AuditOpenRequest(r.volume);
    if(!OrderSend(r, res) ||
       (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED))
      {
@@ -2418,6 +2529,7 @@ bool WyslijLimit(int bi, double price, double vol, double sl, bool has_sl,
       return false;
      }
    ticket = res.order;
+   g_open_accepted_max_volume = MathMax(g_open_accepted_max_volume, r.volume);
    if(In_ConfirmedExitRetry) ZapiszWlasciciela(ticket, bi);
    return true;
   }
@@ -3563,6 +3675,7 @@ void HandleEntry(long msg_id, int side, bool is_limit, bool is_stop, double lo, 
          ApplyEntryEdit(bi2, side, is_limit, is_stop, lo, hi, sl, has_sl,
                         warstwy_offset, has_warstwy_offset, tps, ntp);
          MapPut(msg_id, g_b[bi2].id);
+         NativeSourceAccept(msg_id,g_b[bi2].id);
          g_merges++;
          return;   // sygnał scalony — budżetu dnia nie zużywa
         }
@@ -3629,6 +3742,7 @@ void HandleEntry(long msg_id, int side, bool is_limit, bool is_stop, double lo, 
    for(int i = 0; i < MAXTP; i++) { g_b[bi].tp_touch_ts[i] = 0; g_b[bi].tphit_sig_ts[i] = 0; }
    g_b[bi].npend = 0; g_b[bi].npos = 0; g_b[bi].nlv = 0;
    MapPut(msg_id, g_b[bi].id);
+   NativeSourceAccept(msg_id,g_b[bi].id);
    g_cnt_basket++;
    g_opened_today++;
 
@@ -3704,6 +3818,7 @@ void HandleMkt(long msg_id, int side)
    for(int i = 0; i < MAXTP; i++) { g_b[bi].tp_touch_ts[i] = 0; g_b[bi].tphit_sig_ts[i] = 0; }
    g_b[bi].npend = 0; g_b[bi].npos = 0; g_b[bi].nlv = 0;
    MapPut(msg_id, g_b[bi].id);
+   NativeSourceAccept(msg_id,g_b[bi].id);
    g_cnt_basket++;
    double lot = LotSize();
    // engine.rs:2157: pozycja NOW dostaje zawsze OSTATNI cel drabinki
@@ -4731,6 +4846,8 @@ void ApplyEntryEdit(int bi, int side, bool is_limit, bool is_stop,
 void WykonajWiadomosc(int mi)
   {
    long key_msg = (g_msg[mi].edit_of != 0) ? g_msg[mi].edit_of : g_msg[mi].msg_id;
+   g_source_original=key_msg;g_source_message=g_msg[mi].msg_id;g_source_edit=g_msg[mi].edit_of!=0;
+   NativeObserveSourceReply(mi);
 
    for(int a = 0; a < g_msg[mi].n; a++)
      {
@@ -4744,6 +4861,9 @@ void WykonajWiadomosc(int mi)
       if(nf < 1) continue;
       string akey = f[0];
       bool entry_kind = (kind == "ENTRY" || kind == "ENTRY2");
+      if(kind=="INFO")continue;
+      if((entry_kind || kind=="MKT") && NativeSourceEntryBlocked(key_msg,g_msg[mi].edit_of==0))
+        {ZapamietajPoStatusie(key_msg,akey,false);continue;}
       if((entry_kind || kind == "MKT") && (SourceWithdrawn(BIdx(MapGet(key_msg))) || EntryReviewBlocked(BIdx(MapGet(key_msg)))))
         { ZapamietajPoStatusie(key_msg, akey, false); continue; }
 
@@ -4788,7 +4908,17 @@ void WykonajWiadomosc(int mi)
          else
             for(int i = 7; i < nf && ntp < MAXTP; i++)
               { tps[ntp] = StringToDouble(f[i]); ntp++; }
+         bool complete_recovery=NativeCompleteRecovery(side,is_limit,is_stop,lo,hi,sl,has_sl,tp_open,
+                                                       warstwy_offset,has_warstwy_offset,tps,ntp);
          PrzygotujCele(side, tps, ntp);
+
+         if(g_msg[mi].edit_of==0 && In_EntryIdempotency && MapGet(key_msg)>=0)
+           {
+            int known=BIdx(MapGet(key_msg));
+            if(known>=0)ApplyEntryEdit(known,side,is_limit,is_stop,lo,hi,sl,has_sl,
+                                     warstwy_offset,has_warstwy_offset,tps,ntp);
+            ZapamietajPoStatusie(key_msg,akey,known>=0);continue;
+           }
 
          if(g_msg[mi].edit_of != 0)
            {
@@ -4801,16 +4931,19 @@ void WykonajWiadomosc(int mi)
                   if(!ExitRiskAllowed(bx) || SourceWithdrawn(bx) || EntryReviewBlocked(bx)) { ZapamietajPoStatusie(key_msg, akey, false); continue; }
                   ApplyEntryEdit(bx, side, is_limit, is_stop, lo, hi, sl, has_sl,
                                  warstwy_offset, has_warstwy_offset, tps, ntp);
+                  if(!EntryReviewBlocked(bx)) {int source=NativeSourceEnsure(key_msg);g_sources[source].had_edit=true;}
                   DiagKoszyk(bx, "EDYCJA");
                   ZapamietajPoStatusie(key_msg, akey, true);
                   if(!In_EditRest) return;
                   continue;
                  }
+               // A consumed source whose basket was pruned cannot be recreated.
+               continue;
               }
             // Edycja-sierota nie może spaść do HandleEntry i utworzyć
             // świeżego koszyka na starych cenach. Usuwamy wyłącznie akcję
             // ENTRY; dalsze akcje zarządzające z wiadomości idą normalnie.
-            if(In_EditOrphanNoEntry)
+            if(In_EditOrphanNoEntry || !complete_recovery)
               {
                ZapamietajPoStatusie(key_msg, akey, false);
                if(In_Diag && g_handle_diag != INVALID_HANDLE)
@@ -4834,6 +4967,9 @@ void WykonajWiadomosc(int mi)
         }
       if(kind == "MKT")
         {
+         if((g_msg[mi].edit_of!=0 && MapGet(key_msg)<0)
+            || ((In_EntryIdempotency || g_msg[mi].edit_of!=0) && MapGet(key_msg)>=0))
+           {ZapamietajPoStatusie(key_msg,akey,false);continue;}
          if(nf > 1) HandleMkt(g_msg[mi].msg_id, (f[1] == "BUY") ? 0 : 1);
          int mid = MapGet(g_msg[mi].msg_id);
          ZapamietajPoStatusie(key_msg, akey,
@@ -4856,6 +4992,12 @@ void WykonajWiadomosc(int mi)
 
       // Wyłączona akcja nie może tworzyć aliasu reply_graph ani trafić do
       // pamięci „wykonanych" w trybie pełnego statusu.
+      if(kind=="CANCEL" && g_msg[mi].reply_to!=0)
+        {
+         int source=NativeSourceFind(g_msg[mi].reply_to);
+         if(source>=0 && g_sources[source].basket<0)
+           {ZapamietajPoStatusie(key_msg,akey,true);continue;}
+        }
       if(kind == "CANCEL" && In_ExplicitPendingUntilCancel)
         {
          int target = TargetBasket(mi, false);
@@ -5278,9 +5420,16 @@ void FastAddonSweep()
       // TA ŚCIEŻKA NIE WOŁA entry_gate — tylko licznik pozycji + ml (engine.rs:8030)
       if(limit > 0 && LiczPozycje() >= limit) break;
       if(!MarginesPozwala(In_MlMinFastAddon)) break;
-      // engine.rs:8038: surowy (lot × mult).max(lot_min) — BEZ sufitu lot_max
-      double vol = RoundLot(MathMax(LotSize() * MathMax(In_FastAddonLotMult, 0.0), In_LotMin));
+      // Match the Rust caller: cap AFTER the addon multiplier, before broker rounding.
+      double vol = MathMax(LotSize() * MathMax(In_FastAddonLotMult, 0.0), In_LotMin);
+      if(In_LotMax > 0.0) vol = MathMin(vol, In_LotMax);
+      vol = RoundLot(vol);
       double tp_ost = (g_b[bi].ntp > 0) ? g_b[bi].tps[g_b[bi].ntp - 1] : 0.0;
+      // A locally invalid target keeps the slot but starts the configured
+      // cooldown, matching the source-backed retry policy in Rust.
+      if(g_b[bi].ntp>0 && !TpIsValid(g_b[bi].side,tp_ost))
+        {g_b[bi].last_addon_ts=g_now;continue;}
+      long requests_before=g_open_request_count;
       ulong tk = 0;
       if(WyslijRynek(bi, -4, vol, g_b[bi].sl, g_b[bi].has_sl, tp_ost, g_b[bi].ntp > 0,
                      "B" + IntegerToString(g_b[bi].id), tk))
@@ -5293,8 +5442,13 @@ void FastAddonSweep()
          g_cnt_fastaddon++;
          g_cnt_order++;
         }
-      else
-         g_b[bi].last_addon_ts = g_now;   // odmowa nie może zapętlić reguły
+      else if(g_open_request_count>requests_before)
+        {
+         // A transmitted refusal/unknown result consumes the attempt to
+         // prevent duplicate risk. Local guards above do not consume it.
+         g_b[bi].fast_addons=MathMin(g_b[bi].fast_addons+1,In_FastAddonMax);
+         g_b[bi].last_addon_ts = g_now;
+        }
      }
   }
 
@@ -5533,7 +5687,7 @@ void RedukujEkspozycje()
             ulong t = PositionGetTicket(i);
             if(t == 0 || PositionGetInteger(POSITION_MAGIC) != In_Magic) continue;
             if(ExitTicketPending(t)) continue;
-            double p = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+            double p = PozZysk(t);
             if(p < naj_p || (p == naj_p && t < naj_t)) { naj_p = p; naj_t = t; }
            }
          if(naj_t == 0) break;
@@ -5620,7 +5774,7 @@ void RedukujEkspozycje()
          if(t == 0 || PositionGetInteger(POSITION_MAGIC) != In_Magic) continue;
          if(ExitTicketPending(t)) continue;
          pz_t[npz] = t;
-         pz_p[npz] = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+         pz_p[npz] = PozZysk(t);
          pz_m[npz] = PositionGetDouble(POSITION_VOLUME) * XAU_CONTRACT
                      * PositionGetDouble(POSITION_PRICE_OPEN) / lev;
          npz++;
@@ -5676,7 +5830,7 @@ void RiskfreePass()
          ulong t = g_b[bi].pos[i];
          if(!PositionSelectByTicket(t)) continue;
          zywe[n] = t; n++;
-         otwarte += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+         otwarte += PozZysk(t);
          double psl = PositionGetDouble(POSITION_SL);
          if(psl != 0.0)
             ryzyko += MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - psl)
@@ -6707,6 +6861,48 @@ void KnownSpecialLevelScenarioTick()
    ExitTestFinish(true,"KNOWN_SPECIAL_LEGS_AND_UNKNOWN_OWNERSHIP");
   }
 
+void SourceFixtureMessage(long message,long edit,long reply,string action)
+  {
+   ArrayResize(g_msg,1);g_msg[0].ts=g_now;g_msg[0].msg_id=message;
+   g_msg[0].edit_of=edit;g_msg[0].reply_to=reply;g_msg[0].hints="";
+   g_msg[0].n=1;g_msg[0].akcje[0]=action;WykonajWiadomosc(0);
+  }
+void SourceRecoveryScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0,"source fixture needs fresh account"))return;
+   double hi=MathFloor(g_bid)-10.0,lo=hi-1.0,sl=lo-10.0,tp=hi+5.0;
+   string entry=StringFormat("ENTRY2:entry,BUY,1,0,%.5f,%.5f,%.5f,0,nan,0,0,0,1,%.5f",lo,hi,sl,tp);
+   SourceFixtureMessage(10,100,0,entry);
+   if(In_EditOrphanNoEntry)
+     {ExitTestFinish(g_nb==0 && OrdersTotal()==0,"LEGACY_ORPHAN_POLICY_RETAINS_REJECTION");return;}
+   if(!ExitTestRequire(g_nb==1 && MapGet(100)==g_b[0].id && MapGet(10)==g_b[0].id
+                      && g_b[0].created_ts==g_now && OrdersTotal()>0,"complete edit did not create protected receive-time pending"))return;
+   int orders=OrdersTotal(),id=g_b[0].id;
+   SourceFixtureMessage(10,100,0,entry);
+   SourceFixtureMessage(100,0,0,entry);
+   if(!ExitTestRequire(g_nb==1 && g_b[0].id==id && OrdersTotal()==orders,"duplicate edit/late NEW created risk"))return;
+   SourceFixtureMessage(20,0,200,"INFO:source_reply_link");
+   SourceFixtureMessage(21,0,20,"CANCEL:cancel");
+   SourceFixtureMessage(200,200,0,entry);
+   if(!ExitTestRequire(g_nb==1 && OrdersTotal()==orders && NativeSourceEntryBlocked(200,false),"unknown reply CANCEL guessed another basket or missed source"))return;
+   SourceFixtureMessage(300,300,0,"MKT:market,BUY");
+   string missing=StringFormat("ENTRY2:entry,BUY,1,0,%.5f,%.5f,nan,0,nan,0,0,0,1,%.5f",lo,hi,tp);
+   SourceFixtureMessage(400,400,0,missing);
+   if(!ExitTestRequire(g_nb==1,"incomplete orphan created basket"))return;
+   g_halted="source_fixture_risk_gate";SourceFixtureMessage(500,500,0,entry);g_halted="";
+   if(!ExitTestRequire(MapGet(500)<0,"risk rejection consumed source"))return;
+   SourceFixtureMessage(500,500,0,entry);
+   if(!ExitTestRequire(g_nb==2 && MapGet(500)>=0,"risk-rejected revision could not be retried"))return;
+   for(int i=0;i<MAXB+20;i++)MapPut(10000+i,10000+i);
+   if(!ExitTestRequire(MapGet(100)==id,"source map evicted old identity"))return;
+   for(int bi=0;bi<g_nb;bi++)CancelPendings(bi);
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0,"source fixture cleanup unconfirmed"))return;
+   g_nb=0;SourceFixtureMessage(10,100,0,entry);
+   if(!ExitTestRequire(g_nb==0 && OrdersTotal()==0,"pruned consumed source reopened"))return;
+   ExitTestFinish(true,"PROTECTED_RECEIVE_EDIT_LATE_NEW_CANCEL_ALIAS_RISK_RETRY_PRUNE");
+  }
+
 void ProfitBudgetScenarioTick()
   {
    if(HourOf(g_now) < 2) return;
@@ -6745,11 +6941,39 @@ void ProfitBudgetScenarioTick()
    ExitTestFinish(true,"PROFIT_BUDGET_NATIVE_FLOOR_AND_ACKNOWLEDGED_EXPOSURE");
   }
 
+void PortfolioBudgetScenarioTick()
+  {
+   if(HourOf(g_now)<2)return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0,"portfolio budget needs fresh account"))return;
+   if(!ExitTestRequire(In_MaxPortfolioRisk==10.0 && In_ProfitBudgetArmPct==0.0,"portfolio-only test inputs"))return;
+   g_nb=1;ExitTestBasket(0);
+   // The standalone portfolio cap cannot depend on a profit-reserve anchor.
+   g_day=-1;g_day_start_eq=0.0;g_day_peak_eq=0.0;
+   double eq=AccountInfoDouble(ACCOUNT_EQUITY),remaining=0.0;string error;
+   if(!ExitTestRequire(ProfitBudgetAvailable(remaining,error)==1 && MathAbs(remaining-eq*0.1)<1e-8,"portfolio-only capacity requires no anchor"))return;
+   double entry=MathFloor(g_bid)-10.0,stop=entry-10.0;
+   ulong pending=0,refused=0;
+   if(!ExitTestRequire(WyslijLimit(0,entry,0.10,stop,true,0.0,false,"B1",ORDER_TYPE_BUY_LIMIT,pending),"portfolio pending refused"))return;
+   g_b[0].pend[0]=pending;g_b[0].pend_lv[0]=0;g_b[0].npend=1;
+   if(!ExitTestRequire(OrderSelect(pending) && MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT)-0.03)<1e-9,"portfolio cap did not floor actual pending to .03"))return;
+   long requests=g_open_request_count;
+   if(!ExitTestRequire(!WyslijLimit(0,entry,0.01,stop,true,0.0,false,"B1",ORDER_TYPE_BUY_LIMIT,refused)
+                      && OrdersTotal()==1 && g_open_request_count==requests,"portfolio budget sent excess risk"))return;
+   if(!ExitTestRequire(ExitCancelOwned(0,pending),"portfolio cancellation unconfirmed"))return;
+   if(!ExitTestRequire(ProfitBudgetAvailable(remaining,error)==1 && MathAbs(remaining-eq*0.1)<1e-8,"cancel ACK did not release portfolio risk"))return;
+   if(!ExitTestRequire(!WyslijRynek(0,0,0.01,0.0,false,0.0,false,"B1",refused)
+                      && g_open_request_count==requests,"portfolio-only market without SL reached broker"))return;
+   PrintFormat("CEXIT_TEST_EVENT|portfolio_budget|capacity=%.8f|pending_volume=0.03|sequential_refused=1|missing_market_stop_refused=1",remaining);
+   ExitTestFinish(true,"PORTFOLIO_CAP_BEFORE_PROFIT_ARM_AND_ACKNOWLEDGED_EXPOSURE");
+  }
+
 void ExitFaultScenarioTick()
   {
    if(!MQLInfoInteger(MQL_TESTER) || In_TestExitScenario == 0 || g_test_exit_finished) return;
    if(In_TestExitScenario == 9) { KnownSpecialLevelScenarioTick(); return; }
    if(In_TestExitScenario == 10) { ProfitBudgetScenarioTick(); return; }
+   if(In_TestExitScenario == 13) { PortfolioBudgetScenarioTick(); return; }
+   if(In_TestExitScenario == 11 || In_TestExitScenario == 12) { SourceRecoveryScenarioTick(); return; }
    if(In_TestExitScenario == 6) { PartialReceiptScenarioTick(); return; }
    if(In_TestExitScenario == 7 || In_TestExitScenario == 8) { EditReviewScenarioTick(); return; }
    if(g_test_exit_stage == 0)
@@ -6848,7 +7072,7 @@ int OnInit()
      }
    if(!TestSppTargetPlanReset()) return INIT_FAILED;
    if(!TestBeRetargetContract()) return INIT_FAILED;
-   if(In_TestExitScenario < 0 || In_TestExitScenario > 10) return INIT_PARAMETERS_INCORRECT;
+   if(In_TestExitScenario < 0 || In_TestExitScenario > 13) return INIT_PARAMETERS_INCORRECT;
    if(In_TestExitScenario > 0
       && (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       return INIT_PARAMETERS_INCORRECT;
@@ -6899,6 +7123,30 @@ int OnInit()
                AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING,
                (int)AccountInfoInteger(ACCOUNT_CURRENCY_DIGITS),
                (int)AccountInfoInteger(ACCOUNT_LIMIT_ORDERS));
+   // Official MQL5 contract: seconds from midnight of the broker's weekday.
+   // Preserve raw seconds (an end may be 86400); do not convert to UTC or
+   // modulo 24 hours. Quote availability does not imply trade availability.
+   for(int session_day = 0; session_day < 7; session_day++)
+     {
+      int trade_sessions = 0, quote_sessions = 0;
+      datetime session_from = 0, session_to = 0;
+      while(SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)session_day,
+                                  (uint)trade_sessions, session_from, session_to))
+        {
+         PrintFormat("BROKER_SESSION kind=trade day_sun0=%d index=%d from_seconds=%I64d to_seconds=%I64d clock=broker",
+                     session_day, trade_sessions, (long)session_from, (long)session_to);
+         trade_sessions++;
+        }
+      while(SymbolInfoSessionQuote(_Symbol, (ENUM_DAY_OF_WEEK)session_day,
+                                  (uint)quote_sessions, session_from, session_to))
+        {
+         PrintFormat("BROKER_SESSION kind=quote day_sun0=%d index=%d from_seconds=%I64d to_seconds=%I64d clock=broker",
+                     session_day, quote_sessions, (long)session_from, (long)session_to);
+         quote_sessions++;
+        }
+      PrintFormat("BROKER_SESSION_SUMMARY day_sun0=%d trade_count=%d quote_count=%d clock=broker",
+                  session_day, trade_sessions, quote_sessions);
+     }
    if(StringLen(In_DzienOd) > 0) g_dzien_od = (long)StringToTime(In_DzienOd) * 1000;
    if(StringLen(In_DzienDo) > 0) g_dzien_do = (long)StringToTime(In_DzienDo) * 1000;
    if(g_dzien_od > 0)
@@ -6909,6 +7157,7 @@ int OnInit()
          ? FileOpen("confirmed_exit_test_diag.csv", FILE_WRITE | FILE_CSV)
          : FileOpen(In_DiagFile, FILE_WRITE | FILE_CSV | FILE_COMMON | FILE_SHARE_READ);
    g_nb = 0; g_mi = 0; g_nph = 0; g_ndone = 0; g_nmap = 0;
+   g_nsources=0;g_nsource_alias=0;g_source_message=0;g_source_original=0;g_source_edit=false;
    g_slhit_dnia = 0; g_slhit_pauza_do = LONG_MIN; g_rej_slhit = 0;
    g_rezim_miekki = false; g_wyciszen = 0;
    g_start_balance = TesterStatistics(STAT_INITIAL_DEPOSIT);
@@ -7129,6 +7378,9 @@ void ZrzucStanBrokera()
 
 void OnDeinit(const int reason)
   {
+   PrintFormat("OPEN_VOLUME_AUDIT requests=%I64d max_transmitted=%.8f max_accepted_request=%.8f cap=%.8f cap_exceeded=%I64d",
+               g_open_request_count, g_open_request_max_volume, g_open_accepted_max_volume,
+               In_LotMax, g_open_request_cap_exceeded);
    // Ostatnia migawka planu po wszystkich edycjach/relotach. x_diff porównuje
    // ją z finalnym `koszyki.json`, zamiast mieszać początkowy plan EA z
    // końcowym stanem Rust.

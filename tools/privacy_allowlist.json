@@ -106,5 +106,11 @@
     "category": "literal_credential",
     "line_sha256": "cad0367f1f1820619228c0dca01a10a497ae3fdb96a2fa920ad60085cf5f7cbf",
     "reason": "Synthetic camelCase API hash sentinel in Rust test-only provenance redaction fixture; not a private configuration value."
+  },
+  {
+    "path": "tools/test_package_release.py",
+    "category": "literal_credential",
+    "line_sha256": "e995ec5548876dcea33b7c2f4e9fbca78a9e3d67ac9c60b3b90ec5882be2bdba",
+    "reason": "Synthetic negative fixture for refusing nonempty secret examples; temporary repository only."
   }
 ]

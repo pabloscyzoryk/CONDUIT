@@ -23,6 +23,7 @@ pub struct KonfOkien {
     /// Same explicit account-money/swap settlement model as RunConfig.
     /// None is the immutable legacy path; Some(0..=8) enables native settlement.
     pub sim_native_swap_cash_digits: Option<u32>,
+    pub sim_trade_sessions: Option<crate::trade_sessions::TradeSessionProfile>,
     pub settings: Settings,
     /// długość okna w DNIACH HANDLOWYCH (dniach, w których są ticki).
     /// 1 = dokładnie dzisiejszy `--daily-reset`.
@@ -53,6 +54,7 @@ impl Default for KonfOkien {
             sim_limit_price_improvement: false,
             sim_new_pending_sl_next_tick: false,
             sim_native_swap_cash_digits: None,
+            sim_trade_sessions: None,
             settings: Settings::default(),
             n_dni: 1,
             zzn: false,
@@ -530,6 +532,11 @@ pub fn uruchom(ticks: &TickData, messages: &[ReplayMessage], cfg: &KonfOkien) ->
                 b.limit_price_improvement = cfg.sim_limit_price_improvement;
                 b.defer_new_pending_sl = cfg.sim_new_pending_sl_next_tick;
                 b.price_digits = ticks.price_digits();
+                if let Err(reason) = b.set_trade_sessions(cfg.sim_trade_sessions.clone()) {
+                    let mut result = pusty(cfg, 0, 0);
+                    result.sim_execution_reconciliation_required = Some(reason);
+                    return result;
+                }
                 if let Some(digits) = cfg.sim_native_swap_cash_digits {
                     if let Err(reason) = b.set_native_swap_cash_digits(Some(digits)) {
                         let mut result = pusty(cfg, 0, 0);

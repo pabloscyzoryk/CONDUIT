@@ -451,3 +451,22 @@ fn profit_budget_panel_rejects_oversize_without_sending_or_silently_resizing() {
     s.glowny_mut().engine.cfg.profit_budget_arm_pct=0.0;
     assert!(manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,None,1.0).is_ok());
 }
+
+#[test]
+fn configured_portfolio_cap_also_constrains_explicit_manual_volume_before_profit_arm() {
+    let mut c=cfg();c.restore_strategy_continuation=false;c.profit_budget_arm_pct=0.0;
+    let (mut s,mut b)=rig(c);
+    for p in b.positions().to_vec(){b.close_position(p.ticket,CloseReason::Manual).unwrap();}
+    tick(&mut s,&mut b,T+1000,4004.0);
+    s.glowny_mut().engine.cfg.max_portfolio_risk_pct=5.0;
+    s.glowny_mut().engine.stats.day=i64::MIN; // portfolio does not depend on a day anchor
+    let before=(b.positions().len(),b.pendings().len(),b.account().equity);
+    let error=manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,Some(3990.0),1.0).unwrap_err();
+    assert!(error.contains("RISK BUDGET"));assert!(error.contains("maximum allowed volume:"));
+    assert!(error.contains("requested volume is unchanged"));
+    assert!(manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,Some(3990.0),0.01).is_ok());
+    assert!(manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,None,0.01).is_err());
+    assert_eq!((b.positions().len(),b.pendings().len(),b.account().equity),before);
+    s.glowny_mut().engine.cfg.max_portfolio_risk_pct=0.0;
+    assert!(manual_profit_budget_allowed(&mut s,&b,Side::Buy,4000.0,None,1.0).is_ok());
+}

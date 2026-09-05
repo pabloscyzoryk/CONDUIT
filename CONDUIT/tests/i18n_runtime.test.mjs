@@ -118,6 +118,22 @@ test('existing dynamic notifications also follow the current display language', 
   assert.equal(tSilnik('Brak połączenia z MT5'), 'No connection to MT5');
   i18n.setLanguage('pl');
   assert.equal(tSilnik('No connection to MT5'), 'Brak połączenia z MT5');
+  assert.equal(tSilnik('FAST ADDON: TP 3994.00 is beyond the market; no order sent and capacity remains available'),
+    'DOKŁADKA TEMPOWA: TP 3994.00 jest już za rynkiem; zlecenie nie zostało wysłane, slot pozostaje dostępny');
+  assert.equal(tSilnik('ENTRY EDIT: first complete protected source evaluated at receive time'),
+    'EDYCJA WEJŚCIA: pierwszy pełny chroniony sygnał oceniony w chwili odbioru');
+  assert.equal(tSilnik('ENTRY EDIT: source 7301 has no basket; recovery requires the preset policy and a complete protected entry'),
+    'EDYCJA WEJŚCIA: źródło 7301 nie ma koszyka; przyjęcie wymaga zgody presetu i pełnego chronionego wejścia');
+  assert.equal(tSilnik('ENTRY SOURCE: publisher withdrawal prevents reactivation'),
+    'ŹRÓDŁO WEJŚCIA: anulowanie przez nadawcę blokuje ponowną aktywację');
+  assert.equal(tSilnik('ENTRY SOURCE: late NEW cannot replace an already received entry edit'),
+    'ŹRÓDŁO WEJŚCIA: spóźniony NEW nie może zastąpić wcześniej odebranej edycji wejścia');
+  assert.equal(tSilnik('ENTRY SOURCE: bound CANCEL saved before its source entry; no unrelated basket selected'),
+    'ŹRÓDŁO WEJŚCIA: powiązany CANCEL zapisany przed jego sygnałem wejścia; nie wybrano obcego koszyka');
+  assert.equal(tSilnik('RISK BUDGET: MissingStop; new order withheld'),
+    'BUDŻET RYZYKA: MissingStop; nowe zlecenie wstrzymane');
+  assert.equal(tSilnik('RISK BUDGET: manual order rejected; maximum allowed volume: 0.07000000; requested volume is unchanged'),
+    'BUDŻET RYZYKA: zlecenie ręczne odrzucone; maksymalny dozwolony wolumen: 0.07000000; żądany wolumen pozostaje bez zmian');
   assert.ok(!presentEngineText('RISK FREE @ 2400 · closed 2 positions (5 $, entry VWAP 2400) · runners: 1, SL 2400', 'pl').includes('{'));
 });
 

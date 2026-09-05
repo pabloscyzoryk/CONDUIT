@@ -1489,7 +1489,7 @@ export const SETTINGS_SCHEMA: GroupDef[] = [
       {
         key: "edycja_sieroty_nie_otwiera",
         label: "edycja-sierota nie otwiera koszyka",
-        hint: "Edycja wiadomości, której bot nie zna (np. po restarcie), z wejściem w treści NIE zakłada nowego koszyka na starych cenach. Komunikaty zarządzające z tej wiadomości idą dalej normalnie.",
+        hint: "ON blokuje nowe wejście z nieznanej edycji. OFF pozwala przyjąć jej pierwszy pełny sygnał z ochronnym SL w chwili odbioru, bez cofania czasu; samo BUY/SELL NOW nadal nie otwiera koszyka. Pamięć źródła chroni przed powtórką i ponownym wejściem po CANCEL, także po restarcie. Zarządzanie istniejącym koszykiem pozostaje aktywne.",
         type: "bool",
       },
       {
@@ -1867,7 +1867,7 @@ export const SETTINGS_SCHEMA: GroupDef[] = [
       {
         key: "max_portfolio_risk_pct",
         label: "SUFIT OTWARTEGO RYZYKA — CAŁY RACHUNEK",
-        hint: "Ogranicza łączne otwarte ryzyko pozycji i aktywnych zleceń oczekujących. Przekroczenie zmniejsza nowy koszyk; 0 wyłącza limit.",
+        hint: "Limit w % bieżącego equity obejmuje ryzyko pozycji od obecnej ceny do SL oraz pendingów od wejścia do SL. Działa przy każdym nowym zleceniu, także przed uzbrojeniem rezerwy zysku. Zmniejsza automatyczny wolumen; zbyt duże ręczne zlecenie odrzuca. 0 wyłącza ten limit.",
         type: "num",
         min: 0,
         step: 5,
@@ -3913,7 +3913,7 @@ export const SETTINGS_SCHEMA: GroupDef[] = [
     category: "management",
     zakres: "preset",
     fields: [
-      { key: "profit_budget_arm_pct", label: "Budżet nowych wejść: próg zysku dnia", type: "num", min: 0, step: 0.5, unit: "%", hint: "Uzbrojenie od szczytu zysku dnia względem kapitału startowego. 0 wyłącza budżet. Ogranicza nowe wejścia; nie zamyka istniejących pozycji." },
+      { key: "profit_budget_arm_pct", label: "Budżet nowych wejść: próg zysku dnia", type: "num", min: 0, step: 0.5, unit: "%", hint: "Uzbrojenie od szczytu zysku dnia względem kapitału startowego. 0 wyłącza tylko rezerwę zysku; osobny sufit ryzyka portfela nadal działa. Ogranicza nowe wejścia; nie zamyka istniejących pozycji." },
       { key: "profit_budget_keep_pct", label: "Zachowaj część szczytowego zysku", type: "num", min: 0, max: 100, step: 5, unit: "%", when: (s) => s.profit_budget_arm_pct > 0, hint: "Podstawa budżetu = kapitał startowy + ta część szczytowego zysku. Nie jest gwarancją poziomu equity podczas luk." },
       { key: "profit_budget_deploy_pct", label: "Wykorzystaj dostępną przestrzeń", type: "num", min: 0, max: 100, step: 5, unit: "%", when: (s) => s.profit_budget_arm_pct > 0, hint: "Część przestrzeni equity nad podstawą, pomniejszona o ryzyko otwartych pozycji i pendingów do SL. Nowy lot jest zaokrąglany do kroku brokera; gdy minimum się nie mieści, wejście jest odrzucone." },
       { key: "day_gate_do_salda", label: "Bramka dnia: górna granica equity", type: "num", hint: "Equity z początku dnia musi być mniejsze od tej wartości. 0 usuwa górne ograniczenie.", step: 0.1 },

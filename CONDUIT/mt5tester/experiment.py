@@ -37,6 +37,10 @@ def main():
     parser.add_argument("--live-telegram-ingress", action="store_true")
     parser.add_argument("--native-swap-cash-digits", type=int, choices=range(9))
     parser.add_argument("--new-pending-sl-next-tick", action="store_true")
+    parser.add_argument("--trade-sessions", type=Path,
+                        help="Observed broker-clock execution profile; never a strategy preset axis.")
+    parser.add_argument("--native-source", type=Path,
+                        help="Optional immutable MQ5 source snapshot; defaults to the canonical expert.")
     parser.add_argument("--native-detail-from-ms", type=int, default=0)
     parser.add_argument("--native-detail-to-ms", type=int, default=0)
     parser.add_argument("--timeout", type=int, default=10800,
@@ -64,7 +68,7 @@ def main():
     common.mkdir(parents=True)
     bridge_name = "CONDUIT_TEST/" + run_id + "/bridge.csv"
     diag_name = "CONDUIT_TEST/" + run_id + "/diagnostics.csv"
-    source = Path(__file__).resolve().parents[1] / "mql5/CONDUIT_XT.mq5"
+    source = args.native_source or Path(__file__).resolve().parents[1] / "mql5/CONDUIT_XT.mq5"
     source_bytes = source.read_bytes()
     parameters, report = contract.build(defaults, settings, source_bytes.decode("utf-8-sig"), bridge_name)
     report["fingerprints"] = {"defaults": contract.fingerprint(args.defaults),
@@ -82,6 +86,8 @@ def main():
                "--kanal", args.channel, "--schema", "v2", "--out", str(bridge)]
     if args.live_telegram_ingress:
         command.append("--live-telegram-ingress")
+    if args.trade_sessions:
+        command.extend(["--sim-trade-sessions", str(args.trade_sessions.resolve(strict=True))])
     invoke(command, output, "bridge", args.timeout)
     (common / "bridge.csv").write_bytes(bridge.read_bytes())
     native = output / "native"
@@ -100,6 +106,8 @@ def main():
         rust_command.extend(["--sim-native-swap-cash-digits", str(args.native_swap_cash_digits)])
     if args.new_pending_sl_next_tick:
         rust_command.append("--sim-new-pending-sl-next-tick")
+    if args.trade_sessions:
+        rust_command.extend(["--sim-trade-sessions", str(args.trade_sessions.resolve(strict=True))])
     with portable.sandbox_lock(sandbox):
         compiled = portable.compile_expert(sandbox, "CONDUIT_XT", native, source_bytes)
         (native / "compile_manifest.json").write_text(json.dumps(compiled, indent=2), encoding="utf-8")
@@ -116,6 +124,11 @@ def main():
         raise ValueError("A paired experiment must produce exactly one Rust metrics record.")
     result["final_account"] = compare.compare_final_account(ledger, next(iter(metrics.values())), result["native_net"])
     result["ledger_and_equity_match"] = result["execution_fields_match"] and result["final_account"]["account_fields_match"]
+    if args.trade_sessions:
+        result["trade_session_contract"] = compare.compare_trade_sessions(
+            json.loads(args.trade_sessions.read_text(encoding="utf-8")),
+            (native / "tester_diagnostics.txt").read_text(encoding="utf-8"))
+        result["ledger_and_equity_match"] &= result["trade_session_contract"]["matches"]
     (output / "comparison.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     experiment = {"schema": "conduit.mt5.experiment.v1", "from": args.start, "to_exclusive": args.end,
                   "symbol": args.symbol, "deposit": args.deposit, "leverage": args.leverage,
@@ -128,6 +141,9 @@ def main():
                   "defaults": portable.fingerprint(args.defaults), "native_expert": compiled,
                   "ticks": portable.fingerprint(args.ticks), "messages": portable.fingerprint(args.messages),
                   "comparison": {k: v for k, v in result.items() if k not in {"mismatches", "limits"}}}
+    if args.trade_sessions:
+        experiment["trade_sessions"] = {**portable.fingerprint(args.trade_sessions),
+                                         "profile": json.loads(args.trade_sessions.read_text(encoding="utf-8"))}
     (output / "experiment.json").write_text(json.dumps(experiment, indent=2), encoding="utf-8")
     print(json.dumps(experiment["comparison"]), flush=True)
 

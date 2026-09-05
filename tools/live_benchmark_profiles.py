@@ -9,10 +9,10 @@ be used as evidence of historical profit or for preset ranking.
 Six profiles are available:
 
 * optimistic -- small delivery jitter and rare harmless redelivery;
-* realistic -- the latency/duplicate/edit races observed in live chronicles;
+* realistic -- sample-calibrated latency plus synthetic duplicate/edit cases;
 * pessimistic -- stronger reordering, typo/correction and broken-parent races;
 * ultra -- adversarial bursts plus deliberately ambiguous/bad feed events.
-* edit_recovery -- same-instant first EDIT, duplicate revisions and later NEW;
+* edit_recovery -- first observed version is EDIT, then duplicate/redelivery;
 * reconnect -- unchanged source content redelivered after listener-memory loss.
 
 No artificial delay, typo, reordering or mutation is ever applied to a message
@@ -229,9 +229,11 @@ def build_profile(base_messages: list[dict[str, Any]], profile: Profile) -> tupl
             and chosen(profile, base, profile.at_tp_mod, "at-tp")
         )
 
-        # Edit-before-new race. The selected preset decides whether a complete
-        # first EDIT may create exposure; any later NEW must not duplicate it.
-        # It is intentionally not used for RF.
+        # First OBSERVED version is an EDIT after the observer missed NEW.
+        # Telegram's original publication still precedes its edit. A later NEW
+        # here is adversarial application-level redelivery, not a claim that
+        # Telegram normally reverses update order. The preset controls entry.
+        # The legacy scenario key stays stable for existing comparison tools.
         if orphan:
             add(
                 emitted(
@@ -446,6 +448,7 @@ def build_profile(base_messages: list[dict[str, Any]], profile: Profile) -> tupl
         "configuration": asdict(profile),
         "scope": "synthetic resilience/P&L sensitivity; not historical evidence; forbidden for preset ranking",
         "source_causality": "LIMITED: full export often contains final_only text at publication time; case-level resilience only, never historical P&L evidence",
+        "observation_order": "edit_before_new means first observed version is EDIT after missed NEW, followed by synthetic application redelivery; original publication precedes editing",
         "case_expectations": {
             "optimistic": "no crash; no duplicate exposure; near-baseline behavior",
             "realistic": "all transport/edit invariants pass; quantify execution sensitivity",

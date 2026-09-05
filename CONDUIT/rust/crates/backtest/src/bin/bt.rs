@@ -187,6 +187,7 @@ struct Args {
     sim_limit_price_improvement: bool,
     sim_new_pending_sl_next_tick: bool,
     sim_native_swap_cash_digits: Option<u32>,
+    sim_trade_sessions: Option<conduit_backtest::trade_sessions::TradeSessionProfile>,
     /// Raw Telegram replay uses the exact VPS content-dedup ingress.
     live_telegram_ingress: bool,
     /// Explicit approximate screening stride; 1 is the exact legacy path.
@@ -376,6 +377,7 @@ fn main_run_config(a: &Args, p: &Wariant, from: i64, to: i64,
         sim_limit_price_improvement: a.sim_limit_price_improvement,
         sim_new_pending_sl_next_tick: a.sim_new_pending_sl_next_tick,
         sim_native_swap_cash_digits: a.sim_native_swap_cash_digits,
+        sim_trade_sessions: a.sim_trade_sessions.clone(),
         live_telegram_ingress: a.live_telegram_ingress,
         quick_tick_stride: a.quick_tick_stride,
         settings: p.settings.clone(),
@@ -437,6 +439,7 @@ fn parse_args() -> Result<Args> {
         sim_limit_price_improvement: false,
         sim_new_pending_sl_next_tick: false,
         sim_native_swap_cash_digits: None,
+        sim_trade_sessions: None,
         live_telegram_ingress: false,
         quick_tick_stride: 1,
         sim_price_digits: None,
@@ -485,6 +488,10 @@ fn parse_args() -> Result<Args> {
             "--ticks" => a.ticks = next()?.into(),
             "--sim-limit-price-improvement" => a.sim_limit_price_improvement = true,
             "--sim-new-pending-sl-next-tick" => a.sim_new_pending_sl_next_tick = true,
+            "--sim-trade-sessions" => {
+                let path = PathBuf::from(next()?);
+                a.sim_trade_sessions = Some(conduit_backtest::trade_sessions::TradeSessionProfile::load(&path)?);
+            }
             "--sim-native-swap-cash-digits" => {
                 let digits: u32 = next()?.parse()?;
                 if digits > 8 { bail!("--sim-native-swap-cash-digits requires 0..=8"); }
@@ -1300,6 +1307,16 @@ fn main() -> Result<()> {
         });
     }
     // OFF does not add new fields to an old replay manifest.
+    if let Some(profile) = &a.sim_trade_sessions {
+        use sha2::{Digest, Sha256};
+        let encoded = serde_json::to_vec(profile)?;
+        replay_manifest["sim_trade_sessions"] = serde_json::json!({
+            "profile": profile,
+            "canonical_profile_sha256": format!("{:x}", Sha256::digest(encoded)),
+            "scope": "broker-clock physical execution; quotes, messages, swap and mark-to-market are not filtered",
+            "authority": "https://www.mql5.com/en/docs/marketinformation/symbolinfosessiontrade",
+        });
+    }
     if let Some(digits) = a.sim_native_swap_cash_digits {
         replay_manifest["sim_native_swap_cash"] = serde_json::json!({
             "currency_digits": digits,
@@ -2400,6 +2417,7 @@ where
                 sim_limit_price_improvement: a.sim_limit_price_improvement,
                 sim_new_pending_sl_next_tick: a.sim_new_pending_sl_next_tick,
                 sim_native_swap_cash_digits: a.sim_native_swap_cash_digits,
+                sim_trade_sessions: a.sim_trade_sessions.clone(),
                 settings: p.ustawienia().clone(),
                 n_dni: a.reset_co,
                 zzn: a.zzn,
@@ -2727,6 +2745,7 @@ mod testy_konfiguracji_walk_forward {
         sim_limit_price_improvement: false,
         sim_new_pending_sl_next_tick: false,
         sim_native_swap_cash_digits: None,
+        sim_trade_sessions: None,
         live_telegram_ingress: false,
         quick_tick_stride: 1,
         sim_price_digits: None,
@@ -2811,7 +2830,7 @@ mod testy_konfiguracji_walk_forward {
     fn all_fields(c: &RunConfig) -> serde_json::Value {
         let RunConfig {
             from,to,start_balance,sim_limit_price_improvement,
-            sim_new_pending_sl_next_tick,sim_native_swap_cash_digits,
+            sim_new_pending_sl_next_tick,sim_native_swap_cash_digits,sim_trade_sessions,
             live_telegram_ingress,quick_tick_stride,
             settings,formaty,pulapy,daily_reset,source_name,curve_interval_ms,
             rozgrzewka_h,drabinka,drabinka_histereza_pct,drabinka_kredyt,
@@ -2822,6 +2841,7 @@ mod testy_konfiguracji_walk_forward {
             "sim_limit_price_improvement":sim_limit_price_improvement,
             "sim_new_pending_sl_next_tick":sim_new_pending_sl_next_tick,
             "sim_native_swap_cash_digits":sim_native_swap_cash_digits,
+            "sim_trade_sessions":sim_trade_sessions,
             "live_telegram_ingress":live_telegram_ingress,
             "quick_tick_stride":quick_tick_stride,
             "settings":settings,"formaty":legs(formaty),"pulapy":pulapy,
@@ -2997,6 +3017,7 @@ mod testy_konfiguracji_walk_forward {
         sim_limit_price_improvement: a.sim_limit_price_improvement,
         sim_new_pending_sl_next_tick: a.sim_new_pending_sl_next_tick,
         sim_native_swap_cash_digits: a.sim_native_swap_cash_digits,
+        sim_trade_sessions: a.sim_trade_sessions.clone(),
         live_telegram_ingress: a.live_telegram_ingress,
         settings: p.settings.clone(),
         ea_konfig: p.ea.clone(),

@@ -1111,12 +1111,11 @@ fn sidecar_config(st: &StateHandle) -> SidecarConfig {
         .and_then(|v| v.as_f64())
         .filter(|x| x.is_finite() && *x > 0.0);
 
-    // Interpreter Pythona: pole z panelu, potem `python` z PATH. Sidecar
-    // wymaga pakietu `MetaTrader5`, więc to musi być TEN interpreter, w którym
-    // pakiet jest zainstalowany — stąd możliwość wpisania pełnej ścieżki.
-    if let Some(p) = s("mt5_python") {
-        cfg.python = std::path::PathBuf::from(p);
-    }
+    // Bundled runtime is relative to the executable, not the working directory.
+    // An explicitly configured interpreter remains authoritative.
+    let executable_dir=std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.to_owned()))
+        .unwrap_or_default();
+    cfg.python=crate::runtime_python::resolve_python(s("mt5_python").as_deref(), &executable_dir);
     cfg.script = sciezka_sidecara();
     cfg
 }
@@ -2342,6 +2341,8 @@ struct TrwalySilnik {
     profit_budget_anchor: Option<conduit_core::profit_budget::BudgetAnchorBits>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_sources: Vec<conduit_core::engine::PendingSourceRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    entry_sources: Vec<conduit_core::engine::EntrySourceRecord>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     continuation: Option<EngineContinuationV1>,
 }
@@ -2423,6 +2424,7 @@ fn sygnatura_ryzyka(silniki: &routing::Silniki) -> String {
     serde_json::to_string(&silniki.lista.iter().map(|s| (
         &s.format, &s.engine.halted, s.engine.risk_override,
         s.engine.stopped_trading_day(), s.engine.pending_source_memory_revision(),
+        s.engine.entry_source_memory_revision(),
         (s.engine.cfg.profit_budget_arm_pct!=0.0).then_some((s.engine.stats.day,
             s.engine.stats.day_start_equity.to_bits(),s.engine.stats.day_peak_equity.to_bits())),
     )).collect::<Vec<_>>()).expect("risk signature contains only JSON-safe scalars")
@@ -2442,6 +2444,7 @@ fn save_follow_memory(st: &StateHandle, silniki: &routing::Silniki, toz: &condui
             stopped_trading_day:s.engine.stopped_trading_day(),
             profit_budget_anchor:(s.engine.cfg.profit_budget_arm_pct!=0.0).then(|| (&s.engine.stats).into()),
             pending_sources:s.engine.export_pending_source_memory(),
+            entry_sources:s.engine.export_entry_source_memory(),
             continuation:s.engine.export_strategy_continuation()})
     }).collect();
     let (mut ui_stats,risk_override)=st.read(|s|(s.stats.clone(),s.risk_override.clone()));
@@ -3618,6 +3621,7 @@ fn przenies_pamiec(
             continue;
         };
         s.engine.restore_pending_source_memory(&t.pending_sources);
+        s.engine.restore_entry_source_memory(&t.entry_sources);
         let Some(stats) = t.stats.take() else {
             continue;
         };
@@ -4026,6 +4030,7 @@ fn zapamietaj_silniki(
                 stopped_trading_day: s.engine.stopped_trading_day(),
                 profit_budget_anchor:(s.engine.cfg.profit_budget_arm_pct!=0.0).then(|| (&s.engine.stats).into()),
                 pending_sources: s.engine.export_pending_source_memory(),
+                entry_sources: s.engine.export_entry_source_memory(),
                 continuation: s.engine.export_strategy_continuation(),
             },
         );
@@ -5043,12 +5048,12 @@ fn manual_profit_budget_allowed<B:Broker>(silniki:&mut routing::Silniki,b:&B,sid
         match conduit_core::profit_budget::limit_open_volume(&engine.cfg,(&engine.stats).into(),b,
             side,entry,sl,requested) {
             Ok(v)=>maximum=maximum.min(v),
-            Err(reason)=>return Err(format!("PROFIT BUDGET: manual order rejected ({reason:?}); maximum allowed volume: 0.00000000")),
+            Err(reason)=>return Err(format!("RISK BUDGET: manual order rejected ({reason:?}); maximum allowed volume: 0.00000000")),
         }
     }
     let tolerance=16.0*f64::EPSILON*requested.abs().max(1.0);
     if maximum+tolerance<requested {
-        Err(format!("PROFIT BUDGET: manual order rejected; maximum allowed volume: {maximum:.8}; requested volume is unchanged"))
+        Err(format!("RISK BUDGET: manual order rejected; maximum allowed volume: {maximum:.8}; requested volume is unchanged"))
     } else {Ok(())}
 }
 
@@ -6609,6 +6614,16 @@ mod tests {
                 aliases: vec![88], cancelled_ts: Some(12345),
             }
         ]);
+        live.glowny_mut().engine.restore_entry_source_memory(&[
+            conduit_core::engine::EntrySourceRecord {
+                source:SourceKey::new(-990078,None),msg_id:300,aliases:vec![301],basket_id:None,
+                first_entry_was_edit:false,last_entry_edit_ts:None,cancelled_ts:Some(12300),
+            },
+            conduit_core::engine::EntrySourceRecord {
+                source:SourceKey::new(-990078,None),msg_id:400,aliases:vec![401],basket_id:Some(199),
+                first_entry_was_edit:true,last_entry_edit_ts:Some(12200),cancelled_ts:None,
+            },
+        ]);
         st.update(Sections::all(), |s| s.settings["mt5_magic"] = serde_json::json!(88));
         // This is the production fixed-login (follow=false) snapshot path.
         assert!(zapisz_zrzut(&st, &live, &a, "XAUUSD", &mut String::new(),
@@ -6620,6 +6635,7 @@ mod tests {
         assert_eq!(restarted.glowny().engine.stopped_trading_day(), Some(12345));
         assert_eq!(restarted.glowny().engine.stats.realized_today, -12.0);
         assert_eq!(restarted.glowny().engine.export_pending_source_memory().len(), 1);
+        assert_eq!(restarted.glowny().engine.export_entry_source_memory(),live.glowny().engine.export_entry_source_memory());
         assert!(!bind_account_risk(&st, &mut memory, &a, 77, "XAUUSD").unwrap());
         assert!(bind_account_risk(&st, &mut memory, &a, 88, "XAUUSD").unwrap());
         assert!(memory.silniki.is_empty(), "a different magic scope cannot inherit day stop");
@@ -6629,12 +6645,14 @@ mod tests {
         let mut other = jeden(silnik());
         przenies_pamiec(&mut other, &mut memory, 400.0, 0.0);
         assert_eq!(other.glowny().engine.stopped_trading_day(), None);
+        assert!(other.glowny().engine.export_entry_source_memory().is_empty());
         assert!(other.glowny().engine.export_pending_source_memory().is_empty(),
             "source withdrawal from account A cannot poison account B");
         assert!(bind_account_risk(&st, &mut memory, &a, 77, "XAUUSD").unwrap());
         let mut returned = jeden(silnik());
         przenies_pamiec(&mut returned, &mut memory, 400.0, 0.0);
         assert_eq!(returned.glowny().engine.stopped_trading_day(), Some(12345));
+        assert_eq!(returned.glowny().engine.export_entry_source_memory(),live.glowny().engine.export_entry_source_memory());
         let sources = returned.glowny().engine.export_pending_source_memory();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].cancelled_ts, Some(12345));

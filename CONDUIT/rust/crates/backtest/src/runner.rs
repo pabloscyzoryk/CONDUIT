@@ -54,6 +54,7 @@ pub struct RunConfig {
     /// outside Balance until close, with the declared account-money precision.
     /// This is not a strategy/sizing axis and is independent of NET reporting.
     pub sim_native_swap_cash_digits: Option<u32>,
+    pub sim_trade_sessions: Option<crate::trade_sessions::TradeSessionProfile>,
     /// Feed raw messages through the exact bounded content-dedup ingress used
     /// by the VPS Telegram listener before they reach the parser/Engine.
     /// False preserves the ordinary export backtest bit-for-bit.
@@ -173,6 +174,7 @@ impl Default for RunConfig {
             sim_limit_price_improvement: false,
             sim_new_pending_sl_next_tick: false,
             sim_native_swap_cash_digits: None,
+            sim_trade_sessions: None,
             live_telegram_ingress: false,
             quick_tick_stride: 1,
             settings: Settings::default(),
@@ -706,6 +708,9 @@ pub fn run_with_progress(
     broker.limit_price_improvement = cfg.sim_limit_price_improvement;
     broker.defer_new_pending_sl = cfg.sim_new_pending_sl_next_tick;
     broker.price_digits = ticks.price_digits();
+    if let Err(reason) = broker.set_trade_sessions(cfg.sim_trade_sessions.clone()) {
+        return rejected_sim_execution(cfg, reason);
+    }
     if let Some(digits) = cfg.sim_native_swap_cash_digits {
         if let Err(reason) = broker.set_native_swap_cash_digits(Some(digits)) {
             return rejected_sim_execution(cfg, reason);
@@ -2659,6 +2664,7 @@ fn przelacz_szczebel(
                 // New creation count excludes adopted baskets, so accumulate before replacement.
                 narosle[idx].2 += engine.created_baskets_count();
                 let entry_observations=engine.take_entry_source_observations();
+                let entry_sources=engine.export_entry_source_memory();
                 let hist = engine.market_history();
                 let odrz = std::mem::take(&mut engine.odrzuty);
                 // …i rejestr odrzuconych wejść (Pakiet E3) — patrz bliźniacze
@@ -2707,6 +2713,7 @@ fn przelacz_szczebel(
                 // stanu konta, który zastał — dokładnie jak bot włączony dziś
                 *engine = Engine::new(ust, saldo);
                 engine.restore_entry_source_observations(entry_observations);
+                engine.restore_entry_source_memory(&entry_sources);
                 engine.przypisz_slot(slot);
                 engine.pulapy = sz.pulapy.clone();
                 engine.tryb_auto_ea = auto_ea;

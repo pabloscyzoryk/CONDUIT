@@ -7,6 +7,7 @@ pub mod metrics;
 pub mod okna;
 pub mod runner;
 pub mod sim;
+pub mod trade_sessions;
 pub mod sr_warmup;
 mod continuation;
 mod sim_costs;

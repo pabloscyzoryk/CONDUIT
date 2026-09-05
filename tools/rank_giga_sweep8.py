@@ -82,6 +82,12 @@ def select(rows: dict, count: int, min_activity_ratio: float = .7):
         (rejected if reasons else pool).append({**row, "screening_rejections": reasons})
     chosen, why = {}, defaultdict(list)
 
+    def green_equity_days(row):
+        # A floating loss on a day without a closing deal must remain visible.
+        # All candidates in one plan share the same observed market window.
+        value = row.get("positive_market_days_pct")
+        return value if value is not None else row["win_days_pct"]
+
     def add(row, reason):
         if row["name"] not in chosen and len(chosen) >= count:
             return
@@ -89,16 +95,16 @@ def select(rows: dict, count: int, min_activity_ratio: float = .7):
         if reason not in why[row["name"]]:
             why[row["name"]].append(reason)
 
-    add(reference, "mandatory_reference_with_source_validity_contract")
+    add(reference, "mandatory_reference_with_declared_base_policy")
     by_family = defaultdict(list)
     for row in pool:
         by_family[row["family"]].append(row)
     for family, members in sorted(by_family.items()):
         add(max(members, key=lambda r: (r["total_profit"], r["win_days_pct"])), "family_profit_leader")
-        add(max(members, key=lambda r: (r["win_days_pct"], r["total_profit"])), "family_positive_day_leader")
+        add(max(members, key=lambda r: (green_equity_days(r), r["total_profit"])), "family_positive_equity_day_leader")
     views = [
         ("profit", sorted(pool, key=lambda r: (r["total_profit"], r["filled_baskets"]), reverse=True)),
-        ("positive_trading_days", sorted(pool, key=lambda r: (r["win_days_pct"], r["total_profit"]), reverse=True)),
+        ("positive_equity_days", sorted(pool, key=lambda r: (green_equity_days(r), r["total_profit"]), reverse=True)),
         ("activity", sorted(pool, key=lambda r: (r["filled_baskets"], r["total_profit"]), reverse=True)),
         ("profit_per_drawdown", sorted(pool, key=lambda r: (r["total_profit"] / max(r["max_daily_dd"], 1.), r["win_days_pct"]), reverse=True)),
     ]
@@ -113,8 +119,9 @@ def select(rows: dict, count: int, min_activity_ratio: float = .7):
             "profitable_active_pool": len(pool), "rejected_count": len(rejected),
             "rejection_counts": dict(Counter(reason for r in rejected for reason in r["screening_rejections"])),
             "highest_positive_day_diagnostics": sorted(rejected, key=lambda r: (r["win_days_pct"], r["total_profit"]), reverse=True)[:10],
-            "notes": ["Reference includes the mandatory source-validity contract; it is not an unchanged historical GOD-X7 result.",
+            "notes": ["Reference inherits the declared base preset and common execution contract; compare its manifest to the historical GOD-X7 recipe.",
                       "win_days_pct counts days with closed trades; positive_market_days_pct includes every day with ticks.",
+                      "Positive-day selection uses all observed equity days, so days carrying floating losses cannot disappear merely because no trade closed.",
                       "Daily reset end_equity is start deposit plus the sum of independent daily profits, not a continuous account balance.",
                       "Activity floor is a screening choice, not evidence against overfitting. Exact validation and owner selection remain required."]}
 

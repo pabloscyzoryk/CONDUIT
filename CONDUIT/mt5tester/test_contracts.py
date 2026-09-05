@@ -124,6 +124,34 @@ class LedgerTests(unittest.TestCase):
         self.assertFalse(result["execution_fields_match"])
         self.assertEqual(result["differences_by_field"]["close_ts"], 1)
 
+    def test_legacy_simulator_profit_contains_swap_exactly_once(self):
+        trade = {"profit": 1.49, "swap": -0.81, "commission": 0}
+        self.assertEqual(compare.rust_net(trade), 1.49)
+        with self.assertRaises(ValueError):
+            compare.rust_net({**trade, "commission": -0.5})
+
+    def test_session_snapshot_requires_closed_day_proof_and_exact_intervals(self):
+        days = [{"day_sun0": day, "trade": [], "quote": []} for day in range(7)]
+        diagnostic = "\n".join(f"BROKER_SESSION_SUMMARY day_sun0={day} trade_count=0 quote_count=0 clock=broker" for day in range(7))
+        profile = {"clock": "broker", "days": days}
+        self.assertTrue(compare.compare_trade_sessions(profile, diagnostic)["matches"])
+        with self.assertRaises(ValueError):
+            compare.compare_trade_sessions(profile, "\n".join(diagnostic.splitlines()[:-1]))
+        days[1]["trade"] = [[3660, 86280]]
+        self.assertFalse(compare.compare_trade_sessions(profile, diagnostic)["matches"])
+
+    def test_canonical_net_contains_every_cost_and_requires_reconciliation(self):
+        receipt = {"completeness": {"status": "complete"}, "volume": 0.01,
+                   "gross_profit": 10, "entry_commission_alloc": -0.1, "exit_commission": -0.2,
+                   "entry_fee_alloc": -0.3, "exit_fee": -0.4, "swap": -0.5}
+        trade = {"profit_basis": "CanonicalClosedNetV1", "profit": 8.5, "commission": -0.3,
+                 "swap": -0.5, "volume": 0.01, "cost_receipt": receipt}
+        self.assertAlmostEqual(compare.rust_net(trade), 8.5)
+        with self.assertRaises(ValueError):
+            compare.rust_net({**trade, "profit": 8})
+        with self.assertRaises(ValueError):
+            compare.rust_net({**trade, "cost_receipt": {**receipt, "swap": None}})
+
 
 if __name__ == "__main__":
     unittest.main()

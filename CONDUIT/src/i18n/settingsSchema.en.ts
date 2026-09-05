@@ -729,7 +729,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       edycja_sieroty_nie_otwiera: {
         label: "an orphan edit does not open a basket",
-        hint: "An edit of a message the bot does not know (e.g. after a restart) with an entry in its body does NOT open a fresh basket at stale prices. Management actions from that message still proceed normally.",
+        hint: "ON blocks a new entry from an unknown edit. OFF accepts its first complete signal with a protective SL at receipt time, without backdating; a bare BUY/SELL NOW still cannot open a basket. Source memory prevents duplicates and re-entry after CANCEL, including after restart. Management of an existing basket remains active.",
       },
       entry_idempotencja: {
         label: "new-message idempotency",
@@ -944,7 +944,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       max_portfolio_risk_pct: {
         label: "OPEN-RISK CEILING — WHOLE ACCOUNT",
-        hint: "Limits aggregate risk across open positions and active pending orders. A breach scales the new basket; 0 disables the limit.",
+        hint: "A percentage of current equity covering position risk from the current price to SL and pending risk from entry to SL. Applies to every new order, even before the profit reserve arms. Reduces automatic volume; rejects an oversized manual order. 0 disables this limit.",
       },
       dd_soft_pct: {
         label: "THROTTLE — FIRST DRAWDOWN THRESHOLD",
@@ -2432,7 +2432,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
     fields: {
       profit_budget_arm_pct: {
         label: "New-entry budget: daily profit threshold",
-        hint: "Arms from peak daily profit relative to starting capital. 0 disables the budget. Limits new entries; does not close existing positions."
+        hint: "Arms from peak daily profit relative to starting capital. 0 disables only the profit reserve; the separate portfolio risk ceiling still applies. Limits new entries; does not close existing positions."
       },
       profit_budget_keep_pct: {
         label: "Retain a share of peak profit",

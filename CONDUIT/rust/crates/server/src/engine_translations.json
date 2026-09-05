@@ -3036,6 +3036,46 @@
     "PROFIT BUDGET: {reason:?}; no legal grid fits the current reserve"
   ],
   [
+    "EDYCJA WEJŚCIA: pierwszy pełny chroniony sygnał oceniony w chwili odbioru",
+    "ENTRY EDIT: first complete protected source evaluated at receive time"
+  ],
+  [
+    "ŹRÓDŁO WEJŚCIA: anulowanie przez nadawcę blokuje ponowną aktywację",
+    "ENTRY SOURCE: publisher withdrawal prevents reactivation"
+  ],
+  [
+    "ŹRÓDŁO WEJŚCIA: spóźniony NEW nie może zastąpić wcześniej odebranej edycji wejścia",
+    "ENTRY SOURCE: late NEW cannot replace an already received entry edit"
+  ],
+  [
+    "ŹRÓDŁO WEJŚCIA: powiązany CANCEL zapisany przed jego sygnałem wejścia; nie wybrano obcego koszyka",
+    "ENTRY SOURCE: bound CANCEL saved before its source entry; no unrelated basket selected"
+  ],
+  [
+    "EDYCJA WEJŚCIA: źródło {orig} nie ma koszyka; przyjęcie wymaga zgody presetu i pełnego chronionego wejścia",
+    "ENTRY EDIT: source {orig} has no basket; recovery requires the preset policy and a complete protected entry"
+  ],
+  [
+    "DOKŁADKA TEMPOWA: TP {tp:.2} jest już za rynkiem; zlecenie nie zostało wysłane, slot pozostaje dostępny",
+    "FAST ADDON: TP {tp:.2} is beyond the market; no order sent and capacity remains available"
+  ],
+  [
+    "BUDŻET RYZYKA: zlecenie ręczne odrzucone ({reason:?}); maksymalny dozwolony wolumen: 0.00000000",
+    "RISK BUDGET: manual order rejected ({reason:?}); maximum allowed volume: 0.00000000"
+  ],
+  [
+    "BUDŻET RYZYKA: zlecenie ręczne odrzucone; maksymalny dozwolony wolumen: {maximum:.8}; żądany wolumen pozostaje bez zmian",
+    "RISK BUDGET: manual order rejected; maximum allowed volume: {maximum:.8}; requested volume is unchanged"
+  ],
+  [
+    "BUDŻET RYZYKA: {reason:?}; nowe zlecenie wstrzymane",
+    "RISK BUDGET: {reason:?}; new order withheld"
+  ],
+  [
+    "BUDŻET RYZYKA: {reason:?}; żadna legalna siatka nie mieści się w bieżącej rezerwie",
+    "RISK BUDGET: {reason:?}; no legal grid fits the current reserve"
+  ],
+  [
     "MAX DRAWDOWN {a}% ≥ {b}%",
     "MAX DRAWDOWN {a}% ≥ {b}%"
   ],

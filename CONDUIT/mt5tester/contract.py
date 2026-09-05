@@ -50,7 +50,7 @@ INACTIVE = {
 # Fixed assumptions still require behavioral regression comparisons. Values
 # outside this contract are rejected instead of silently changing strategy.
 FIXED = {
-    "entry_idempotencja": True, "close_all_scope": "Global",
+    "close_all_scope": "Global",
     "sesja_bramka": "Sygnal", "regime_cena": "Rynkowa",
     "regime_miara": "Srednia", "regime_gdy_rozerwany": "Milcz",
     "day_trail_basis": "EquityPeak", "sim_validate_pending_stops": True,

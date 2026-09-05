@@ -172,6 +172,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut preset = String::new();
     let mut live_telegram_ingress = false;
+    let mut trade_sessions = None;
     let mut exec_latency_ms = conduit_core::settings::Settings::default().exec_latency_ms;
     let mut i = 0;
     while i < args.len() {
@@ -189,6 +190,9 @@ fn main() -> Result<()> {
             "--kanal" => tylko_kanal = next(),
             "--preset" => preset = next(),
             "--live-telegram-ingress" => live_telegram_ingress = true,
+            "--sim-trade-sessions" => {
+                trade_sessions = Some(conduit_backtest::trade_sessions::TradeSessionProfile::load(std::path::Path::new(&next()))?);
+            }
             "--schema" => wire_schema = WireSchema::parse(&next())?,
             _ => anyhow::bail!("nieznany argument {a}"),
         }
@@ -197,6 +201,7 @@ fn main() -> Result<()> {
 
     let mut dedup_value_aware = false;
     let mut profit_update_telemetry_only = false;
+    let mut source_reply_links = false;
     let opcje = if preset.is_empty() {
         parser::OpcjeParsera::default()
     } else {
@@ -206,6 +211,7 @@ fn main() -> Result<()> {
         exec_latency_ms = c.exec_latency_ms;
         dedup_value_aware = c.dedup_klucz_z_wartoscia;
         profit_update_telemetry_only = c.profit_update_telemetry_only;
+        source_reply_links = !c.edycja_sieroty_nie_otwiera && c.reply_graph_transitive;
         eprintln!(
             "    opcje parsera z presetu {}: rf_wymaga_wykonania={} partials_wykonuj={} geometryczny={} min_pewnosc={} luz_interpunkcyjny={} dedup_value={} profit_telemetry_only={}",
             p.name, c.rf_wymaga_wykonania, c.partials_wykonuj,
@@ -237,6 +243,11 @@ fn main() -> Result<()> {
         if live_telegram_ingress { 1 } else { 0 }
     )?;
     writeln!(f, "# zrodlo={signals}")?;
+    if let Some(profile) = &trade_sessions {
+        use sha2::{Digest, Sha256};
+        let encoded = serde_json::to_vec(profile)?;
+        writeln!(f, "# BROKER_EXECUTION_PROFILE sha256={:x} clock=broker scope=native_execution_only_messages_unfiltered", Sha256::digest(encoded))?;
+    }
     writeln!(
         f,
         "# offset_ms={offset_ms} (zegar tickow = ts_wiadomosci + offset)"
@@ -293,7 +304,8 @@ fn main() -> Result<()> {
         }
         // Wiadomość bez ANI JEDNEGO polecenia nie zmienia stanu silnika —
         // w pliku byłaby tylko szumem, a ekspert i tak by ją pominął.
-        if sigs.iter().all(|s| matches!(s, Signal::Info)) {
+        let source_link = source_reply_links && m.reply_to.is_some();
+        if sigs.iter().all(|s| matches!(s, Signal::Info)) && !source_link {
             continue;
         }
 
@@ -355,6 +367,9 @@ fn main() -> Result<()> {
             n_act += 1;
         }
         // 7 pól stałych (M, ts, msg_id, reply_to, edit_of, hints, kanal)
+        if pola.len() == 7 && source_link {
+            pola.push("INFO:source_reply_link".into());
+        }
         if pola.len() <= 7 {
             continue;
         }

@@ -405,14 +405,22 @@ fn ambiguous_fast_addon_ack_and_delayed_snapshot_never_send_twice(){
 }
 
 #[test]
-fn fast_addon_with_tp_already_behind_market_is_consumed_without_broker_spam(){
+fn fast_addon_local_invalid_tp_preserves_capacity_without_broker_or_note_spam(){
     let mut c=fast_addon_cfg();c.tp_source=TpSource::SignalOnly;
     let(mut e,mut b)=rig(c,BUY,4004.0);
     e.baskets[0].tps=vec![4004.0];
     b.positions_mut()[0].tp=None;
     tick(&mut e,&mut b,T+6000,4004.5);tick(&mut e,&mut b,T+12000,4005.5);
     assert_eq!(b.addon_calls,0,"stale TP must be rejected before the broker RPC");
-    assert_eq!(e.baskets[0].fast_addons,1,"stale opportunity consumes max=1");
+    assert_eq!(e.baskets[0].fast_addons,0,"no broker submission means capacity is still available");
     tick(&mut e,&mut b,T+18000,4007.0);
-    assert_eq!(b.addon_calls,0,"stale TP must not retry on later ticks");
+    assert_eq!(b.addon_calls,0,"invalid TP must never reach the broker");
+    assert_eq!(e.baskets[0].events.iter().filter(|event|event.text.contains("capacity remains available")).count(),1,
+        "repeated local validation must not flood the basket log");
+    e.baskets[0].tps=vec![4030.0];
+    tick(&mut e,&mut b,T+24000,4008.0);
+    assert_eq!(b.addon_calls,1,"later valid TP may use the still unused slot");
+    assert_eq!(e.baskets[0].fast_addons,1);
+    tick(&mut e,&mut b,T+30000,4009.0);
+    assert_eq!(b.addon_calls,1,"the actual submission consumes max=1 exactly once");
 }
