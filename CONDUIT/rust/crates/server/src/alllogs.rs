@@ -1250,7 +1250,7 @@ pub fn zbuduj_z_postepem(st: &StateHandle, postep: Option<std::time::Instant>) -
 
     // Full account history is a separate, immutable terminal job. UI history
     // above remains useful but is not evidence of the account's entire past.
-    if postep.is_some() {
+    if postep.is_some() && wybor.chce("broker_history", false) && st.market().is_some() {
         // This phase has no honest total until the terminal job finishes.
         // Preserve measured file-byte progress; do not replace it with 0/0.
         st.update_transient(Sections::one(Section::Scalanie), |s| {
@@ -1848,7 +1848,10 @@ mod testy {
 
         // pełny przebieg z postępem
         ANULUJ.store(false, Ordering::Relaxed);
-        let start = std::time::Instant::now();
+        assert!(st.market().is_none(), "fixture must exercise no terminal history job");
+        // Make throughput observable even on fast machines; an unavailable
+        // history source must not erase already measured file-byte progress.
+        let start = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let d = zbuduj_z_postepem(&st, Some(start)).expect("scalenie ma się udać");
         assert!(
             d.len() as u64 >= razem,
@@ -1867,7 +1870,7 @@ mod testy {
         );
         assert_eq!(zrobione, wszystkich, "po zakończeniu licznik = całość");
         assert!(
-            predkosc.is_empty() || predkosc.ends_with("MB/s"),
+            predkosc.ends_with("MB/s"),
             "prędkość w MB/s, nie w plikach/s (jest: {predkosc})"
         );
 
