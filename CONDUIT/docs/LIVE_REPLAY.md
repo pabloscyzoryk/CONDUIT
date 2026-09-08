@@ -110,6 +110,53 @@ Zgodność replay nie potwierdza sama w sobie zgodności modelu brokera. Rozjazd
 trzeba znaleźć na pierwszej różnej decyzji albo odpowiedzi i naprawić ogólną
 regułę. Nie koryguje się wyników pod konkretny dzień, wiadomość ani transakcję.
 
+## Historia rachunku z terminala
+
+Kategoria `broker_history` w allLogs uzupełnia historię interfejsu o surowe
+historyczne zlecenia i transakcje udostępniane przez aktualny terminal MT5.
+Obejmuje cały rachunek: wszystkie symbole i magic, operacje ręczne, inne EA
+oraz zdarzenia salda, prowizje, swapy i opłaty. Nie jest listą ostatnich
+zamknięć z panelu. Powiązania order/position/deal i oryginalne pola brokera
+pozostają dostępne do analizy. Zestaw zawiera też obserwację aktualnych
+pozycji i zleceń oczekujących.
+
+Pobieranie jest wyłącznie diagnostyczne. Osobny proces wykonuje odczyty
+historii przy przygotowaniu eksportu; nie przesyła zleceń i nie zmienia
+stanu Engine. Korzysta z jawnie wskazanego, działającego i zalogowanego
+terminala. Nie przekazuje hasła ani nie wywołuje `login`. Osobne połączenie
+wymaga `initialize`; jeżeli terminal zniknie między sprawdzeniem obecności
+a przyłączeniem, ta funkcja MT5 może uruchomić go z zapisanym profilem.
+Po przyłączeniu tożsamość rachunku jest ponownie sprawdzana. Oddzielny proces
+chroni kolejkę zleceń bota przed długim zapytaniem o historię, ale sam odczyt
+nadal może obciążyć terminal.
+
+Eksport rozróżnia kompletnie pobraną historię udostępnioną przez API od
+częściowego wyniku i braku danych. Zakres zaczyna się od epoki 1970.
+Górna granica zapytania obejmuje dobę po rozpoczęciu pobierania, zgodnie
+z polityką istniejącego odbiornika historii, aby nie odciąć ostatnich godzin
+zegara brokera. Jest to jawny zapas zakresu zapytania, a nie przeliczenie
+czasów lub założenie o strefie. Surowe `time` i `time_msc` nie są przesuwane;
+czas obserwacji UTC jest osobnym polem. API zwraca tylko historię dostępną
+podczas rzeczywistego odczytu.
+
+Podział na części zachowuje zakresy, liczniki i kontrolę tożsamości konta.
+Błąd, limit, przekroczenie czasu lub zmiana rachunku uniemożliwia oznaczenie
+wyniku jako pełnego. Nawet sukces oznacza pełność odpowiedzi terminala dla
+zadanego zakresu, a nie dowód istnienia archiwum całej historii u brokera.
+Odczyty nie stanowią atomowej migawki działającego rachunku. Dane mogą
+później zostać uzupełnione przez terminal lub brokera.
+
+Limity zapisu i stron ograniczają serializację oraz eksport. Natywne API MT5
+zwraca całą krotkę dla zapytanego przedziału przed podziałem na strony;
+limity te nie dowodzą ograniczenia wcześniejszej alokacji pamięci terminala.
+
+Historia pomoże sprawdzić rzeczywiste wykonanie, koszty i przepływy pieniężne.
+Nie zastępuje nagrania odpowiedzi widzianych przez Engine: późniejsze
+potwierdzenie transakcji nie dowodzi, kiedy bot otrzymał jej ACK. Nie zasila
+wstecz decyzji strategii. Opis API:
+[history_deals_get](https://www.mql5.com/en/docs/python_metatrader5/mt5historydealsget_py)
+i [history_orders_get](https://www.mql5.com/en/docs/python_metatrader5/mt5historyordersget_py).
+
 ## Prywatność
 
 Nagranie jest prywatnym materiałem diagnostycznym. Może zawierać treść
@@ -138,3 +185,18 @@ Replay supplies observed broker responses; backtesting derives responses from
 market data and an explicit execution model. A replay match alone does not
 validate that execution model. Fixes must address the first divergent general
 rule, without signal-specific, date-specific or trade-specific adjustments.
+
+The `broker_history` allLogs category exports the account's available raw
+historical orders and deals, including other symbols, manual/EA activity and
+cash/cost events. A separate read-only worker queries the existing terminal;
+it neither trades nor calls `login` or passes credentials. Its required
+`initialize` call can still reopen a terminal with saved settings if that
+terminal disappears between the presence check and attachment. Account
+identity is verified again after attachment. Original broker timestamps are
+retained alongside UTC observation times. The explicit upper query bound has
+a one-day coverage cushion; this does not convert timestamps or invent future
+records. Errors, account changes and resource limits produce a partial or
+unavailable result. Success describes history supplied by the terminal API,
+not a guaranteed broker archive or an atomic snapshot. These private records
+help reconcile execution but do not reconstruct the time an ACK was observed
+and are never fed retrospectively into strategy decisions.

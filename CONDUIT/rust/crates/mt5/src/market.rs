@@ -57,6 +57,13 @@ pub struct MarketData {
 }
 
 impl MarketData {
+    /// Dedicated read-only full-account history job controls. This cannot route
+    /// arbitrary RPC names or user-supplied terminal/account credentials.
+    pub fn broker_history(&self, request: serde_json::Value) -> Result<serde_json::Value, CallError> {
+        let args = broker_history_args(request)?;
+        self.tr.call("broker_history", args)
+    }
+
     pub fn new(tr: TransportHandle) -> Self {
         MarketData {
             tr,
@@ -256,6 +263,33 @@ impl MarketData {
     }
 }
 
+fn broker_history_args(request: serde_json::Value) -> Result<serde_json::Value, CallError> {
+    let object = request.as_object()
+        .ok_or_else(|| CallError::Shape("broker_history request must be an object".into()))?;
+    let op = object.get("op").and_then(|v| v.as_str()).unwrap_or("start");
+    if !matches!(op, "start" | "status" | "page" | "release") {
+        return Err(CallError::Shape("unsupported broker_history operation".into()));
+    }
+    let allowed: &[&str] = match op {
+        "start" => &["op"],
+        "page" => &["op", "job_id", "index"],
+        _ => &["op", "job_id"],
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(CallError::Shape("unexpected broker_history argument".into()));
+    }
+    if op != "start" {
+        let job = object.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
+        if job.len() != 32 || !job.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CallError::Shape("invalid broker_history job identity".into()));
+        }
+    }
+    if op == "page" && object.get("index").and_then(|v| v.as_u64()).is_none() {
+        return Err(CallError::Shape("invalid broker_history page index".into()));
+    }
+    Ok(request)
+}
+
 /// Ostatnie `count` świec z paczki. Reszta metadanych bez zmian.
 fn przytnij(c: &Candles, count: usize) -> Candles {
     let bars: Vec<Bar> = if c.bars.len() > count {
@@ -275,6 +309,62 @@ fn najstarszy<K: Clone>(m: &HashMap<K, Wpis>) -> Option<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_controls_cannot_route_orders_or_supply_auth_or_filters() {
+        for request in [json!({"op":"open_market"}), json!({"op":"start","password":"synthetic"}),
+                        json!({"op":"start","symbol":"XAUUSD"}), json!({"op":"page","job_id":"../file","index":0}),
+                        json!({"op":"page","job_id":"a".repeat(32),"index":-1})] {
+            assert!(broker_history_args(request).is_err());
+        }
+        for request in [json!({"op":"start"}), json!({"op":"status","job_id":"a".repeat(32)}),
+                        json!({"op":"page","job_id":"b".repeat(32),"index":0}),
+                        json!({"op":"release","job_id":"c".repeat(32)})] {
+            assert_eq!(broker_history_args(request.clone()).unwrap(), request);
+        }
+    }
+
+    #[test]
+    fn history_controls_roundtrip_only_dedicated_rpc_and_preserve_raw_page_bytes() {
+        use crate::transport::{SidecarConfig, Transport};
+        use std::io::{BufRead, BufReader, Write};
+        let mut transport = Transport::start(SidecarConfig {
+            autostart: false,
+            connect_timeout: Duration::from_millis(200),
+            restart_backoff: Duration::from_millis(20),
+            request_timeout: Duration::from_secs(2),
+            ..Default::default()
+        }).unwrap();
+        let port = transport.local_port();
+        let raw = r#"[{"kind":"deal","raw":{"ticket":"9223372036854775815","type":2,"volume":0,"time_msc":1788861600123}}]"#;
+        let worker = std::thread::spawn(move || {
+            let stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let mut write = stream.try_clone().unwrap();
+            writeln!(write, "{}", json!({"ev":"hello","proto":1,"sidecar":"fake","mt5_version":"fake"})).unwrap();
+            for line in BufReader::new(stream).lines() {
+                let request: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+                if request["cmd"] == "shutdown" { break; }
+                assert_eq!(request["cmd"], "broker_history");
+                let result = match request["args"]["op"].as_str().unwrap() {
+                    "start" | "status" => json!({"job_id":"a".repeat(32),"state":"running","page_count":1}),
+                    "page" => json!({"job_id":"a".repeat(32),"index":0,"count":1,"records_json":raw}),
+                    "release" => json!({"released":true}),
+                    other => panic!("unexpected operation {other}"),
+                };
+                writeln!(write, "{}", json!({"id":request["id"],"ok":true,"result":result})).unwrap();
+            }
+        });
+        assert!(transport.wait_connected(Duration::from_secs(5)));
+        let market = MarketData::new(transport.handle());
+        market.broker_history(json!({"op":"start"})).unwrap();
+        market.broker_history(json!({"op":"status","job_id":"a".repeat(32)})).unwrap();
+        let page = market.broker_history(json!({"op":"page","job_id":"a".repeat(32),"index":0})).unwrap();
+        assert_eq!(page["records_json"], raw);
+        assert!(market.broker_history(json!({"op":"open_market"})).is_err());
+        market.broker_history(json!({"op":"release","job_id":"a".repeat(32)})).unwrap();
+        transport.shutdown();
+        worker.join().unwrap();
+    }
 
     fn paczka(n: usize) -> Candles {
         Candles {

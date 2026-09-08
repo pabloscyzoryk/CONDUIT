@@ -1,5 +1,57 @@
 [
   [
+    "Historia rachunku z terminala",
+    "Terminal account history"
+  ],
+  [
+    "Brak ukończonego eksportu allLogs",
+    "No completed allLogs export is available"
+  ],
+  [
+    "Niedozwolona ścieżka eksportu allLogs",
+    "Unsafe allLogs export path"
+  ],
+  [
+    "Niedozwolona ścieżka pobierania allLogs",
+    "Unsafe allLogs download path"
+  ],
+  [
+    "Można pobrać wyłącznie ukończony eksport allLogs",
+    "Only the completed allLogs export can be downloaded"
+  ],
+  [
+    "Niedozwolony katalog wynikowy allLogs",
+    "Unsafe allLogs output directory"
+  ],
+  [
+    "Eksport allLogs znajduje się poza katalogiem wynikowym",
+    "allLogs export is outside its output directory"
+  ],
+  [
+    "Nieprawidłowa nazwa eksportu allLogs",
+    "Invalid allLogs export name"
+  ],
+  [
+    "Nie można otworzyć ukończonego eksportu allLogs",
+    "Cannot open the completed allLogs export"
+  ],
+  [
+    "Nie można sprawdzić ukończonego eksportu allLogs",
+    "Cannot inspect the completed allLogs export"
+  ],
+  [
+    "Przekroczono limit rozmiaru pobierania allLogs",
+    "allLogs download byte limit exceeded"
+  ],
+  [
+    "Brak ścieżki eksportu allLogs",
+    "Missing allLogs export path"
+  ],
+  [
+    "Proces pobierania allLogs zakończył się błędem",
+    "allLogs download worker failed"
+  ],
+  [
     "REARM REVIEW: brak pełnego dowodu wysłanej intencji; wymagane uzgodnienie historii brokera i pamięci koszyka",
     "REARM REVIEW: complete submission evidence is missing; broker history and basket memory require reconciliation"
   ],

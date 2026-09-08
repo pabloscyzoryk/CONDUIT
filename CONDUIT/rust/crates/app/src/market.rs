@@ -194,6 +194,10 @@ impl MarketSource for Mt5Market {
         self.md.default_symbol().to_string()
     }
 
+    fn broker_history(&self, request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        self.md.broker_history(request).map_err(anyhow::Error::from)
+    }
+
     fn is_connected(&self) -> bool {
         self.md.is_connected()
     }

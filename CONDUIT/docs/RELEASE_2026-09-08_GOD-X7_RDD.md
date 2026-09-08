@@ -63,6 +63,23 @@ i ochrony pozycji. Gdy dowód wykonania jest niewystarczający, program wymaga
 sprawdzenia zamiast zgadywać wynik. Stan uzgodnienia przetrwa restart na tym
 samym rachunku. Ustawienia GOD-X7 pozostają takie same.
 
+## Historia brokera w allLogs
+
+Nowa domyślna kategoria pobiera surową historię zleceń i transakcji całego
+rachunku udostępnianą przez terminal, niezależnie od listy zamknięć panelu.
+Obejmuje także inne symbole, magic i przepływy pieniężne. Odczyt działa
+w osobnym procesie i nie zmienia decyzji strategii. Zachowuje oryginalne
+czasy, identyfikatory oraz pola kosztów. Eksport podaje zakres i wynik
+pobierania; błąd, limit lub zmiana konta nie otrzymuje oznaczenia pełności.
+Szczegółowe granice tego dowodu opisuje [LIVE_REPLAY.md](LIVE_REPLAY.md).
+
+Pobieranie dużego allLogs zachowuje surowe bajty pliku i nie korzysta z dawnego
+odczytu tekstowego ograniczonego do 32 MiB. Obejmuje wyłącznie ostatni
+ukończony eksport. Lokalny serwer sprawdza dokładny Host i Origin, także
+przed WebSocket; domena tylko przypominająca localhost jest odrzucana.
+To ochrona przed żądaniami obcych stron, nie system uwierzytelniania lokalnych
+programów. Interfejs korzysta z adresu pętli zwrotnej.
+
 ## English summary
 
 GOD-X7 remains the primary preset with unchanged strategy settings. The
@@ -83,6 +100,17 @@ Uncertain rearm opens are reconciled against strict order/account evidence,
 counted once and assigned their original submission time for cooldown. Pending
 reconciliation blocks new exposure while exits remain available; insufficient
 proof requires review. The reconciliation state survives a same-account restart.
+
+The default allLogs broker-history category adds available raw account orders
+and deals, including other symbols and cash/cost events. A separate read-only
+worker keeps long history requests off the trading sidecar queue. Raw broker
+timestamps are preserved, and coverage, failures and partial results are
+explicit. This is diagnostic material, not a retrospective input to trading.
+
+Large allLogs downloads stream the exact completed export bytes instead of
+using the old 32 MiB text reader. The local API now checks exact Host/Origin
+values before REST and WebSocket handlers, rejecting localhost lookalikes.
+This browser boundary is not authentication of other local processes.
 
 The update provides Polish and English labels. Public packages remain free of
 private credentials and Telegram sessions; private installation material stays

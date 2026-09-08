@@ -285,6 +285,12 @@ pub trait MarketSource: Send + Sync {
 
     fn costs(&self, symbol: &str, days: f64) -> anyhow::Result<CostsDoc>;
 
+    /// Dedicated, read-only broker-history job. Only start/status/page/release;
+    /// called by the background allLogs worker, never by the trading engine.
+    fn broker_history(&self, _request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("broker history export is unavailable for this source")
+    }
+
     /// Instrument silnika — używany, gdy pytający nie poda żadnego.
     fn default_symbol(&self) -> String;
 

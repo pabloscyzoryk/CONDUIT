@@ -15,6 +15,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+#[path = "alllogs_download.rs"]
+mod alllogs_download;
+
 pub fn router() -> Router<StateHandle> {
     Router::new()
         .route("/health", get(health))
@@ -57,6 +60,7 @@ pub fn router() -> Router<StateHandle> {
         .route("/shell/open-browser", post(open_browser))
         .route("/shell/reveal", post(shell_reveal))
         .route("/fs/read", post(fs_read))
+        .route("/fs/download", post(alllogs_download::download))
         .route("/fs/copy", post(fs_copy))
         // świece i parametry instrumentów prosto z terminala MT5 (zespół ŚWIECE);
         // logika mieszka w `market.rs`, tu jest tylko wpięcie

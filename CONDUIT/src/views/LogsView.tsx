@@ -293,17 +293,13 @@ function useChmurkaPoScaleniu() {
         // POBIERAMY PLIK, nie kopiujemy treści.
         //
         // Schowek przeglądarki przyjmuje TEKST, a nie plik — wklejenie
-        // 9 MB dziennika jako tekstu jest bezużyteczne, bo nie da się go
-        // podesłać jako załącznik. Zamiast tego robimy z treści Blob
-        // i wymuszamy pobranie: użytkownik dostaje PRAWDZIWY plik
-        // w katalogu pobierania, gotowy do wysłania.
+        // Pobieramy strumień bajtów jako Blob. Nie przepuszczamy dużego
+        // nagrania przez ograniczony podgląd tekstu ani parser JSON.
         void api
-          .czytajPlik(s.sciezka)
-          .then((r) => {
-            const nazwa = r.path.split(/[\/]/).pop() || "alllogs.txt";
-            const url = URL.createObjectURL(
-              new Blob([r.text], { type: "text/plain;charset=utf-8" }),
-            );
+          .pobierzAllLogs(s.sciezka)
+          .then((blob) => {
+            const nazwa = s.sciezka.split(/[\\/]/).pop() || "alllogs.txt";
+            const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
             a.download = nazwa;
@@ -316,7 +312,7 @@ function useChmurkaPoScaleniu() {
             app.toast(
               "success",
               t("logs.toast.downloaded", { n: nazwa }),
-              t("logs.toast.downloadedText", { mb: (r.bytes / 1048576).toFixed(1) }),
+              t("logs.toast.downloadedText", { mb: (blob.size / 1048576).toFixed(1) }),
             );
           })
           .catch((e) => app.toast("warn", t("logs.toast.downloadFail"), String(e)));
@@ -452,7 +448,7 @@ export function LogsView() {
         {[...new Set(MERGE_KEYS.map((k) => k.grupa ?? GRUPA_INNE))].map((grupa) => (
           <div key={grupa} style={{ marginBottom: "var(--sp-3)" }}>
             <p className="hint" style={{ marginBottom: "var(--sp-1)", fontWeight: 600 }}>
-              {grupa === GRUPA_INNE ? tt("logs.merge.groupOther") : tSilnik(grupa)}
+              {grupa === GRUPA_INNE ? tt("logs.merge.groupOther") : maKlucz(grupa) ? tt(grupa) : tSilnik(grupa)}
             </p>
             <div className="mergegrid">
               {MERGE_KEYS.filter((k) => (k.grupa ?? GRUPA_INNE) === grupa).map((k) => (

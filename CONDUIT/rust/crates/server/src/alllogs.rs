@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[path = "alllogs_capture.rs"]
 mod capture_export;
 
+#[path = "broker_history_export.rs"]
+mod broker_history_export;
+
 /// ANULOWANIE scalania — jedna flaga wystarcza, bo `uruchom` dopuszcza
 /// najwyżej JEDEN job naraz (bail przy `aktywne`). Ustawia ją REST
 /// `POST /api/logs/merge/cancel`, sprawdza pętla po plikach dziennika —
@@ -1243,6 +1246,28 @@ pub fn zbuduj_z_postepem(st: &StateHandle, postep: Option<std::time::Instant>) -
             }
         }
         spis.push(poz);
+    }
+
+    // Full account history is a separate, immutable terminal job. UI history
+    // above remains useful but is not evidence of the account's entire past.
+    if postep.is_some() {
+        // This phase has no honest total until the terminal job finishes.
+        // Preserve measured file-byte progress; do not replace it with 0/0.
+        st.update_transient(Sections::one(Section::Scalanie), |s| {
+            s.scalanie.etap = "Historia rachunku z terminala".into();
+            s.scalanie.postep = s.scalanie.postep.min(0.99);
+            s.scalanie.eta_ms = 0;
+            s.scalanie.predkosc.clear();
+        });
+    }
+    spis.push(broker_history_export::append(
+        &mut o,
+        st.market().as_deref(),
+        wybor.chce("broker_history", false),
+        postep.is_some(),
+    ));
+    if postep.is_some() && ANULUJ.load(Ordering::Relaxed) {
+        anyhow::bail!("scalanie anulowane przez użytkownika");
     }
 
     // ---------- 10. stan na dysku ----------

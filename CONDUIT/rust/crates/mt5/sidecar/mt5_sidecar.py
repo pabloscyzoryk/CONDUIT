@@ -41,6 +41,8 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
+from broker_history import HistoryFailure, HistoryJobs, scope as history_account_scope
+
 PROTO_VERSION = 1
 SIDECAR_VERSION = "1.0.2"
 
@@ -331,6 +333,7 @@ class Sidecar(object):
         self.bound_account = None
         self.account_changed = False
         self.request_account = None
+        self.history_jobs = HistoryJobs()
         # Próbki poślizgu zleceń RYNKOWYCH: (cena wypełnienia − cena żądana),
         # ze znakiem „na niekorzyść klienta". Zbierane na żywo, bo historia
         # terminala tej liczby nie zna — `price_open` zleceń rynkowych jest
@@ -1280,6 +1283,46 @@ class Sidecar(object):
             })
         return out
 
+    def cmd_broker_history(self, a):
+        """Bounded control RPC. Full history is read on an isolated IPC worker."""
+        operation = a.get("op", "start")
+        if operation not in ("start", "status", "page", "release"):
+            raise BrokerError(ERR_BAD_ARGS, "broker_history: unknown operation")
+        allowed = {"op", "_expected_account"}
+        if operation != "start":
+            allowed.add("job_id")
+        if operation == "page":
+            allowed.add("index")
+        if set(a) - allowed:
+            raise BrokerError(ERR_BAD_ARGS, "broker_history: unexpected arguments")
+        try:
+            if operation == "start":
+                # No user-provided account/path/range or arbitrary RPC dispatch.
+                # The already attached terminal is the only permissible source.
+                terminal = mt5.terminal_info()
+                if terminal is None or not getattr(terminal, "path", None):
+                    raise ValueError("broker_history_terminal_unavailable")
+                source = {"account": history_account_scope(mt5.account_info()),
+                          "terminal_path": os.path.join(terminal.path, "terminal64.exe")}
+                return self.history_jobs.start(source)
+            job_id = a.get("job_id")
+            if operation == "release":
+                return self.history_jobs.release(job_id)
+            # Also pin exports on legacy non-FOLLOW connections. Never serve
+            # completed pages as belonging to a different currently shown account.
+            self.history_jobs.require(job_id)
+            status = self.history_jobs.status(job_id)
+            if history_account_scope(mt5.account_info()) != status["source"]["account"]:
+                raise ValueError("broker_history_account_changed")
+            terminal = mt5.terminal_info()
+            if terminal is None or os.path.normcase(os.path.abspath(os.path.join(terminal.path, "terminal64.exe"))) != os.path.normcase(os.path.abspath(status["source"]["terminal_path"])):
+                raise ValueError("broker_history_terminal_changed")
+            if operation == "status":
+                return status
+            return self.history_jobs.page(job_id, a.get("index"))
+        except (ValueError, RuntimeError, HistoryFailure) as error:
+            raise BrokerError(ERR_BAD_ARGS, str(error)) from None
+
     def cmd_orders(self, a):
         # `all` — jak w `cmd_positions`
         sym = a.get("symbol") or self.symbol
@@ -1771,6 +1814,7 @@ def main():
         log(traceback.format_exc())
         return 1
     finally:
+        s.history_jobs.close()
         try:
             mt5.shutdown()
         except Exception:

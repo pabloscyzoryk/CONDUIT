@@ -444,6 +444,17 @@ class PackageTests(SyntheticFixture):
         (package / "conduit.exe").write_bytes(b"MZchanged")
         self.assert_code("runtime_or_public_payload_changed", pkg.verify, package)
 
+    def test_broker_history_spool_is_rejected_even_if_added_to_manifest(self):
+        package = self.stage()
+        relative = "conduit_broker_history_synthetic/page_00000000.json"
+        path = package / relative
+        path.parent.mkdir()
+        data = b'{"orders":[],"deals":[]}'
+        path.write_bytes(data)
+        self.update_package_json(package, "PACKAGE_MANIFEST.json",
+            lambda value: value["public_files"].update({relative: {"sha256":pkg.sha(data), "size":len(data)}}))
+        self.assert_code("private_artifact_in_public_package", pkg.verify, package)
+
     def test_private_authentication_and_account_selection_tampering_are_blocked(self):
         package = self.stage("private")
         self.assert_code("private_verification_requires_explicit_template", pkg.verify, package)
@@ -575,6 +586,10 @@ class SourceExportTests(SyntheticFixture):
 
     def test_source_export_rejects_vpsready_directory(self):
         repo, revision = self.make_repo({"VPSREADY_OLD/README.md":b"private"})
+        self.assert_code("source_member_outside_allowlist", pkg.export_source, repo, revision, self.root/"PUBLIC_SOURCE", self.template)
+
+    def test_source_export_rejects_broker_history_spool_without_known_credentials(self):
+        repo, revision = self.make_repo({"CONDUIT/conduit_broker_history_synthetic/page_00000000.json":b'{"orders":[],"deals":[]}'})
         self.assert_code("source_member_outside_allowlist", pkg.export_source, repo, revision, self.root/"PUBLIC_SOURCE", self.template)
 
     def test_source_export_rejects_identity_embedded_in_source(self):

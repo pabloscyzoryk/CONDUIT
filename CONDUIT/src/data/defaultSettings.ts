@@ -476,6 +476,7 @@ export const DEFAULT_SETTINGS: Settings = {
        nie ma prawa po cichu wyciac zrodla ze zrzutu. */
     journal: true,
     replay_capture: true,
+    broker_history: true,
     kronika: true,
     wiadomosci: true,
     /* Lustro tekstowe dziennika: TE SAME zdarzenia co `journal`, tylko dla
@@ -791,6 +792,7 @@ export const MERGE_KEYS: {
   grupa?: string;
   note?: string;
 }[] = [
+  { key: "broker_history", label: "historia rachunku z terminala", grupa: "logs.group.broker", note: "zlecenia i transakcje wszystkich instrumentów; jawny zakres oraz status kompletności" },
   /* --- strumienie z dysku: caly material do odtworzenia przebiegu --- */
   { key: "journal", label: "dziennik decyzji", grupa: "Strumienie z dysku", note: "logs/journal/*.jsonl — CO bot zrobił i dlaczego" },
   { key: "replay_capture", label: "nagranie odtwarzania live", grupa: "Strumienie z dysku", note: "pełne zachowane sesje: stan początkowy, kolejność wejść i odpowiedzi brokera" },

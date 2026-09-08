@@ -626,7 +626,7 @@ def verify(package: Path, template: Path | None = None, allow_incomplete=False) 
         checked_file(package, relative)
         if relative not in expected:
             fail("unexpected_package_file")
-        if kind == "public" and (path.name in DISALLOWED_NAMES or path.name.startswith("secrets.") or ".session" in path.name or DISALLOWED_PARTS.intersection(path.relative_to(package).parts)):
+        if kind == "public" and (path.name in DISALLOWED_NAMES or path.name.startswith("secrets.") or ".session" in path.name or DISALLOWED_PARTS.intersection(path.relative_to(package).parts) or any(part.lower().startswith("conduit_broker_history_") for part in path.relative_to(package).parts)):
             fail("private_artifact_in_public_package")
     for name, evidence in manifest["public_files"].items():
         data = checked_file(package, name).read_bytes()
@@ -717,7 +717,7 @@ def export_source(repo: Path, revision: str, destination: Path, template: Path) 
             mode = info.external_attr >> 16
             if name.is_absolute() or ".." in name.parts or stat.S_ISLNK(mode):
                 fail("unsafe_source_archive_member")
-            if name.parts[0] not in {"CONDUIT", "tools", "docs", "report", "README.md", ".gitignore", ".gitattributes", ".github", "LICENSE", "LICENSE.md"} or DISALLOWED_PARTS.intersection(name.parts) or any(p.upper().startswith("VPSREADY") for p in name.parts):
+            if name.parts[0] not in {"CONDUIT", "tools", "docs", "report", "README.md", ".gitignore", ".gitattributes", ".github", "LICENSE", "LICENSE.md"} or DISALLOWED_PARTS.intersection(name.parts) or any(p.upper().startswith("VPSREADY") or p.lower().startswith("conduit_broker_history_") for p in name.parts):
                 fail("source_member_outside_allowlist")
             # Exact source paths only. The Rust module is code, not a secret
             # document; both exceptions still pass the public payload scan.

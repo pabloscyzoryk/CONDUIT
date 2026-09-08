@@ -805,6 +805,17 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  /** Completed allLogs only; raw bytes stay outside JSON/Number conversions. */
+  pobierzAllLogs: async (path: string): Promise<Blob> => {
+    const response = await fetch(`${backendBase()}/api/fs/download`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }),
+    });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => null);
+      throw new Error(failure?.error || `HTTP ${response.status}`);
+    }
+    return response.blob();
+  },
   health: () => json<{ ok: boolean; version: string; clients: number }>("/api/health"),
   state: () => json<UiSnapshot>("/api/state"),
   diag: () => json<Record<string, unknown>>("/api/diag"),

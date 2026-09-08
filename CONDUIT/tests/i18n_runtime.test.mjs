@@ -36,6 +36,17 @@ const { ENGINE_TEMPLATES } = load('@/i18n/engineTemplates');
 const { presentEngineText } = load('@/i18n/enginePresentation');
 const { tSilnik } = load('@/i18n/silnik');
 
+test('terminal history category and progress change PL/EN without raw keys', () => {
+  i18n.setLanguage('en');
+  assert.equal(i18n.t('logs.group.broker'), 'Broker account');
+  assert.equal(i18n.t('logs.source.broker_history.label'), 'terminal account history');
+  assert.equal(tSilnik('Historia rachunku z terminala'), 'Terminal account history');
+  i18n.setLanguage('pl');
+  assert.equal(i18n.t('logs.group.broker'), 'Rachunek brokera');
+  assert.equal(i18n.t('logs.source.broker_history.label'), 'historia rachunku z terminala');
+  assert.equal(tSilnik('Terminal account history'), 'Historia rachunku z terminala');
+});
+
 test('execution confirmation messages distinguish temporary waiting from review in PL/EN', () => {
   for (const [pl, en] of [
     ['Oczekiwanie na potwierdzenie wykonania', 'Waiting for execution confirmation'],

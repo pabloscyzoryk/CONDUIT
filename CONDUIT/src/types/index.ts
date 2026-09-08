@@ -455,6 +455,8 @@ export type LogCategory =
   | "journal"
   /** Complete ordered engine/broker recording, including bootstrap. */
   | "replay_capture"
+  /** Full history made available by the logged-in terminal, with completeness status. */
+  | "broker_history"
   /** logs/journal/*.log — lustro tekstowe tego samego (duplikat tresci) */
   | "journal_log"
   /** plik kroniki (domyslnie na pulpicie) — caly strumien z Telegrama */

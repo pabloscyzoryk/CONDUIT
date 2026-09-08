@@ -34,6 +34,7 @@ pub mod kronika;
 /// w [`kronika`] i jest wspólny z samodzielną `kronika.exe`.
 pub mod kronika_rest;
 pub mod lab;
+mod local_origin;
 pub mod mailer;
 /// Świece i parametry instrumentów z MT5 (zespół ŚWIECE).
 pub mod market;
@@ -534,16 +535,7 @@ pub fn router(st: StateHandle, source: WebSource) -> Router {
     // bez CORS przeglądarka zablokowałaby `fetch`. Wpuszczamy WYŁĄCZNIE
     // pochodzenie lokalne; serwer i tak nasłuchuje na pętli zwrotnej.
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _| {
-            origin
-                .to_str()
-                .map(|o| {
-                    o.contains("//localhost")
-                        || o.contains("//127.0.0.1")
-                        || o.starts_with("tauri://")
-                })
-                .unwrap_or(false)
-        }))
+        .allow_origin(AllowOrigin::predicate(|origin, _| local_origin::allowed(origin)))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);
 
@@ -557,6 +549,7 @@ pub fn router(st: StateHandle, source: WebSource) -> Router {
         .nest("/api", rest::router())
         .fallback(statyki)
         .layer(cors)
+        .layer(axum::middleware::from_fn(local_origin::guard))
         .with_state(st)
 }
 
