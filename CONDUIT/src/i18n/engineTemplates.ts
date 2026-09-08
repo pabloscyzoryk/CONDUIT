@@ -1,5 +1,14 @@
 /** Presentation-only translations of engine templates. Raw diagnostics remain unchanged. */
 export const ENGINE_TEMPLATES: readonly (readonly [string, string])[] = [
+  ["Brak rozstrzygającego potwierdzenia operacji; wymagane uzgodnienie stanu.", "No conclusive operation confirmation; state reconciliation is required."],
+  ["Nieudane operacje handlowe: {}", "Unsuccessful trading operations: {}"],
+  ["operacja nie uzyskała potwierdzenia wykonania", "the operation has no execution confirmation"],
+  ["Kontrolna odbudowa połączenia po ciszy kwotowań", "Connection recovery check after quote silence"],
+  ["Terminal potwierdził brak połączenia z brokerem — odbudowuję połączenie.", "The terminal confirmed that the broker connection is down — reconnecting."],
+  ["Kontrola połączenia sidecara nie powiodła się: {e}", "The sidecar connection check failed: {e}"],
+  ["Oczekiwanie na potwierdzenie wykonania", "Waiting for execution confirmation"],
+  ["Potwierdzenia są w trakcie uzgadniania; nowe wejścia czekają.", "Execution confirmations are being reconciled; new entries are waiting."],
+  ["Potwierdzenia wymagają sprawdzenia; nowe wejścia pozostają zablokowane.", "Execution confirmations require review; new entries remain blocked."],
   ["WYNIK STRATEGII HOLD: wymagane potwierdzone XAUUSD, rachunek w USD i kontrakt 100 jednostek", "STRATEGY P/L HOLD: verified XAUUSD, USD account and 100-unit contract required"],
   ["WYNIK STRATEGII HOLD: wymagane potwierdzone parametry wejścia i wyjścia oraz przypisany swap", "STRATEGY P/L HOLD: confirmed entry/exit geometry and allocated swap required"],
   ["WYNIK STRATEGII: niezweryfikowana zamknięta transza ({error:?})", "STRATEGY P/L: unverified closed tranche ({error:?})"],

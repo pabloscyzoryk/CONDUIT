@@ -305,6 +305,10 @@ pub struct SymbolsList {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawAccount {
+    /// Qualified by the sidecar's already-observed advancing quote clock.
+    /// None for legacy/stale/ambiguous-day samples; never infer from cached q.ts.
+    #[serde(default)]
+    pub observation_broker_day: Option<i64>,
     pub balance: f64,
     pub equity: f64,
     pub margin: f64,

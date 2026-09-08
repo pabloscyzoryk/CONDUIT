@@ -3,6 +3,7 @@ import { Badge, Button, Icon, Segmented, Tooltip, type IconName } from "@/compon
 import { LancuchyPanel, WyborLancucha } from "@/components/panels/LancuchyPanel";
 import { DymekLotAuto, useEkspozycjaAuto } from "@/components/panels/LotAuto";
 import { CofnijPonow } from "./CofnijPonow";
+import { RealDrawdown } from "./RealDrawdown";
 import { CommandMenu, type SettingsRequest } from "./CommandMenu";
 import { quoteUtcTime } from "@/lib/clock";
 import { WiekKwotowania, ZdrowieMT5, stanKwotowania, useTykanie } from "./PulsRynku";
@@ -443,7 +444,7 @@ function StatStrip() {
       v: `${stats.pnlSession >= 0 ? "+" : "−"}${money(Math.abs(stats.pnlSession), cur)}`,
       tone: toneOf(stats.pnlSession),
     },
-    { k: tt("stats.drawdown"), v: money(stats.drawdownNow, cur), tone: stats.drawdownNow > 0 ? ("down" as const) : ("" as const) },
+    { k: tt("stats.drawdown"), v: money(stats.drawdownNow, cur), tone: stats.drawdownNow > 0 ? ("down" as const) : ("" as const), extra: <RealDrawdown day={stats.realDrawdownDay} currency={cur} /> },
     { k: tt("stats.maxDdToday"), v: money(stats.maxDdToday, cur), tone: "" as const },
     /* Liczniki mówią o CAŁYM rachunku — bo tyle realnie na nim wisi — a gdy
        coś nie należy do bota, etykieta od razu to rozbija. Wcześniej stało tu
@@ -508,6 +509,7 @@ function StatStrip() {
             {"tip" in it ? it.tip : null}
           </span>
           <span className={`stat__v num ${it.tone}`}>{it.v}</span>
+          {"extra" in it ? it.extra : null}
         </div>
       ))}
       <div className="stat stat--mode">

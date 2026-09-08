@@ -621,6 +621,9 @@ pub struct Stats {
     pub max_dd_balance_today: f64,
     pub peak_balance_today: f64,
     pub day_start_equity: f64,
+    /// Read-only RDD observations. Legacy snapshots have no qualified day minimum.
+    #[serde(default)]
+    pub real_drawdown_day: RealDrawdownDay,
     /// Numer doby w czasie SERWERA BROKERA (dni od epoki), do której odnoszą
     /// się pola `*_today`.
     ///
@@ -663,6 +666,7 @@ impl Stats {
             max_dd_today: 0.0,
             peak_equity_today: balance,
             day_start_equity: balance,
+            real_drawdown_day: RealDrawdownDay::default(),
             day_key: 0,
             drawdown_balance_now: 0.0,
             max_dd_balance_today: 0.0,
@@ -702,6 +706,8 @@ impl Stats {
         }
         self.day_key = doba;
         self.day_start_equity = equity;
+        // A different account's start/minimum cannot describe this account's day.
+        self.real_drawdown_day = RealDrawdownDay::default();
         self.peak_equity_today = equity;
         self.max_dd_today = 0.0;
         self.drawdown_now = 0.0;
@@ -711,6 +717,46 @@ impl Stats {
         self.pnl_session = 0.0;
         self.equity_curve = vec![CurvePoint { t: now, v: equity }];
         true
+    }
+}
+
+/// RDD uses the day's initial equity, never its peak. The caller supplies a
+/// broker-wall day number (no additional UTC offset). Missing anchors stay
+/// missing for the rest of that day: a midday connection cannot recreate them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RealDrawdownDay {
+    pub day: Option<i64>,
+    pub start_equity: Option<f64>,
+    pub min_equity: Option<f64>,
+    /// A saved previous day is not evidence that this process observed rollover.
+    #[serde(skip)]
+    pub observing: bool,
+}
+
+impl RealDrawdownDay {
+    /// Simulation/reset with a known initial deposit; live must use observe().
+    pub fn known_start(day: i64, equity: f64) -> Self {
+        let value = equity.is_finite().then_some(equity);
+        Self { day: Some(day), start_equity: value, min_equity: value, observing: true }
+    }
+
+    pub fn observe(&mut self, day: i64, equity: f64) {
+        if !equity.is_finite() || day <= 0 { return; }
+        if self.day != Some(day) {
+            let crossed_observed_day = self.observing && self.day.is_some_and(|previous| day > previous);
+            *self = if crossed_observed_day {
+                Self::known_start(day, equity)
+            } else {
+                Self { day: Some(day), ..Self::default() }
+            };
+        }
+        self.observing = true;
+        if let (Some(start), Some(minimum)) = (self.start_equity, self.min_equity) {
+            if start.is_finite() && minimum.is_finite() {
+                self.min_equity = Some(minimum.min(equity).min(start));
+            }
+        }
     }
 }
 
@@ -2262,6 +2308,44 @@ mod testy_kotwic_konta {
     use super::*;
 
     #[test]
+    fn rdd_tracks_trough_not_peak_and_restart_preserves_it() {
+        let mut s = Stats::new(200.0, 1_000);
+        s.real_drawdown_day = RealDrawdownDay::known_start(100, 200.0);
+        for equity in [250.0, 180.0, 230.0] { s.real_drawdown_day.observe(100, equity); }
+        assert_eq!(s.real_drawdown_day.start_equity, Some(200.0));
+        assert_eq!(s.real_drawdown_day.min_equity, Some(180.0));
+        let text = serde_json::to_string(&s).unwrap();
+        let mut restored: Stats = serde_json::from_str(&text).unwrap();
+        restored.real_drawdown_day.observe(100, 260.0);
+        assert_eq!(restored.real_drawdown_day.min_equity, Some(180.0), "recovery must retain today's trough");
+        restored.real_drawdown_day.observe(101, 230.0);
+        assert_eq!(restored.real_drawdown_day.start_equity, Some(230.0));
+        assert_eq!(restored.real_drawdown_day.min_equity, Some(230.0));
+        restored.real_drawdown_day.observe(101, -10.0);
+        assert_eq!(restored.real_drawdown_day.min_equity, Some(-10.0), "a blown account can exceed 100% RDD");
+    }
+
+    #[test]
+    fn rdd_midday_legacy_and_offline_rollover_have_no_invented_start() {
+        let s = Stats::new(200.0, 1_000);
+        let mut legacy = serde_json::to_value(&s).unwrap();
+        legacy.as_object_mut().unwrap().remove("realDrawdownDay");
+        let mut restored: Stats = serde_json::from_value(legacy).unwrap();
+        restored.real_drawdown_day.observe(100, 150.0);
+        restored.real_drawdown_day.observe(100, 140.0);
+        assert_eq!(restored.real_drawdown_day.start_equity, None);
+        assert_eq!(restored.real_drawdown_day.min_equity, None);
+        let saved = serde_json::to_string(&RealDrawdownDay::known_start(100, 200.0)).unwrap();
+        let mut yesterday: RealDrawdownDay = serde_json::from_str(&saved).unwrap();
+        yesterday.observe(101, 130.0);
+        assert_eq!(yesterday.start_equity, None, "offline day change is not an observed rollover");
+        yesterday.observe(102, 160.0);
+        assert_eq!(yesterday.start_equity, Some(160.0));
+        yesterday.observe(102, f64::NAN);
+        assert_eq!(yesterday.min_equity, Some(160.0));
+    }
+
+    #[test]
     fn zmiana_konta_zeruje_kotwice_dnia_i_sesji() {
         let mut s = Stats::new(200.0, 1_000);
         // pierwsza publikacja: Vantage — przypisanie bez zerowania
@@ -2269,6 +2353,8 @@ mod testy_kotwic_konta {
         s.session_start_equity = 406.56;
         s.day_start_equity = 406.56;
         s.peak_equity_today = 420.0;
+        s.real_drawdown_day = RealDrawdownDay::known_start(100, 406.56);
+        s.real_drawdown_day.observe(100, 300.0);
         s.max_dd_today = 55.0;
         s.pnl_session = -107.80;
         s.pnl_today = -3.0;
@@ -2286,6 +2372,7 @@ mod testy_kotwic_konta {
         assert_eq!(s.pnl_session, 0.0);
         assert_eq!(s.pnl_today, 0.0);
         assert_eq!(s.day_key, 102);
+        assert_eq!(s.real_drawdown_day.min_equity, None, "another account never inherits RDD");
         assert_eq!(
             s.equity_curve.len(),
             1,

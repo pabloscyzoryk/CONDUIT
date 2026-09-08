@@ -442,6 +442,20 @@
   justify-content: center;
 }
 
+.stat__rdd {
+  color: var(--text-muted);
+  font-size: var(--fs-3xs);
+  white-space: nowrap;
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.stat__rdd:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ---------------- HALT ---------------- */
 .halt {
   display: flex;

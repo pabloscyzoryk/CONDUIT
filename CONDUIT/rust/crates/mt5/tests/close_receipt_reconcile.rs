@@ -684,6 +684,11 @@ fn open_timeout_actual_fill_is_not_retried_and_exact_snapshot_clears_only_the_ho
 fn explicit_broker_rejection_is_not_ambiguous_execution_or_permanent_halt() {
     let mut f=Fixture::new(true,0.08); f.call("probe_reject_next_trade",json!({}));
     assert!(f.bridge.close_position(ID,CloseReason::RiskFree).is_err());
+    let evidence = f.bridge.operation_evidence().unwrap();
+    assert_eq!(evidence.outcome, conduit_mt5::operation_evidence::Outcome::RemoteRefusal);
+    assert_eq!(evidence.attempts.len(), 1);
+    assert_eq!(evidence.attempts[0].retcode, Some(10006));
+    assert_eq!(evidence.attempts[0].status, "remote_error");
     assert!(!f.bridge.close_receipts_pending()); near(f.bridge.positions()[0].volume,0.08);
     f.bridge.close_partial(ID,0.02,CloseReason::Partial).unwrap(); f.emit();
     assert_eq!(f.bridge.drain_closed().len(),1); assert!(!f.bridge.close_receipts_pending());

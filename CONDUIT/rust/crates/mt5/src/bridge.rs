@@ -174,6 +174,16 @@ impl StopsMismatch {
     }
 }
 
+/// A confirmed account read, independent of the throttled UI and tick replay.
+#[derive(Debug, Clone)]
+pub struct AccountObservation {
+    pub broker_day: Option<i64>,
+    pub equity: f64,
+    pub login: i64,
+    pub server: String,
+    pub trade_mode: u8,
+}
+
 pub struct Mt5Bridge {
     tr: Transport,
     sym: SymbolInfo,
@@ -185,6 +195,8 @@ pub struct Mt5Bridge {
 
     q: Quote,
     acc: Account,
+    collect_account_observations: bool,
+    account_observations: Vec<AccountObservation>,
     /// Kto jest właścicielem rachunku i u kogo on leży. Odświeżane razem
     /// z saldem, bo przychodzi tą samą odpowiedzią.
     ident: crate::proto::AccountIdent,
@@ -210,6 +222,8 @@ pub struct Mt5Bridge {
     /// transportu.  Rozróżnia timeout/malformed od jednoznacznej odmowy
     /// brokera; tylko pierwszy przypadek wolno później rekoncyliować stanem.
     last_trade_outcome_unknown: bool,
+    operation_sequence: u64,
+    operation_evidence: Option<crate::operation_evidence::OperationEvidence>,
 
     last_state: Instant,
     state_interval: Duration,
@@ -362,6 +376,8 @@ impl Mt5Bridge {
                 credit: 0.0,
             },
             ident: crate::proto::AccountIdent::default(),
+            account_observations: Vec::new(),
+            collect_account_observations: false,
             positions: Vec::new(),
             pendings: Vec::new(),
             closed: Vec::new(),
@@ -372,6 +388,8 @@ impl Mt5Bridge {
             receipts: ReceiptJournal::default(),
             runtime_entry_hold: None,
             last_trade_outcome_unknown: false,
+            operation_sequence: 0,
+            operation_evidence: None,
             last_state: Instant::now() - Duration::from_secs(3600),
             state_interval: Duration::from_millis(500),
             max_retries: 3,
@@ -540,7 +558,24 @@ impl Mt5Bridge {
             leverage: a.leverage,
             trade_mode: a.trade_mode,
         };
+        if self.collect_account_observations {
+            self.account_observations.push(AccountObservation {
+                broker_day: a.observation_broker_day, equity: self.acc.equity,
+                login: self.ident.login, server: self.ident.server.clone(), trade_mode: self.ident.trade_mode,
+            });
+        }
         Ok(())
+    }
+
+    /// Consume each confirmed sample once. This never refreshes the terminal.
+    pub fn drain_account_observations(&mut self) -> Vec<AccountObservation> {
+        std::mem::take(&mut self.account_observations)
+    }
+
+    /// Reporting consumers opt in only when they regularly drain the queue.
+    /// Other bridge clients retain no per-read history.
+    pub fn enable_account_observations(&mut self) {
+        self.collect_account_observations = true;
     }
 
     /// Tożsamość rachunku (numer, serwer, broker, demo/real).
@@ -649,6 +684,7 @@ impl Mt5Bridge {
     }
 
     fn remember_unknown_open(&mut self, r: &OrderReq, machine_comment: &str, reason: String) {
+        self.operation_outcome(crate::operation_evidence::Outcome::ConfirmationPending);
         if !self.tr.config().close_receipt_reconcile { return; }
         let clean = self.receipts.fault.is_none()
             && self.receipts.unknown_opens.is_empty()
@@ -756,6 +792,11 @@ impl Mt5Bridge {
     fn receipt_entry_gate(&mut self) -> BResult<()> {
         if let Some(reason)=self.legacy_strategy_scope_issue() { self.hold_new_entries(reason); }
         if self.close_receipts_pending() {
+            self.operation_outcome(if self.receipt_barrier() == ReceiptBarrier::Temporary {
+                crate::operation_evidence::Outcome::LocalReceiptPending
+            } else {
+                crate::operation_evidence::Outcome::LocalReceiptReview
+            });
             return Err(BrokerError::Rejected);
         }
         Ok(())
@@ -1548,10 +1589,28 @@ impl Mt5Bridge {
     //  WYSYŁKA
     // ============================================================
 
+    pub fn operation_evidence(&self) -> Option<&crate::operation_evidence::OperationEvidence> {
+        self.operation_evidence.as_ref()
+    }
+
+    fn begin_operation(&mut self, operation: &'static str) {
+        self.operation_sequence = self.operation_sequence.wrapping_add(1);
+        self.operation_evidence = Some(crate::operation_evidence::OperationEvidence::new(self.operation_sequence, operation));
+    }
+
+    fn operation_outcome(&mut self, outcome: crate::operation_evidence::Outcome) {
+        if let Some(e) = self.operation_evidence.as_mut() { e.outcome = outcome; }
+    }
+
+    fn operation_response(&mut self, status: &'static str, value: Option<&Value>, retcode: Option<i64>, outcome: crate::operation_evidence::Outcome) {
+        if let Some(e) = self.operation_evidence.as_mut() { e.response(status, value, retcode, outcome); }
+    }
+
     fn decode_trade_ack(&mut self, cmd: &'static str, value: Value) -> BResult<crate::proto::SendResult> {
         match serde_json::from_value(value) {
             Ok(result)=>Ok(result),
             Err(e)=>{
+                self.operation_outcome(crate::operation_evidence::Outcome::ConfirmationPending);
                 self.last_trade_outcome_unknown = true;
                 if self.tr.config().close_receipt_reconcile {
                     self.unknown_sends+=1;
@@ -1571,12 +1630,18 @@ impl Mt5Bridge {
     /// zlecenie doszło do serwera. Ponowienie mogłoby otworzyć drugą pozycję.
     /// Zamiast tego wymuszamy odświeżenie stanu — rzeczywistość rozstrzygnie.
     fn trade_call(&mut self, cmd: &'static str, args: Value) -> BResult<Value> {
+        use crate::operation_evidence::Outcome;
         self.last_trade_outcome_unknown = false;
         let mut tries = 0u32;
         loop {
+            if let Some(e) = self.operation_evidence.as_mut() { e.dispatched(cmd, &args); }
             match self.tr.call(cmd, args.clone()) {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    self.operation_response("response_received", Some(&v), v.get("retcode").and_then(Value::as_i64), Outcome::Acknowledged);
+                    return Ok(v);
+                }
                 Err(CallError::Broker(e)) => {
+                    self.operation_response("remote_error", None, Some(e.code as i64), Outcome::RemoteRefusal);
                     if errors::is_no_op(e.code) {
                         return Ok(Value::Null);
                     }
@@ -1605,6 +1670,7 @@ impl Mt5Bridge {
                     return Err(errors::classify(e.code));
                 }
                 Err(CallError::Timeout(d)) => {
+                    self.operation_response("timeout", None, None, Outcome::TransportUnknown);
                     self.last_trade_outcome_unknown = true;
                     self.unknown_sends += 1;
                     self.last_state = Instant::now() - self.state_interval;
@@ -1620,6 +1686,7 @@ impl Mt5Bridge {
                     return Err(BrokerError::Rejected);
                 }
                 Err(e) => {
+                    self.operation_response("transport_error", None, None, Outcome::TransportUnknown);
                     self.last_trade_outcome_unknown = true;
                     self.send_failures += 1;
                     if self.tr.config().close_receipt_reconcile
@@ -1851,6 +1918,7 @@ impl Broker for Mt5Bridge {
     }
 
     fn open_market(&mut self, mut r: OrderReq) -> BResult<Ticket> {
+        self.begin_operation("open_market");
         self.receipt_entry_gate()?;
         r.sl = r.sl.map(|p| self.sym.round_price(p));
         r.tp = r.tp.map(|p| self.sym.round_price(p));
@@ -1936,6 +2004,7 @@ impl Broker for Mt5Bridge {
     }
 
     fn place_pending(&mut self, mut r: PendingReq) -> BResult<Ticket> {
+        self.begin_operation("place_pending");
         self.receipt_entry_gate()?;
         // Validation, the wire request and the immediate cache must describe
         // the same executable prices, including before the next state poll.
@@ -2013,6 +2082,7 @@ impl Broker for Mt5Bridge {
     }
 
     fn modify_position(&mut self, t: Ticket, sl: Option<Px>, tp: Option<Px>) -> BResult<()> {
+        self.begin_operation("modify_position");
         let sl = sl.map(|p| self.sym.round_price(p));
         let tp = tp.map(|p| self.sym.round_price(p));
         let side = self
@@ -2042,6 +2112,7 @@ impl Broker for Mt5Bridge {
         sl: Option<Px>,
         tp: Option<Px>,
     ) -> BResult<()> {
+        self.begin_operation("modify_pending");
         let price = self.sym.round_price(price);
         let sl = sl.map(|p| self.sym.round_price(p));
         let tp = tp.map(|p| self.sym.round_price(p));
@@ -2064,6 +2135,7 @@ impl Broker for Mt5Bridge {
     }
 
     fn close_position(&mut self, t: Ticket, reason: CloseReason) -> BResult<f64> {
+        self.begin_operation("close_position");
         self.remember_live_positions();
         if !self.positions.iter().any(|p| p.ticket == t) {
             return Err(BrokerError::NoSuchTicket);
@@ -2085,6 +2157,7 @@ impl Broker for Mt5Bridge {
     }
 
     fn close_partial(&mut self, t: Ticket, volume: f64, reason: CloseReason) -> BResult<f64> {
+        self.begin_operation("close_partial");
         self.remember_live_positions();
         let cur = self
             .positions
@@ -2117,6 +2190,7 @@ impl Broker for Mt5Bridge {
     }
 
     fn cancel_pending(&mut self, t: Ticket) -> BResult<()> {
+        self.begin_operation("cancel_pending");
         if !self.pendings.iter().any(|o| o.ticket == t) {
             return Err(BrokerError::NoSuchTicket);
         }

@@ -36,6 +36,23 @@ const { ENGINE_TEMPLATES } = load('@/i18n/engineTemplates');
 const { presentEngineText } = load('@/i18n/enginePresentation');
 const { tSilnik } = load('@/i18n/silnik');
 
+test('execution confirmation messages distinguish temporary waiting from review in PL/EN', () => {
+  for (const [pl, en] of [
+    ['Oczekiwanie na potwierdzenie wykonania', 'Waiting for execution confirmation'],
+    ['Potwierdzenia są w trakcie uzgadniania; nowe wejścia czekają.', 'Execution confirmations are being reconciled; new entries are waiting.'],
+    ['Potwierdzenia wymagają sprawdzenia; nowe wejścia pozostają zablokowane.', 'Execution confirmations require review; new entries remain blocked.'],
+    ['Kontrolna odbudowa połączenia po ciszy kwotowań', 'Connection recovery check after quote silence'],
+    ['Terminal potwierdził brak połączenia z brokerem — odbudowuję połączenie.', 'The terminal confirmed that the broker connection is down — reconnecting.'],
+    ['Kontrola połączenia sidecara nie powiodła się: timeout 10060', 'The sidecar connection check failed: timeout 10060'],
+    ['Brak rozstrzygającego potwierdzenia operacji; wymagane uzgodnienie stanu.', 'No conclusive operation confirmation; state reconciliation is required.'],
+    ['Nieudane operacje handlowe: 3', 'Unsuccessful trading operations: 3'],
+    ['operacja nie uzyskała potwierdzenia wykonania', 'the operation has no execution confirmation'],
+  ]) {
+    assert.equal(presentEngineText(pl, 'en'), en);
+    assert.equal(presentEngineText(en, 'pl'), pl);
+  }
+});
+
 test('PL ↔ EN changes every dictionary entry without exposing a raw key', () => {
   for (const language of ['pl', 'en', 'pl', 'en']) {
     i18n.setLanguage(language);

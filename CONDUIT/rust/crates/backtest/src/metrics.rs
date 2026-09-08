@@ -12,8 +12,57 @@ pub struct DayStat {
     pub end_equity: f64,
     pub profit: f64,
     pub max_dd: f64,
+    /// Minimum of observed simulation steps, including the day's initial equity.
+    /// Old result files do not contain this measurement; no curve-based fallback.
+    #[serde(default)]
+    pub min_equity: Option<f64>,
+    #[serde(default)]
+    pub real_dd: Option<f64>,
+    #[serde(default)]
+    pub real_dd_pct: Option<f64>,
+    #[serde(default)]
+    pub equity_observation_basis: Option<String>,
     pub trades: u32,
     pub signals: u32,
+}
+
+/// An ordered stream of real valuations, independent of saved chart resolution.
+#[derive(Debug, Clone)]
+pub(crate) struct EquityDrawdown {
+    pub peak: f64,
+    pub minimum: f64,
+    pub max_abs: f64,
+    pub max_pct: f64,
+}
+
+impl EquityDrawdown {
+    pub fn new(equity: f64) -> Self {
+        Self { peak: equity, minimum: equity, max_abs: 0.0, max_pct: 0.0 }
+    }
+    pub fn observe(&mut self, equity: f64) {
+        if !equity.is_finite() { return; }
+        self.minimum = self.minimum.min(equity);
+        self.peak = self.peak.max(equity);
+        let amount = (self.peak - equity).max(0.0);
+        self.max_abs = self.max_abs.max(amount);
+        if self.peak > 0.0 { self.max_pct = self.max_pct.max(amount / self.peak * 100.0); }
+    }
+    pub fn reset_account_peak(&mut self, equity: f64) {
+        self.peak = equity;
+        self.observe(equity);
+    }
+}
+
+impl DayStat {
+    /// Reporting only. Call again after a reporting-basis transformation (E−C).
+    pub fn qualify_real_drawdown(&mut self) {
+        self.real_dd = self.min_equity.filter(|m| m.is_finite())
+            .filter(|_| self.start_equity.is_finite())
+            .map(|m| (self.start_equity - m).max(0.0))
+            .filter(|v| v.is_finite());
+        self.real_dd_pct = self.real_dd.filter(|_| self.start_equity > 0.0)
+            .map(|v| v / self.start_equity * 100.0).filter(|v| v.is_finite());
+    }
 }
 
 /// Retrospective concentration diagnostics, never a rule selecting future days.
@@ -116,6 +165,9 @@ impl Metrics {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Metrics {
+    /// None identifies historical chart-sampled DD. It does not certify a zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_dd_observation_basis: Option<String>,
     // --- wynik ---
     pub start_balance: f64,
     pub end_balance: f64,
@@ -735,6 +787,7 @@ mod testy_zgodnosci {
                 day: day as i64, date: format!("synthetic-day-{day}"),
                 start_equity: 300.0, end_equity: 300.0 + profit,
                 profit, max_dd: 0.0, trades, signals: 1,
+                min_equity: None, real_dd: None, real_dd_pct: None, equity_observation_basis: None,
             }).collect();
         let metrics = compute(300.0, &[], &daily, &[], 280.0, false, 0.0);
         assert_eq!(metrics.win_days_pct, 100.0, "legacy metric is kept explicit");
@@ -750,7 +803,43 @@ mod testy_zgodnosci {
             day: day as i64, date: format!("day-{day}"), start_equity: 600.0,
             end_equity: 600.0 + profit, profit: *profit, max_dd: 0.0,
             trades: 0, signals: 0,
+            min_equity: None, real_dd: None, real_dd_pct: None, equity_observation_basis: None,
         }).collect()
+    }
+
+    #[test]
+    fn rdd_daily_contract_and_legacy_unknown() {
+        let mut day = concentration_days(&[30.0]).remove(0);
+        day.start_equity = 200.0; day.end_equity = 230.0;
+        day.min_equity = Some(180.0); day.max_dd = 70.0;
+        day.qualify_real_drawdown();
+        assert_eq!(day.real_dd, Some(20.0));
+        assert_eq!(day.real_dd_pct, Some(10.0));
+        assert_eq!(day.max_dd, 70.0);
+        day.min_equity = Some(220.0); day.qualify_real_drawdown();
+        assert_eq!(day.real_dd, Some(0.0));
+        day.start_equity = 0.0; day.min_equity = Some(-20.0); day.qualify_real_drawdown();
+        assert_eq!(day.real_dd, Some(20.0)); assert_eq!(day.real_dd_pct, None);
+        let mut json = serde_json::to_value(&day).unwrap();
+        for key in ["min_equity", "real_dd", "real_dd_pct"] { json.as_object_mut().unwrap().remove(key); }
+        let mut legacy: DayStat = serde_json::from_value(json).unwrap();
+        legacy.qualify_real_drawdown();
+        assert_eq!(legacy.min_equity, None); assert_eq!(legacy.real_dd, None); assert_eq!(legacy.real_dd_pct, None);
+        day.min_equity = Some(f64::NAN); day.qualify_real_drawdown();
+        assert_eq!(day.real_dd, None); assert_eq!(day.real_dd_pct, None);
+    }
+
+    #[test]
+    fn observed_dd_keeps_ordered_peaks_troughs_and_independent_account_resets() {
+        let mut dd = EquityDrawdown::new(200.0);
+        for equity in [250.0,180.0,230.0] { dd.observe(equity); }
+        assert_eq!(dd.minimum,180.0); assert_eq!(dd.max_abs,70.0);
+        assert!((dd.max_pct-28.0).abs()<1e-12);
+        assert!(dd.max_abs >= 200.0-dd.minimum);
+        dd.reset_account_peak(200.0);
+        dd.observe(180.0);
+        assert_eq!(dd.max_abs,70.0,"a new independent deposit is not a loss from yesterday's peak");
+        assert!((dd.max_pct-28.0).abs()<1e-12);
     }
 
     #[test]

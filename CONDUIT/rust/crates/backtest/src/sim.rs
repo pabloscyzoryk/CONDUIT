@@ -183,6 +183,9 @@ pub struct SimBroker {
     pub market_instead_of_limit: u64,
     /// najniższe equity, jakie kiedykolwiek wystąpiło (kontrola wyzerowania)
     pub min_equity: f64,
+    /// Read-only account-control valuation before stop-out / engine management.
+    /// Consumed by the runner; never used by execution or risk decisions.
+    account_control_equity: Option<f64>,
     pub blown: bool,
     /// TEN SAM TICK PRZEBIŁ SL **I** TP tej samej pozycji (Pakiet E4).
     ///
@@ -291,6 +294,7 @@ impl SimBroker {
             filled_pendings: 0,
             market_instead_of_limit: 0,
             min_equity: balance,
+            account_control_equity: None,
             blown: false,
             sl_tp_same_tick: 0,
             spread_paid_usd: 0.0,
@@ -607,6 +611,11 @@ impl SimBroker {
         let q = self.norm_quote(q);
         self.nalicz_swap(q.ts);
         self.q = q;
+        self.account_control_equity = Some(self.equity());
+    }
+
+    pub(crate) fn take_account_control_equity(&mut self) -> Option<f64> {
+        self.account_control_equity.take()
     }
 
     /// Execute one physical source-row at most once. Re-entering bookkeeping
@@ -804,6 +813,7 @@ impl SimBroker {
         if eq < self.min_equity {
             self.min_equity = eq;
         }
+        self.account_control_equity = Some(eq);
         {
             let m = self.used_margin();
             if m > 0.0 {

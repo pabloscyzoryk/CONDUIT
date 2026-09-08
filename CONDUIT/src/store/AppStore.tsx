@@ -9,6 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { observeDemoEquity } from "@/lib/realDrawdown";
 import type {
   Basket,
   ChannelBinding,
@@ -669,6 +670,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     maxDdToday: 0,
     peakEquityToday: START_BALANCE,
     dayStartEquity: START_BALANCE,
+    realDrawdownDay: observeDemoEquity(null, START_BALANCE, Date.now()),
     messages: 0,
     signals: 0,
     equityCurve: [{ t: Date.now(), v: START_BALANCE }],
@@ -1171,6 +1173,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         drawdownNow: dd,
         maxDdToday: Math.max(prev.maxDdToday, dd),
         peakEquityToday: peak,
+        realDrawdownDay: observeDemoEquity(prev.realDrawdownDay, equity, t),
         equityCurve: curve,
       };
       next.marginLevel = next.margin > 0 ? (equity / next.margin) * 100 : 0;

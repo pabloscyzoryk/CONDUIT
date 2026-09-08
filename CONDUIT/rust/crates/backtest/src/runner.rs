@@ -6,7 +6,7 @@
 
 use crate::data::{ReplayMessage, TickData};
 use crate::journal_dump::JournalDump;
-use crate::metrics::{compute, DayStat, Metrics};
+use crate::metrics::{compute, DayStat, EquityDrawdown, Metrics};
 use crate::sim::SimBroker;
 use conduit_core::broker::Broker;
 use conduit_core::engine::{Engine, IncomingMessage, SrWarmupBar};
@@ -621,6 +621,18 @@ fn approximation_info(stride: usize, raw_rows: usize, observed_rows: usize) -> O
 }
 
 /// Uruchamia pełny przebieg.
+fn observe_equity_step(broker: &mut SimBroker, all: &mut EquityDrawdown, day: &mut EquityDrawdown, credit: f64) {
+    // The broker's own account-control point can precede stop-out/management.
+    // Both are actual valuations; no interpolation or chart reconstruction.
+    if let Some(equity) = broker.take_account_control_equity() {
+        all.observe(equity - credit);
+        day.observe(equity);
+    }
+    let equity = broker.equity();
+    all.observe(equity - credit);
+    day.observe(equity);
+}
+
 pub fn run(ticks: &TickData, messages: &[ReplayMessage], cfg: &RunConfig) -> RunResult {
     run_with_progress(ticks, messages, cfg, None)
 }
@@ -904,8 +916,8 @@ pub fn run_with_progress(
 
     let mut cur_day = i64::MIN;
     let mut day_start_eq = cfg.start_balance;
-    let mut day_peak_eq = cfg.start_balance;
-    let mut day_dd: f64 = 0.0;
+    let mut all_equity_dd = EquityDrawdown::new(broker.equity() - reporting_credit);
+    let mut day_equity_dd = EquityDrawdown::new(broker.equity());
     let mut day_trades = 0u32;
     let mut day_signals = 0u32;
     let mut last_curve_ts = 0i64;
@@ -997,6 +1009,7 @@ pub fn run_with_progress(
                 } else {
                     broker.on_tape_quote(q, i);
                 }
+                observe_equity_step(&mut broker, &mut all_equity_dd, &mut day_equity_dd, reporting_credit);
             }
             if cur_day != i64::MIN {
                 daily.push(DayStat {
@@ -1005,7 +1018,13 @@ pub fn run_with_progress(
                     start_equity: day_start_eq,
                     end_equity: broker.equity(),
                     profit: broker.equity() - day_start_eq,
-                    max_dd: day_dd,
+                    max_dd: day_equity_dd.max_abs,
+                    // Day-end equity already includes the rollover valuation
+                    // above. Keep the existing day's accounting boundary.
+                    min_equity: Some(day_equity_dd.minimum.min(broker.equity())),
+                    real_dd: None,
+                    real_dd_pct: None,
+                    equity_observation_basis: None,
                     trades: day_trades,
                     signals: day_signals,
                 });
@@ -1040,6 +1059,11 @@ pub fn run_with_progress(
                 } else {
                     broker.on_tape_quote(q, i);
                 }
+                observe_equity_step(&mut broker, &mut all_equity_dd, &mut day_equity_dd, reporting_credit);
+                if let Some(closed_day) = daily.last_mut() {
+                    closed_day.min_equity = Some(day_equity_dd.minimum);
+                    closed_day.max_dd = day_equity_dd.max_abs;
+                }
                 // D6: EODFLAT MUSI ZOSTAĆ W SILNIKU, KTÓRY GO ZLECIŁ.
                 //
                 // `close_everything` wkłada zamknięcia do kolejki brokera,
@@ -1059,6 +1083,7 @@ pub fn run_with_progress(
                     broker.balance = cfg.start_balance;
                     // bez tego jeden wyzerowany dzień blokowałby resztę przebiegu
                     broker.blown = false;
+                    all_equity_dd.reset_account_peak(broker.equity() - reporting_credit);
                 }
                 // Resetujemy KONTO, nie WIEDZĘ O RYNKU. Historia ceny jest
                 // własnością rynku, a nie salda: bot na żywo nie zapomina
@@ -1226,8 +1251,7 @@ pub fn run_with_progress(
                 }
             }
             day_start_eq = broker.equity();
-            day_peak_eq = day_start_eq;
-            day_dd = 0.0;
+            day_equity_dd = EquityDrawdown::new(day_start_eq);
             day_trades = 0;
             day_signals = 0;
             // LICZNIK ODNIESIENIA MUSI WRÓCIĆ RAZEM Z SILNIKIEM.
@@ -1336,6 +1360,7 @@ pub fn run_with_progress(
         if causal_tick_before_messages {
             let hist_przed_tickiem = broker.history.len();
             let (_filled, _closed) = broker.on_tape_quote(q, i);
+            observe_equity_step(&mut broker, &mut all_equity_dd, &mut day_equity_dd, reporting_credit);
             if pojedynczy {
                 zespol.lista[0].engine.on_tick_received(&mut broker, &q, q.ts - cfg.settings.server_tz_offset_ms);
             } else {
@@ -1343,6 +1368,7 @@ pub fn run_with_progress(
                 zespol.kazdy(&mut broker, |e, w| e.on_tick_received(w, &q, q.ts - cfg.settings.server_tz_offset_ms));
             }
             strict_tick_trades = broker.history.len() - hist_przed_tickiem;
+            observe_equity_step(&mut broker, &mut all_equity_dd, &mut day_equity_dd, reporting_credit);
         }
 
         // ---------- wiadomości, których czas już nadszedł ----------
@@ -1483,6 +1509,7 @@ pub fn run_with_progress(
             if let Some(index) = report_engine {
                 source_funnel.collect(index, &zespol.lista[index].engine);
             }
+            observe_equity_step(&mut broker, &mut all_equity_dd, &mut day_equity_dd, reporting_credit);
             let teraz = przyjete_sygnaly(&zespol);
             if teraz > signals_taken_prev {
                 day_signals += (teraz - signals_taken_prev) as u32;
@@ -1515,6 +1542,7 @@ pub fn run_with_progress(
                 broker.history.len()
             };
             let (_filled, _closed) = broker.on_tape_quote(q, i);
+            observe_equity_step(&mut broker, &mut all_equity_dd, &mut day_equity_dd, reporting_credit);
             if pojedynczy {
                 zespol.lista[0].engine.on_tick_received(&mut broker, &q, q.ts - cfg.settings.server_tz_offset_ms);
             } else {
@@ -1526,6 +1554,7 @@ pub fn run_with_progress(
             }
             day_trades += (broker.history.len() - hist_przed) as u32;
         }
+        observe_equity_step(&mut broker, &mut all_equity_dd, &mut day_equity_dd, reporting_credit);
 
         if check_cost_faults {
             let fault=broker.cost_reconciliation_required().map(str::to_owned)
@@ -1624,13 +1653,8 @@ pub fn run_with_progress(
 
         // ---------- krzywa equity ----------
         let eq = broker.equity();
-        if eq > day_peak_eq {
-            day_peak_eq = eq;
-        }
-        let d = day_peak_eq - eq;
-        if d > day_dd {
-            day_dd = d;
-        }
+        all_equity_dd.observe(eq - reporting_credit);
+        day_equity_dd.observe(eq);
         if cfg.curve_interval_ms > 0 && q.ts - last_curve_ts >= cfg.curve_interval_ms {
             last_curve_ts = q.ts;
             equity_curve.push((q.ts, eq));
@@ -1662,6 +1686,7 @@ pub fn run_with_progress(
     }
 
     // domknięcie ostatniej doby
+    observe_equity_step(&mut broker, &mut all_equity_dd, &mut day_equity_dd, reporting_credit);
     if cur_day != i64::MIN {
         daily.push(DayStat {
             day: cur_day,
@@ -1669,7 +1694,11 @@ pub fn run_with_progress(
             start_equity: day_start_eq,
             end_equity: broker.equity(),
             profit: broker.equity() - day_start_eq,
-            max_dd: day_dd,
+            max_dd: day_equity_dd.max_abs,
+            min_equity: Some(day_equity_dd.minimum.min(broker.equity())),
+            real_dd: None,
+            real_dd_pct: None,
+            equity_observation_basis: None,
             trades: day_trades,
             signals: day_signals,
         });
@@ -1698,11 +1727,20 @@ pub fn run_with_progress(
         for day in &mut daily {
             day.start_equity -= reporting_credit;
             day.end_equity -= reporting_credit;
+            day.min_equity = day.min_equity.map(|value| value - reporting_credit);
             // The previously computed E delta and absolute daily DD already
             // cancel a constant credit; do not round/recompute either one.
         }
         broker.min_equity - reporting_credit
     } else { broker.min_equity };
+    let observation_basis = format!("broker_account_control_and_runner_steps_v1; ticks={}; equity={}; accounts={}",
+        if cfg.quick_tick_stride > 1 { "quick_processed_subset" } else { "exact_processed" },
+        if reporting_credit > 0.0 { "own_excluding_constant_credit" } else { "raw_broker" },
+        if cfg.daily_reset { "independent_daily" } else { "continuous" });
+    for day in &mut daily {
+        day.qualify_real_drawdown();
+        day.equity_observation_basis = Some(observation_basis.clone());
+    }
     // w trybie dziennego resetu suma zysków dni jest właściwą miarą wyniku
     let mut metrics = compute(
         cfg.start_balance,
@@ -1759,6 +1797,19 @@ pub fn run_with_progress(
         // „ta miara nie stosuje się do tego trybu".
         metrics.calmar = 0.0;
     }
+    // Replace chart-decimated DD only, after the existing P&L aggregation.
+    metrics.max_dd_observation_basis = Some(observation_basis);
+    metrics.max_dd_abs = all_equity_dd.max_abs;
+    metrics.max_dd_pct = all_equity_dd.max_pct;
+    metrics.max_daily_dd = daily.iter().map(|day| day.max_dd).fold(0.0, f64::max);
+    metrics.min_equity = all_equity_dd.minimum;
+    if reporting_credit > 0.0 { metrics.raw_broker_min_equity = Some(all_equity_dd.minimum + reporting_credit); }
+    metrics.recovery_factor = if metrics.max_dd_abs > 0.0 { metrics.total_profit / metrics.max_dd_abs } else { 0.0 };
+    metrics.calmar = if !cfg.daily_reset && metrics.days >= 180 && metrics.max_dd_pct > 0.0 && cfg.start_balance > 0.0 {
+        let years = metrics.days as f64 / 365.0;
+        let value = ((metrics.end_equity / cfg.start_balance).powf(1.0 / years.max(1e-9)) - 1.0) * 100.0 / metrics.max_dd_pct;
+        if value.is_finite() { value } else { 0.0 }
+    } else { 0.0 };
     metrics.max_open_risk = max_open_risk;
     metrics.max_open_risk_pct = max_open_risk_rel;
     metrics.max_floating_loss = max_floating_loss;
@@ -3046,6 +3097,8 @@ mod tests {
             assert_eq!(m.initial_credit,Some(300.0));
             assert!(result.equity_curve.iter().all(|(_,e)|*e==600.0));
             assert!(result.daily.iter().all(|d|d.profit==0.0&&d.start_equity==600.0&&d.end_equity==600.0));
+            assert!(result.daily.iter().all(|d| d.min_equity == Some(600.0)
+                && d.real_dd == Some(0.0) && d.real_dd_pct == Some(0.0)));
         }
         cfg.daily_reset=false;cfg.settings.kredyt_reczny=0.0;
         let on=run(&ticks,&[],&cfg);cfg.settings.credit_balance_separate=false;
@@ -3054,6 +3107,75 @@ mod tests {
         assert_eq!(on.equity_curve,off.equity_curve);
         assert!(!serde_json::to_string(&off.metrics).unwrap().contains("initial_credit"));
         drop(ticks);std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rdd_runner_sees_hidden_floating_trough_and_uses_own_credit_basis() {
+        let path = std::env::temp_dir().join(format!("conduit_rdd_tick_minimum_{}.bin", std::process::id()));
+        let t0 = 1_800_000_000_000;
+        zapisz_ticki(&path, &[(t0,4005.,4005.2),(t0+1000,4005.,4005.2),
+            (t0+2000,3998.5,3998.7),(t0+3000,3990.,3990.2),
+            (t0+4000,4001.,4001.2)]);
+        let ticks = TickData::open(&path).unwrap();
+        let mut cfg = RunConfig {from:t0,to:t0+5000,start_balance:600.,curve_interval_ms:1,..Default::default()};
+        cfg.settings.msg_clock_offset_ms=Some(0);cfg.settings.server_tz_offset_ms=0;
+        cfg.settings.exec_latency_ms=0;cfg.settings.session_filter=false;
+        cfg.settings.entry_units=1;cfg.settings.market_entry_units=0;cfg.settings.lot_max=0.01;
+        let entry = ReplayMessage {ts:t0+500,telegram_published_ts:None,msg_id:770,
+            reply_to:None,edit_of:None,text:"BUY LIMITS GOLD @ 3999/3998\nTP 4050\nSL 3980".into(),kanal:"Synergy".into()};
+        let dense = run(&ticks, &[entry.clone()], &cfg);
+        assert!(dense.metrics.max_open_positions>0);
+        assert!(dense.trades.is_empty(), "RDD must include floating loss without a closed trade");
+        let trough = dense.equity_curve.iter().map(|(_,e)|*e).fold(600.0, f64::min);
+        assert!(trough < 600.0);
+        assert_eq!(dense.daily[0].min_equity, Some(trough));
+        assert_eq!(dense.daily[0].real_dd, Some(600.0-trough));
+        cfg.curve_interval_ms = 0;
+        let sparse = run(&ticks, &[entry.clone()], &cfg);
+        assert!(sparse.equity_curve.iter().all(|(_,e)|*e>trough), "the final-only curve really misses the dip");
+        assert_eq!(sparse.daily[0].real_dd, dense.daily[0].real_dd);
+        assert_eq!(sparse.daily[0].real_dd_pct, dense.daily[0].real_dd_pct);
+        assert_eq!(sparse.metrics.max_dd_abs,dense.metrics.max_dd_abs);
+        assert_eq!(sparse.metrics.max_dd_pct,dense.metrics.max_dd_pct);
+        assert!(sparse.metrics.max_dd_abs >= sparse.daily[0].real_dd.unwrap());
+        assert!(sparse.metrics.max_dd_pct >= sparse.daily[0].real_dd_pct.unwrap());
+        assert!(sparse.metrics.max_dd_observation_basis.as_deref().unwrap().contains("exact_processed"));
+        assert!(sparse.daily[0].equity_observation_basis.as_deref().unwrap().contains("broker_account_control"));
+        assert_eq!(serde_json::to_value(&sparse.trades).unwrap(),serde_json::to_value(&dense.trades).unwrap());
+        cfg.settings.credit_balance_separate=true;cfg.settings.kredyt_reczny=300.0;
+        let bonus = run(&ticks, &[entry], &cfg);
+        let day = &bonus.daily[0];
+        assert_eq!(day.start_equity,600.0);
+        assert!((day.min_equity.unwrap()-trough).abs()<1e-9);
+        assert!((day.real_dd_pct.unwrap() - (600.0-trough)/600.0*100.0).abs()<1e-9,
+            "the denominator is own starting equity, not raw equity including bonus");
+        assert!(bonus.metrics.max_dd_abs >= day.real_dd.unwrap());
+        assert!((bonus.metrics.max_dd_pct-dense.metrics.max_dd_pct).abs()<1e-9);
+        drop(ticks);std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rdd_observer_consumes_real_broker_control_before_management_and_never_interpolates() {
+        use conduit_core::broker::OrderReq;
+        let mut broker = SimBroker::new(200.0,0.0,0.0);
+        let q = |ts, price| Quote { ts, bid: price, ask: price };
+        let mut all = EquityDrawdown::new(200.0);
+        let mut day = EquityDrawdown::new(200.0);
+        broker.on_quote(q(1_800_000_000_000,4000.0));
+        observe_equity_step(&mut broker,&mut all,&mut day,0.0);
+        let ticket = broker.open_market(OrderReq { side:Side::Buy,volume:0.01,sl:None,tp:None,
+            basket:Some(1),level:0,is_toucher:false,comment:String::new() }).unwrap();
+        for (ts, price) in [(1_800_000_001_000,4050.0),(1_800_000_002_000,3980.0)] {
+            broker.on_quote(q(ts,price));
+            observe_equity_step(&mut broker,&mut all,&mut day,0.0);
+            assert_eq!(broker.take_account_control_equity(),None,"each broker-control sample is consumed once");
+        }
+        broker.close_position(ticket,CloseReason::Manual).unwrap();
+        observe_equity_step(&mut broker,&mut all,&mut day,0.0);
+        assert_eq!(broker.balance,180.0);
+        assert_eq!(day.minimum,180.0); assert_eq!(all.max_abs,70.0);
+        assert!((all.max_pct-28.0).abs()<1e-12);
+        assert_eq!(broker.history.len(),1,"reporting never adds a fill or close");
     }
 
     /// REGRESJA: zegar wiadomości musi być wyrównany do zegara ticków.

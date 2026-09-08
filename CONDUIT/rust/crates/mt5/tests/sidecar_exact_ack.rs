@@ -97,6 +97,9 @@ fn actual_python_ack_then_delayed_receipt_is_owned_and_credited_once_for_both_co
         e.close_everything(&mut f.bridge,TS+1,CloseReason::Manual);
         assert_eq!(e.baskets[0].realized,0.0,"ACK must never book realized PnL");
         assert!(f.bridge.close_receipts_pending());assert!(f.bridge.open_market(req()).is_err());
+        let pending = f.bridge.operation_evidence().unwrap();
+        assert_eq!(pending.outcome, conduit_mt5::operation_evidence::Outcome::LocalReceiptPending);
+        assert!(pending.attempts.is_empty(), "local deferred entry never reaches transport");
         f.emit();assert!(f.bridge.close_receipts_pending(),"decoded is not owner-consumed");
         e.on_tick(&mut f.bridge,&q);
         assert_eq!(e.baskets[0].realized,9.7,"confirmed price movement plus swap is booked once for strategy; broker gross remains 7");
@@ -109,12 +112,20 @@ fn actual_python_ack_then_delayed_receipt_is_owned_and_credited_once_for_both_co
 fn actual_python_unknown_open_is_not_retried_and_exact_snapshot_recovers_hold(){
     let mut f=Fixture::new("unknown_open");
     assert!(f.bridge.open_market(req()).is_err());
+    let ack = f.bridge.operation_evidence().unwrap();
+    assert_eq!(ack.outcome, conduit_mt5::operation_evidence::Outcome::ConfirmationPending);
+    assert_eq!(ack.attempts.len(), 1);
+    assert_eq!(ack.attempts[0].retcode, Some(10009));
+    assert!(ack.attempts[0].acknowledgement.get("position").is_some());
     assert_eq!(f.bridge.receipt_barrier(),ReceiptBarrier::RequiresReview);
     assert!(f.bridge.positions().is_empty(),"unproven ACK cannot invent owned position");
     let unknown_after_dispatch=f.bridge.unknown_sends;
     assert!(f.bridge.open_market(req()).is_err());
     assert_eq!(f.bridge.unknown_sends,unknown_after_dispatch,
         "receipt gate must reject locally, never dispatch the OPEN twice");
+    assert_eq!(f.bridge.operation_evidence().unwrap().outcome,
+        conduit_mt5::operation_evidence::Outcome::LocalReceiptReview);
+    assert!(f.bridge.operation_evidence().unwrap().attempts.is_empty());
 
     // The fixture exposes, on the next authoritative positions snapshot, the
     // order that MT5 really accepted despite the incomplete/Rejected ACK.

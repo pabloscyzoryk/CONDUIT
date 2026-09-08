@@ -112,5 +112,11 @@
     "category": "literal_credential",
     "line_sha256": "e995ec5548876dcea33b7c2f4e9fbca78a9e3d67ac9c60b3b90ec5882be2bdba",
     "reason": "Synthetic negative fixture for refusing nonempty secret examples; temporary repository only."
+  },
+  {
+    "path": "CONDUIT/rust/crates/mt5/src/operation_evidence.rs",
+    "category": "literal_credential",
+    "line_sha256": "e295042e763771a4d0c7c772bdd801e32f3c3397265c9e6518f6dca709b77630",
+    "reason": "Synthetic SECRET_SENTINEL in a Rust cfg(test) negative fixture asserting operational evidence excludes credentials, account pins and comments."
   }
 ]

@@ -882,9 +882,24 @@ struct Odmowa {
     price: Option<f64>,
     sl: Option<f64>,
     tp: Option<f64>,
+    evidence: Option<conduit_mt5::operation_evidence::OperationEvidence>,
 }
 
 impl Odmowa {
+    fn deferred(&self) -> bool {
+        self.evidence.as_ref().is_some_and(|e| e.outcome == conduit_mt5::operation_evidence::Outcome::LocalReceiptPending)
+    }
+
+    fn hint(&self) -> &'static str {
+        use conduit_mt5::operation_evidence::Outcome;
+        match self.evidence.as_ref().map(|e| e.outcome) {
+            Some(Outcome::LocalReceiptPending) => "Potwierdzenia są w trakcie uzgadniania; nowe wejścia czekają.",
+            Some(Outcome::LocalReceiptReview) => "Potwierdzenia wymagają sprawdzenia; nowe wejścia pozostają zablokowane.",
+            Some(Outcome::ConfirmationPending | Outcome::TransportUnknown) => "Brak rozstrzygającego potwierdzenia operacji; wymagane uzgodnienie stanu.",
+            _ => opis_bledu(self.err),
+        }
+    }
+
     fn nowa(op: &'static str, err: BrokerError) -> Self {
         Odmowa {
             op,
@@ -896,6 +911,7 @@ impl Odmowa {
             price: None,
             sl: None,
             tp: None,
+            evidence: None,
         }
     }
 }
@@ -916,8 +932,9 @@ impl Recording {
             let mut o = ctx;
             o.op = op;
             o.err = *e;
+            o.evidence = self.inner.operation_evidence().cloned();
+            if !o.deferred() { self.error_count += 1; }
             self.errors.push(o);
-            self.error_count += 1;
         }
         r
     }
@@ -2282,9 +2299,12 @@ fn petla(
         if stop.load(Ordering::Relaxed) {
             return;
         }
+        let recovery_title = if crate::quote_silence::is_quote_recovery(&powod) {
+            "Kontrolna odbudowa połączenia po ciszy kwotowań"
+        } else { "Utracono połączenie z MT5" };
         st.notify(
             MailCategory::Mt5Connection,
-            "Utracono połączenie z MT5",
+            recovery_title,
             &format!(
                 "{powod}\n\nOtwarte pozycje zostają u brokera i NIE są zarządzane, \
                  dopóki połączenie nie wróci. Bot próbuje dalej."
@@ -2296,6 +2316,8 @@ fn petla(
 
 #[derive(Default)]
 struct Trwale {
+    /// Operational process memory only: reconnects must not refresh a cached tick.
+    quote_silence: crate::quote_silence::QuoteSilence,
     /// pamięć każdego silnika z osobna, kluczowana NAZWĄ FORMATU
     silniki: std::collections::BTreeMap<String, TrwalySilnik>,
     szczyt_equity: f64,
@@ -2383,6 +2405,19 @@ fn update_pnl_anchors(stats: &mut ui::Stats, balance: f64, equity: f64, day: i64
     stats.max_dd_balance_today = stats.max_dd_balance_today.max(stats.drawdown_balance_now);
     stats.pnl_today = equity - stats.day_start_equity;
     stats.pnl_session = equity - stats.session_start_equity;
+}
+
+/// Consume only confirmed Account reads with a qualified broker-day certificate.
+/// Cached quotes and replayed ticks never synthesize an account valuation.
+fn observe_account_rdd(rdd: &mut ui::RealDrawdownDay,
+    observations: Vec<conduit_mt5::bridge::AccountObservation>, expected: &conduit_mt5::proto::AccountIdent,
+) {
+    for sample in observations {
+        if sample.login != expected.login || sample.server != expected.server || sample.trade_mode != expected.trade_mode {
+            continue;
+        }
+        if let Some(day) = sample.broker_day { rdd.observe(day, sample.equity); }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -2861,13 +2896,20 @@ fn handel(
     // obsunięcia po czkawce terminala mierzyłby od NOWEGO, niższego szczytu
     // i przestawał widzieć stratę, która już się wydarzyła.
     let mut szczyt_equity = broker.account().equity.max(trwale.szczyt_equity);
+    let rdd_account_key = if follow { follow_account_key(&toz, symbol) }
+        else { format!("{}@{}", toz.login, toz.server) };
+    let mut real_drawdown_day = st.read(|s| if s.stats.konto_kotwic == rdd_account_key {
+        s.stats.real_drawdown_day.clone()
+    } else { ui::RealDrawdownDay::default() });
+    // A reconnect across midnight did not observe that day's starting equity.
+    real_drawdown_day.observing = false;
+    broker.inner.enable_account_observations();
     let mut ostrzezenie_dd = 0.0f64;
     let mut ostatni_ts = broker.quote().ts;
     // Cisza w strumieniu kwotowań — mierzona ZEGAREM MASZYNY, nie znacznikiem
     // z ticka. Zamarły terminal potrafi oddawać w kółko ten sam tick z tą samą
     // godziną i po znaczniku wygląda to jak sprawny rynek.
-    let mut ostatni_tick_o = Instant::now();
-    let mut cisza_zgloszona = false;
+    trwale.quote_silence.bind(follow_account_key(&toz, symbol), broker.inner.quote(), Instant::now());
     let mut drabinka_o = Instant::now();
     // Próg wieku sygnału — odświeżany razem z resztą ustawień, żeby zmiana
     // w panelu działała bez restartu.
@@ -2879,7 +2921,8 @@ fn handel(
     // wiadomości, które czekały na podłączenie mostu
     let zaległe: Vec<LiveCmd> = std::mem::take(skrzynka);
     let mut kolejka: Vec<LiveCmd> = zaległe;
-    let mut close_receipt_issue_logged: Option<String> = None;
+    let mut close_receipt_status = crate::receipt_status::ReceiptStatus::default();
+    let close_receipt_status_started = Instant::now();
     let mut net_cost_hold = false;
     let mut sr_warmup_hold = silniki.lista.iter().any(|s| live_sr_v2_requested(&s.engine.cfg))
         || st.read(|s| s.halt.diagnoza.contains(LIVE_SR_V2_HOLD));
@@ -2978,9 +3021,7 @@ fn handel(
         };
         if let Some(q) = ticki.last() {
             ostatni_ts = q.ts;
-            ostatni_tick_o = Instant::now();
-            if cisza_zgloszona {
-                cisza_zgloszona = false;
+            if trwale.quote_silence.observe_tick(*q, Instant::now()) {
                 st.log(
                     "mt5",
                     "success",
@@ -2989,26 +3030,25 @@ fn handel(
                 );
             }
         }
-        // Cisza w strumieniu — jedyny objaw, po którym da się odróżnić
-        // „rynek zamknięty" i „terminal zamarł, ale połączenie trzyma"
-        // od normalnej pracy. Nadzorca procesu tego NIE widzi: proces żyje.
-        // Ta sama bramka pory, którą ma odbudowa mostu niżej: przerwa dobowa
-        // złota (00:00–01:05 czasu serwera) trwa dłużej niż próg 5 min, więc
-        // bez niej mail „Brak kwotowań" wracał ok. 00:05 KAŻDEJ nocy — młyn,
-        // przeciw któremu okno przerwy powstało, tyle że na powiadomieniu.
-        if !cisza_zgloszona
-            && ostatni_tick_o.elapsed() >= Duration::from_secs_f64(CISZA_KWOTOWAN_MIN * 60.0)
-            && rynek_powinien_dzialac_z(przerwa_dobowa(st), offset_serwera_h(st))
-        {
-            cisza_zgloszona = true;
-            zglos_cisze(st, symbol, &info, ostatni_ts, ostatni_tick_o.elapsed());
+        // Cisza sama nie dowodzi utraty połączenia ani zamknięcia rynku.
+        // Read-only heartbeat rozpoznaje potwierdzony brak połączenia;
+        // kontrolna odbudowa przy zdrowym lub nieznanym heartbeat ma backoff.
+        // Zwykłe przerwy sesji wyciszają alerty cenowe, ale nie kontrolę zdrowia.
+        let silence_now = Instant::now();
+        if trwale.quote_silence.needs_health_check(silence_now) {
+            let health = broker.inner.transport().call("ping", serde_json::json!({})).map_err(|e| e.to_string());
+            if let Some(reason) = crate::quote_silence::health_recovery_reason(health.as_ref().map_err(String::as_str)) {
+                break reason;
+            }
         }
-        if ostatni_tick_o.elapsed() >= Duration::from_secs_f64(CISZA_ODBUDOWA_MIN * 60.0)
-            && rynek_powinien_dzialac_z(przerwa_dobowa(st), offset_serwera_h(st))
-        {
+        let expected_session = rynek_powinien_dzialac_z(przerwa_dobowa(st), offset_serwera_h(st));
+        if trwale.quote_silence.alert_due(silence_now, expected_session) {
+            zglos_cisze(st, symbol, &info, ostatni_ts, trwale.quote_silence.elapsed(silence_now));
+        }
+        if trwale.quote_silence.recovery_due(silence_now, expected_session) {
             break format!(
                 "Brak kwotowań {symbol} od {} — odbudowuję połączenie z terminalem.",
-                conduit_mt5::watchdog::opis_czasu(ostatni_tick_o.elapsed())
+                conduit_mt5::watchdog::opis_czasu(trwale.quote_silence.elapsed(silence_now))
             );
         }
 
@@ -3020,14 +3060,12 @@ fn handel(
             przetworz_ticki_live(&mut silniki, &mut broker, &ticki, &mut dziennik, true);
             broker.inner.poll_state();
         }
+        observe_account_rdd(&mut real_drawdown_day, broker.inner.drain_account_observations(), &toz);
         let receipt_issue = broker.inner.close_receipt_issue().map(str::to_owned);
-        if receipt_issue != close_receipt_issue_logged {
-            if let Some(issue) = &receipt_issue {
-                st.log("mt5", "error", "Niepełne potwierdzenie zamknięcia — blokada nowych wejść", issue);
-            } else if close_receipt_issue_logged.is_some() {
-                st.log("mt5", "info", "Potwierdzenia zamknięć uzgodnione", "Odczyt stanu brokera zakończony; tymczasowa bramka wejść zdjęta.");
-            }
-            close_receipt_issue_logged = receipt_issue;
+        if let Some(notice) = close_receipt_status.observe(
+            broker.inner.receipt_barrier(), receipt_issue.as_deref(), close_receipt_status_started.elapsed(),
+        ) {
+            st.log("mt5", notice.level, notice.title, notice.body);
         }
 
         // Wiadomości obsługujemy DOPIERO gdy znamy cenę. Sygnał policzony
@@ -3314,6 +3352,7 @@ fn handel(
                 }
             }
             ostatnia_publikacja = Instant::now();
+            observe_account_rdd(&mut real_drawdown_day, broker.inner.drain_account_observations(), &toz);
             opublikuj(
                 st,
                 &broker,
@@ -3324,6 +3363,8 @@ fn handel(
                 &info,
                 &diagnoza_petli,
                 &account_session,
+                &rdd_account_key,
+                &real_drawdown_day,
             );
             if follow { connected.store(true, Ordering::Release); }
         }
@@ -3459,6 +3500,10 @@ fn handel(
     };
 
     // ---------- co przeżywa to wyjście ----------
+    observe_account_rdd(&mut real_drawdown_day, broker.inner.drain_account_observations(), &toz);
+    st.update(Sections::one(Section::Stats), |s| {
+        if s.stats.konto_kotwic == rdd_account_key { s.stats.real_drawdown_day = real_drawdown_day; }
+    });
     // OSTATNI ZRZUT. Bez tego utrata sidecara gubiłaby koszyki powstałe od
     // ostatniego zapisu — czyli dokładnie te, których wznowienie najbardziej
     // potrzebuje.
@@ -5463,14 +5508,18 @@ fn dziennikuj_odmowy<B: Broker>(silniki: &mut routing::Silniki, broker: &B, bled
             .and_then(|b| silniki.indeks_koszyka(b))
             .unwrap_or_else(|| silniki.lista.iter().position(|s| s.zapasowy).unwrap_or(0));
         let engine = &mut silniki.lista[i].engine;
+        let confirmation = o.evidence.as_ref().is_some_and(|e| matches!(e.outcome,
+            conduit_mt5::operation_evidence::Outcome::LocalReceiptPending
+            | conduit_mt5::operation_evidence::Outcome::LocalReceiptReview
+            | conduit_mt5::operation_evidence::Outcome::ConfirmationPending
+            | conduit_mt5::operation_evidence::Outcome::TransportUnknown));
         let mut ev = Ev::new(
             q.ts,
-            EventLevel::Error,
+            if o.deferred() { EventLevel::Info } else { EventLevel::Error },
             EventCategory::Order,
-            EventKind::OrderRejected,
+            if confirmation { EventKind::Note } else { EventKind::OrderRejected },
         )
-        .text(format!("{}: {}", o.op, opis_bledu(o.err)))
-        .reason(RejectCode::from(o.err))
+        .text(format!("{}: {}", o.op, o.hint()))
         .market(migawka.clone())
         .basket_opt(o.basket)
         .put("operation", o.op)
@@ -5479,8 +5528,13 @@ fn dziennikuj_odmowy<B: Broker>(silniki: &mut routing::Silniki, broker: &B, bled
         // bo różnica „zły poziom siatki" ↔ „zły stop-loss" jest różnicą
         // między dwiema zupełnie innymi naprawami.
         .put("broker_error", format!("{:?}", o.err))
-        .put("hint", opis_bledu(o.err))
+        .put("hint", o.hint())
+        .put("record_type", if o.deferred() { "operation_deferred" } else if confirmation { "operation_confirmation_issue" } else { "operation_failed" })
         .put_f("stops_level", broker.stops_level());
+        if !confirmation { ev = ev.reason(RejectCode::from(o.err)); }
+        if let Some(e) = &o.evidence {
+            ev = ev.put("execution_evidence", serde_json::to_value(e).unwrap_or(serde_json::Value::Null));
+        }
         if let Some(t) = o.ticket {
             ev = ev.ticket(t);
         }
@@ -5566,9 +5620,13 @@ fn dziennikuj_odrzut_wieku<B: Broker>(
 /// istniała w konfiguracji i w dławiku, ale nie było kodu, który by ją
 /// kiedykolwiek wywołał. Zapis do dziennika robi `dziennikuj_odmowy`.
 fn zglos_bledy(st: &StateHandle, bledy: &[Odmowa]) {
+    // Short-lived local deferrals are journaled, and the receipt-status tracker
+    // raises one warning if they persist. They are not broker error emails.
+    let bledy: Vec<_> = bledy.iter().filter(|o| !o.deferred()).collect();
+    if bledy.is_empty() { return; }
     let mut opis = String::new();
-    for o in bledy {
-        opis.push_str(&format!("• {}: {}", o.op, opis_bledu(o.err)));
+    for o in &bledy {
+        opis.push_str(&format!("• {}: {}", o.op, o.hint()));
         if let Some(b) = o.basket {
             opis.push_str(&format!(" (koszyk B{b}"));
             if let Some(l) = o.level {
@@ -5586,12 +5644,12 @@ fn zglos_bledy(st: &StateHandle, bledy: &[Odmowa]) {
     st.log(
         "trade",
         "error",
-        format!("Broker odrzucił {} operacji", bledy.len()),
+        format!("Nieudane operacje handlowe: {}", bledy.len()),
         opis.clone(),
     );
     st.notify(
         MailCategory::OrderError,
-        &format!("Broker odrzucił zlecenie ({})", bledy.len()),
+        &format!("Nieudane operacje handlowe: {}", bledy.len()),
         &format!(
             "{opis}\nJeśli powtarza się „SL/TP za blisko ceny”, sprawdź stops_level \
              u brokera. Jeśli „cena zlecenia oczekującego niedopuszczalna” — poziom siatki \
@@ -5616,7 +5674,7 @@ fn opis_bledu(e: BrokerError) -> &'static str {
             "wolumen poza dopuszczalnym zakresem albo niezgodny z krokiem"
         }
         BrokerError::MarketClosed => "rynek zamknięty",
-        BrokerError::Rejected => "broker odrzucił zlecenie",
+        BrokerError::Rejected => "operacja nie uzyskała potwierdzenia wykonania",
     }
 }
 
@@ -5916,6 +5974,8 @@ fn opublikuj(
     // ryzykiem (patrz `rozbij_klasy_zatrzymania`).
     diagnoza: &str,
     account_session: &str,
+    rdd_account_key: &str,
+    real_drawdown_day: &ui::RealDrawdownDay,
 ) {
     // Strefa czasowa serwera jest polem RACHUNKU (te sama dla wszystkich
     // formatow — patrz `wielosilnik::POLA_RACHUNKU`), wiec wolno ja wziac
@@ -6068,6 +6128,9 @@ fn opublikuj(
         }
 
         update_pnl_anchors(&mut s.stats, acc.balance, acc.equity, doba, q.ts);
+        if s.stats.konto_kotwic == rdd_account_key {
+            s.stats.real_drawdown_day = real_drawdown_day.clone();
+        }
         s.stats.messages = ile_msg;
         s.stats.signals = ile_sig;
         if s.stats
@@ -6795,6 +6858,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rdd_publisher_uses_broker_day_and_survives_dd_guard_reset() {
+        let cfg = Settings::default();
+        let day = 20_693_i64;
+        let mut stats = ui::Stats::new(200.0, day * 86_400_000);
+        let account = conduit_mt5::proto::AccountIdent { login: 42, server: "fixture-demo".into(), ..Default::default() };
+        let observe = |stats: &mut ui::Stats, day: i64, equity: f64| {
+            observe_account_rdd(&mut stats.real_drawdown_day, vec![conduit_mt5::bridge::AccountObservation {
+                broker_day: Some(day), equity, login: 42, server: "fixture-demo".into(), trade_mode: 0,
+            }], &account);
+        };
+        for (ms, equity) in [(12 * 3_600_000, 200.0), (22 * 3_600_000, 180.0)] {
+            let ts = day * 86_400_000 + ms;
+            observe(&mut stats, doba_kwotowania_brokera(ts, &cfg), equity);
+            update_pnl_anchors(&mut stats, 200.0, equity, doba_kwotowania_brokera(ts, &cfg), ts);
+        }
+        assert_eq!(stats.real_drawdown_day.start_equity, None, "midday live start is partial");
+        let midnight = (day + 1) * 86_400_000;
+        for (ms, equity) in [(0, 200.0), (1_000, 250.0), (2_000, 180.0), (3_000, 230.0)] {
+            observe(&mut stats, doba_kwotowania_brokera(midnight + ms, &cfg), equity);
+            update_pnl_anchors(&mut stats, 200.0, equity, doba_kwotowania_brokera(midnight + ms, &cfg), midnight + ms);
+        }
+        assert_eq!(stats.max_dd_today, 70.0, "existing peak DD is unchanged");
+        assert_eq!(stats.drawdown_now, 20.0);
+        assert_eq!(stats.real_drawdown_day.start_equity, Some(200.0));
+        assert_eq!(stats.real_drawdown_day.min_equity, Some(180.0));
+        stats.peak_equity_today = 230.0; stats.drawdown_now = 0.0;
+        update_pnl_anchors(&mut stats, 200.0, 240.0, day + 1, midnight + 4_000);
+        assert_eq!(stats.real_drawdown_day.min_equity, Some(180.0), "risk override cannot erase RDD");
+    }
+
+    #[test]
+    fn rdd_fresh_account_samples_survive_ui_throttling_without_cached_day_guessing() {
+        use conduit_mt5::bridge::AccountObservation;
+        let account = conduit_mt5::proto::AccountIdent { login: 42, server: "fixture-demo".into(), ..Default::default() };
+        let sample = |day, equity| AccountObservation { broker_day: day, equity, login: 42, server: "fixture-demo".into(), trade_mode: 0 };
+        let mut rdd = ui::RealDrawdownDay::known_start(100, 200.0);
+        observe_account_rdd(&mut rdd, vec![sample(Some(100),250.0),sample(Some(100),180.0),sample(Some(100),230.0)], &account);
+        assert_eq!(rdd.min_equity,Some(180.0), "all confirmed samples, not only the latest UI value");
+        observe_account_rdd(&mut rdd, vec![sample(None,10.0)], &account);
+        assert_eq!(rdd.day,Some(100)); assert_eq!(rdd.min_equity,Some(180.0));
+        observe_account_rdd(&mut rdd, Vec::new(), &account);
+        assert_eq!(rdd.day,Some(100), "a new quote cannot redate an old account cache");
+        let mut foreign = sample(Some(101),1000.0); foreign.server="other-fixture".into();
+        observe_account_rdd(&mut rdd, vec![foreign], &account);
+        assert_eq!(rdd.day,Some(100));
+        observe_account_rdd(&mut rdd, vec![sample(Some(101),220.0),sample(Some(101),198.0)], &account);
+        assert_eq!(rdd.start_equity,Some(220.0)); assert_eq!(rdd.min_equity,Some(198.0));
+        rdd.observing = false; // in-process bridge reconnect, no serde round-trip
+        observe_account_rdd(&mut rdd, vec![sample(Some(101),240.0)], &account);
+        assert_eq!(rdd.min_equity,Some(198.0),"same-day reconnect retains the observed trough");
+        rdd.observing = false;
+        observe_account_rdd(&mut rdd, vec![sample(Some(102),230.0)], &account);
+        assert_eq!(rdd.start_equity,None,"a reconnect gap cannot invent the next day's start");
+    }
+
     /// Silnik z włączonym dziennikiem i migawkami rynku.
     fn silnik() -> Engine {
         let mut cfg = Settings::default();
@@ -6886,6 +7005,7 @@ mod tests {
             price: Some(4001.0),
             sl: Some(3990.0),
             tp: Some(4010.0),
+            evidence: None,
         };
         let mut sil = jeden(e);
         dziennikuj_odmowy(&mut sil, &b, &[odmowa]);
@@ -6921,6 +7041,32 @@ mod tests {
             x.data.get("broker_error").and_then(|v| v.as_str()),
             Some("InvalidPrice")
         );
+    }
+
+    #[test]
+    fn operation_receipt_evidence_distinguishes_deferred_pending_from_genuine_errors() {
+        use conduit_core::journal::EventLevel;
+        use conduit_mt5::operation_evidence::{OperationEvidence, Outcome};
+        for (outcome, level, kind, deferred) in [
+            (Outcome::LocalReceiptPending, EventLevel::Info, EventKind::Note, true),
+            (Outcome::LocalReceiptReview, EventLevel::Error, EventKind::Note, false),
+            (Outcome::ConfirmationPending, EventLevel::Error, EventKind::Note, false),
+            (Outcome::RemoteRefusal, EventLevel::Error, EventKind::OrderRejected, false),
+            (Outcome::LocalValidation, EventLevel::Error, EventKind::OrderRejected, false),
+        ] {
+            let mut o = Odmowa::nowa("otwarcie rynkowe", BrokerError::Rejected);
+            let mut evidence = OperationEvidence::new(41, "open_market");
+            evidence.outcome = outcome;
+            o.evidence = Some(evidence);
+            assert_eq!(o.deferred(), deferred);
+            let mut sil = jeden(silnik());
+            dziennikuj_odmowy(&mut sil, &broker_z_cena(), &[o]);
+            let x = &sil.glowny().engine.journal.peek()[0];
+            assert_eq!(x.level, level);
+            assert_eq!(x.kind, kind);
+            assert_eq!(x.data["execution_evidence"]["sequence"], 41);
+            assert_eq!(x.reason.is_some(), kind == EventKind::OrderRejected);
+        }
     }
 
     /// Odmowa dotycząca POZYCJI niesie numer zlecenia, nie koszyk.

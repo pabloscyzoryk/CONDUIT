@@ -10,6 +10,8 @@ mod mt5_guard;
 /// dzięki któremu silnik zarządza wyłącznie własnymi pozycjami.
 mod routing;
 mod runtime_python;
+mod receipt_status;
+mod quote_silence;
 mod strategy_realized_memory;
 #[cfg(any(feature = "window", test))]
 mod shell_lifecycle;

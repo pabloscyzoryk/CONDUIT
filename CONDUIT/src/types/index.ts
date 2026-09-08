@@ -541,6 +541,12 @@ export interface Stats {
   maxDdToday: number;
   peakEquityToday: number;
   dayStartEquity: number;
+  /** RDD is unavailable when the day-start/minimum were not observed. */
+  realDrawdownDay?: {
+    day: number | null;
+    startEquity: number | null;
+    minEquity: number | null;
+  } | null;
   messages: number;
   signals: number;
   /** krzywa equity (do sparkline) */

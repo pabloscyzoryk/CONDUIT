@@ -1397,6 +1397,7 @@ mod tests {
             end_equity: end_eq,
             profit,
             max_dd: 0.0,
+            min_equity: None, real_dd: None, real_dd_pct: None, equity_observation_basis: None,
             trades,
             signals: 0,
         }

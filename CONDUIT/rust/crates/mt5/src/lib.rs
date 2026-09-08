@@ -34,6 +34,7 @@ pub mod comment;
 mod cost_adapter;
 pub mod errors;
 pub mod market;
+pub mod operation_evidence;
 pub mod proto;
 pub mod transport;
 pub mod watchdog;

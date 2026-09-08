@@ -813,6 +813,7 @@ fn petla(st: &StateHandle, cfg: &DemoConfig, cancel: &Arc<AtomicBool>) -> anyhow
 
     let total = feed.total();
     let pierwszy = feed.peek_ts().unwrap_or(0);
+    let mut real_drawdown_day = ui::RealDrawdownDay::known_start(day_of(pierwszy, 0), cfg.balance);
     st.update_transient(Sections::one(Section::Demo), |s| {
         s.demo.ticks_total = total;
         s.demo.note = format!(
@@ -982,6 +983,8 @@ fn petla(st: &StateHandle, cfg: &DemoConfig, cancel: &Arc<AtomicBool>) -> anyhow
 
             broker.on_quote(q);
             engine.on_tick(&mut broker, &q);
+            // Every simulated step is observed, independently of UI throttling.
+            real_drawdown_day.observe(day_of(q.ts, 0), broker.account().equity);
 
             // Bufor w rdzeniu ma sufit — nieodebrane zdarzenia przepadają,
             // dlatego opróżniamy go w pętli, a nie na końcu przebiegu.
@@ -1020,6 +1023,7 @@ fn petla(st: &StateHandle, cfg: &DemoConfig, cancel: &Arc<AtomicBool>) -> anyhow
                     manual,
                     elapsed_ms: start_real.elapsed().as_millis() as i64,
                     start_balance: cfg.balance,
+                    real_drawdown_day: real_drawdown_day.clone(),
                 },
             );
         }
@@ -1098,6 +1102,7 @@ fn petla(st: &StateHandle, cfg: &DemoConfig, cancel: &Arc<AtomicBool>) -> anyhow
             manual,
             elapsed_ms: start_real.elapsed().as_millis() as i64,
             start_balance: cfg.balance,
+            real_drawdown_day,
         },
     );
     Ok(format!(
@@ -1142,6 +1147,7 @@ struct Postep {
     manual: u64,
     elapsed_ms: i64,
     start_balance: f64,
+    real_drawdown_day: ui::RealDrawdownDay,
 }
 
 fn opublikuj(
@@ -1217,6 +1223,7 @@ fn opublikuj(
         s.balance = broker.balance;
         s.stats.balance = broker.balance;
         s.stats.equity = acc.equity;
+        s.stats.real_drawdown_day = p.real_drawdown_day.clone();
         s.stats.margin = acc.margin;
         s.stats.free_margin = acc.free_margin;
         s.stats.margin_level = if acc.margin > 0.0 {
@@ -1430,6 +1437,7 @@ mod tests {
         opublikuj(&st, &broker, &engine, &[], Postep {
             clock: broker.quote().ts, speed: 1.0, done: 1, total: 1,
             manual: 0, elapsed_ms: 0, start_balance: 600.0,
+            real_drawdown_day: ui::RealDrawdownDay::known_start(day_of(broker.quote().ts, 0), 600.0),
         });
         st.read(|s| {
             assert_eq!(s.connection.resolved_symbol, SYMBOL);

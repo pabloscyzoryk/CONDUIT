@@ -800,7 +800,15 @@ class Sidecar(object):
     # ============================================================
 
     def cmd_ping(self, a):
-        return {"pong": True, "ts": int(time.time() * 1000)}
+        # A cached quote is not evidence of a terminal connection. Return only
+        # this health fact; never account identity or terminal paths.
+        try:
+            info = mt5.terminal_info()
+            connected = False if info is None else getattr(info, "connected", None)
+            connected = connected if isinstance(connected, bool) else None
+        except Exception:
+            connected = None
+        return {"pong": True, "ts": int(time.time() * 1000), "terminal_connected": connected}
 
     def cmd_shutdown(self, a):
         self.running = False
@@ -1131,7 +1139,35 @@ class Sidecar(object):
             "bars": bars,
         }
 
+    def _account_observation_day(self, ai, started_at):
+        """Qualify the existing account read with cached, advancing broker time.
+
+        No terminal call and no configured UTC offset. A stale/weekend quote,
+        changed account, clock jump or sample spanning midnight has no day.
+        """
+        if self.account_changed or account_key(ai) != self._quote_clock_account:
+            return None
+        clock = self._quote_clocks.get(self.symbol)
+        if clock is None or clock[2] is None or clock[3] is None:
+            return None
+        stamp, _, observed_utc, advanced_at = clock
+        end = time.monotonic()
+        begin_age = (started_at - advanced_at) * 1000
+        end_age = (end - advanced_at) * 1000
+        wall_age = time.time() * 1000 - observed_utc
+        if not (0 <= begin_age <= end_age <= 30000 and 0 <= wall_age <= 30000):
+            return None
+        if abs(wall_age - end_age) > 2000:
+            return None
+        # The anchor and the entire read interval must stay in one broker day.
+        # Do not extrapolate an old last quote over a midnight boundary.
+        day = stamp // 86400000
+        if day <= 0 or (stamp + int(end_age)) // 86400000 != day:
+            return None
+        return int(day)
+
     def cmd_account(self, a):
+        started_at = time.monotonic()
         ai = mt5.account_info()
         if ai is None:
             raise BrokerError(ERR_NOT_INITIALIZED, "brak account_info")
@@ -1151,6 +1187,7 @@ class Sidecar(object):
         # kredytu = podstawa lota równa saldu.
         return {
             "balance": float(ai.balance),
+            "observation_broker_day": self._account_observation_day(ai, started_at),
             "equity": float(ai.equity),
             "margin": float(ai.margin),
             "margin_free": float(ai.margin_free),

@@ -779,6 +779,7 @@ fn symuluj(
                     end_equity: eq,
                     profit: eq - day_start,
                     max_dd: day_dd,
+                    min_equity: None, real_dd: None, real_dd_pct: None, equity_observation_basis: None,
                     trades: day_trades,
                     signals: day_sig,
                 });
@@ -880,6 +881,7 @@ fn symuluj(
                 end_equity: saldo,
                 profit: saldo - day_start,
                 max_dd: day_dd,
+                min_equity: None, real_dd: None, real_dd_pct: None, equity_observation_basis: None,
                 trades: day_trades,
                 signals: day_sig,
             });
