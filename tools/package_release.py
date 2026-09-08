@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 SCHEMA = "conduit.package.v3"
 PRIVATE_FILES = {"settings.json", "channels.json", "lancuchy.json", "secrets.json", "telegram.session"}
-DISALLOWED_PARTS = {".git", "node_modules", "target", "logs", "backup_memory", "exports", "__pycache__"}
+DISALLOWED_PARTS = {".git", "node_modules", "target", "logs", "replay_capture", "backup_memory", "exports", "__pycache__"}
 DISALLOWED_NAMES = {"accounts.dat", "servers.dat", "common.ini", "terminal.ini", "koszyki.json", "kronika.json", "smtp.json"}
 SECRET_KEYS = {"apihash", "apiid", "sessionstring", "userid", "username", "handle", "password", "mt5password", "mt5login", "mt5server", "mt5terminalpath", "phone", "email", "mailuser", "mailto", "mailfrom", "mailhost", "channelid", "chatid", "topicid"}
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")

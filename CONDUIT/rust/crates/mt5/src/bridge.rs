@@ -224,6 +224,13 @@ pub struct Mt5Bridge {
     last_trade_outcome_unknown: bool,
     operation_sequence: u64,
     operation_evidence: Option<crate::operation_evidence::OperationEvidence>,
+    /// Only the preceding operation can publish an ambiguous OPEN descriptor.
+    last_unconfirmed_open: Option<UnconfirmedOpen>,
+    open_submission_session: Option<ExecutionSession>,
+    /// Literal broker snapshot comments, before legacy comment reconstruction.
+    /// A complete state read in the current generation is required for proof.
+    open_snapshot_identity: Vec<(Ticket, u64, String)>,
+    open_snapshot_session: Option<ExecutionSession>,
 
     last_state: Instant,
     state_interval: Duration,
@@ -390,6 +397,10 @@ impl Mt5Bridge {
             last_trade_outcome_unknown: false,
             operation_sequence: 0,
             operation_evidence: None,
+            last_unconfirmed_open: None,
+            open_submission_session: None,
+            open_snapshot_identity: Vec::new(),
+            open_snapshot_session: None,
             last_state: Instant::now() - Duration::from_secs(3600),
             state_interval: Duration::from_millis(500),
             max_retries: 3,
@@ -686,6 +697,11 @@ impl Mt5Bridge {
     fn remember_unknown_open(&mut self, r: &OrderReq, machine_comment: &str, reason: String) {
         self.operation_outcome(crate::operation_evidence::Outcome::ConfirmationPending);
         if !self.tr.config().close_receipt_reconcile { return; }
+        self.last_unconfirmed_open = self.open_submission_session.clone().map(|session| UnconfirmedOpen {
+            session, side: r.side, requested_volume: r.volume, basket: r.basket,
+            level: r.level, is_toucher: r.is_toucher, submitted_quote_ts: self.q.ts,
+            machine_comment: machine_comment.to_owned(),
+        });
         let clean = self.receipts.fault.is_none()
             && self.receipts.unknown_opens.is_empty()
             && self.receipts.incomplete.is_empty()
@@ -894,6 +910,8 @@ impl Mt5Bridge {
 
     /// Odświeża konto, pozycje i zlecenia oczekujące (scalając z pamięcią bota).
     pub fn refresh_state(&mut self) -> anyhow::Result<()> {
+        self.open_snapshot_session = None;
+        self.open_snapshot_identity.clear();
         self.last_state = Instant::now();
         self.refresh_account()?;
 
@@ -909,6 +927,7 @@ impl Mt5Bridge {
                 json!({ "symbol": self.sym.symbol, "all": true }),
             )
             .map_err(|e| anyhow::anyhow!("odczyt pozycji: {e}"))?;
+        let open_identity = self.literal_open_snapshot(&raw);
         self.merge_positions(raw);
 
         let orders: Vec<RawOrder> = self
@@ -916,7 +935,14 @@ impl Mt5Bridge {
             .call_as("orders", json!({ "symbol": self.sym.symbol, "all": true }))
             .map_err(|e| anyhow::anyhow!("odczyt zleceń: {e}"))?;
         self.merge_pendings(orders);
+        self.open_snapshot_identity = open_identity;
+        self.open_snapshot_session = self.execution_session();
         Ok(())
+    }
+
+    fn literal_open_snapshot(&self, raw: &[RawPosition]) -> Vec<(Ticket, u64, String)> {
+        raw.iter().filter(|r| self.is_ours(r.magic, &r.symbol))
+            .map(|r| (r.ticket, r.identifier, r.comment.clone())).collect()
     }
 
     /// Czy bot ma prawo TYM ZARZĄDZAĆ. Świadomie niezmienione: cudzych pozycji
@@ -1280,6 +1306,8 @@ impl Mt5Bridge {
     /// Odtworzenie stanu po restarcie bota. Czyści pamięć i buduje ją od nowa
     /// wyłącznie z tego, co widać na koncie.
     pub fn reconcile(&mut self) -> anyhow::Result<ReconcileReport> {
+        self.open_snapshot_session = None;
+        self.open_snapshot_identity.clear();
         let mut rep = ReconcileReport::default();
         self.remember_live_positions();
 
@@ -1290,6 +1318,7 @@ impl Mt5Bridge {
                 json!({ "symbol": self.sym.symbol, "all": true }),
             )
             .map_err(|e| anyhow::anyhow!("rekoncyliacja pozycji: {e}"))?;
+        let open_identity = self.literal_open_snapshot(&raw);
         self.order_position_snapshot(&mut raw, false);
         self.observe_receipt_volumes(&raw);
         self.positions.clear();
@@ -1382,6 +1411,8 @@ impl Mt5Bridge {
             rep.pendings += 1;
         }
         rep.baskets.sort_unstable();
+        self.open_snapshot_identity = open_identity;
+        self.open_snapshot_session = self.execution_session();
         Ok(rep)
     }
 
@@ -1594,6 +1625,8 @@ impl Mt5Bridge {
     }
 
     fn begin_operation(&mut self, operation: &'static str) {
+        self.last_unconfirmed_open = None;
+        self.open_submission_session = None;
         self.operation_sequence = self.operation_sequence.wrapping_add(1);
         self.operation_evidence = Some(crate::operation_evidence::OperationEvidence::new(self.operation_sequence, operation));
     }
@@ -1885,6 +1918,40 @@ impl Broker for Mt5Bridge {
         })
     }
 
+    fn unconfirmed_open(&self) -> Option<UnconfirmedOpen> {
+        self.last_unconfirmed_open.clone()
+    }
+
+    fn confirmed_open(&self, intent: &UnconfirmedOpen) -> Option<Ticket> {
+        if self.receipt_barrier() != ReceiptBarrier::Clear
+            || !intent.requested_volume.is_finite() || intent.requested_volume <= 0.0 {
+            return None;
+        }
+        let session = self.execution_session()?;
+        if session.scope != intent.session.scope
+            || self.open_snapshot_session.as_ref() != Some(&session) { return None; }
+        let tag = comment::decode(&self.tag, &intent.machine_comment)?;
+        if tag.order_sequence.is_none() || tag.basket != intent.basket
+            || tag.level != intent.level || tag.is_toucher != intent.is_toucher { return None; }
+        let mut candidates = self.positions.iter().filter(|p| {
+            if p.side != intent.side || p.basket != intent.basket || p.level != intent.level
+                || p.is_toucher != intent.is_toucher || !p.volume.is_finite() || p.volume <= 0.0
+                || p.volume > intent.requested_volume + 1e-9
+                || p.open_ts.saturating_add(2_000) < intent.submitted_quote_ts
+                || p.comment != intent.machine_comment { return false; }
+            let Some(identifier) = self.position_identifier(p.ticket) else { return false; };
+            // No prefix matching, restored legacy suffix, duplicate ticket or
+            // duplicate stable identifier can prove this exact submission.
+            let mut rows = self.open_snapshot_identity.iter()
+                .filter(|(ticket, id, _)| *ticket == p.ticket || *id == identifier);
+            let Some((ticket, id, text)) = rows.next() else { return false; };
+            *ticket == p.ticket && *id == identifier && text == &intent.machine_comment
+                && rows.next().is_none()
+        });
+        let ticket = candidates.next()?.ticket;
+        if candidates.next().is_some() { None } else { Some(ticket) }
+    }
+
     fn position_identifier(&self, ticket: Ticket) -> Option<u64> {
         // Only a presently observed/ACK-confirmed owned position in the same
         // verified session is evidence for restoration. Old ticket aliases,
@@ -1933,6 +2000,10 @@ impl Broker for Mt5Bridge {
             "tp": r.tp.map(|x| self.sym.round_price(x)),
             "comment": cm,
         });
+        // Preserve the account verified BEFORE send, including a lost connection
+        // during its ACK. Publish only in remember_unknown_open, never on reject.
+        r.volume = vol;
+        self.open_submission_session = self.execution_session();
         let v = match self.trade_call("open_market", args) {
             Ok(v) => v,
             Err(e) => {

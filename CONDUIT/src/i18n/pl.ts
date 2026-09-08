@@ -2514,6 +2514,8 @@ export const PL: Record<keyof typeof EN, string> = {
   "logs.group.sensitive": "Dane wrażliwe",
   "logs.source.journal.label": "dziennik decyzji",
   "logs.source.journal.note": "logs/journal/*.jsonl — CO bot zrobił i dlaczego",
+  "logs.source.replay_capture.label": "nagranie odtwarzania live",
+  "logs.source.replay_capture.note": "pełne zachowane sesje: stan początkowy, kolejność wejść i odpowiedzi brokera",
   "logs.source.kronika.label": "kronika",
   "logs.source.kronika.note": "cały strumień z Telegrama, przed filtrem kanałów",
   "logs.source.wiadomosci.label": "archiwum wiadomości",

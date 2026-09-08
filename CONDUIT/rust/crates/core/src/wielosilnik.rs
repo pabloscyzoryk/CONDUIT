@@ -129,6 +129,9 @@ pub fn sloty_formatow(formaty: &[String]) -> (Vec<(String, u32)>, Vec<String>) {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ObceObciazenie {
+    /// Unresolved submitted rearm in another account slot. Recomputed by routing;
+    /// never a persistent halt and never a restriction on protective exits.
+    pub rearm_entry_hold: bool,
     /// otwarte pozycje pozostałych silników (i zlecenia, gdy preset je liczy)
     ///
     /// Osobne pole, choć broker widzi wszystko: silnik dostaje WIDOK

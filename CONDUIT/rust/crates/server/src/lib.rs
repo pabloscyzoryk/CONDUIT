@@ -40,6 +40,7 @@ pub mod market;
 pub mod notify;
 pub mod proto;
 pub mod rest;
+pub mod replay_capture;
 pub mod secrets;
 pub mod settings_map;
 pub mod state;

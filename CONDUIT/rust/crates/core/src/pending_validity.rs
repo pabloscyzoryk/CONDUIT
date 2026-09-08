@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // revision. Durable snapshots still contain the complete source records.
 static NEXT_SOURCE_REVISION: AtomicU64 = AtomicU64::new(1);
 pub(super) fn next_source_revision() -> u64 {
-    NEXT_SOURCE_REVISION.fetch_add(1, Ordering::Relaxed)
+    crate::recorded_broker::revisions::token(|| NEXT_SOURCE_REVISION.fetch_add(1, Ordering::Relaxed))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

@@ -44,6 +44,25 @@ po odtworzeniu nie zeruje licznika ciszy. Świeża kwota, w tym po cofnięciu
 zegara brokera, kończy epizod. Wykryty problem transportu nadal prowadzi do
 ścieżki odzyskania połączenia.
 
+## Uzupełnienie: nagranie live i rearm
+
+Nagranie live obejmuje wejścia i stan silnika oraz odpowiedzi brokera w
+rzeczywistej kolejności. Eksport `alllogs` domyślnie dołącza zachowane sesje
+z kontrolą integralności. Osobny tryb offline sprawdza decyzje bez połączenia
+z Telegramem lub MT5. Zakres, ograniczenia i prywatność opisuje
+[odtwarzanie sesji live](LIVE_REPLAY.md).
+
+Po niejednoznacznym potwierdzeniu otwarcia rearm mógł wcześniej przyjąć później
+wykrytą pozycję bez naliczenia próby i jej cooldownu. Teraz potrzebne jest
+ścisłe powiązanie z wysłanym zleceniem i rachunkiem. Potwierdzona siatka
+zostaje naliczona raz, a cooldown zaczyna się od pierwotnej próby wysłania.
+Częściowy ACK nie nalicza siatki ponownie; zwykła odmowa jej nie nalicza.
+
+Nierozstrzygnięta próba blokuje nową ekspozycję, zachowując możliwość zamykania
+i ochrony pozycji. Gdy dowód wykonania jest niewystarczający, program wymaga
+sprawdzenia zamiast zgadywać wynik. Stan uzgodnienia przetrwa restart na tym
+samym rachunku. Ustawienia GOD-X7 pozostają takie same.
+
 ## English summary
 
 GOD-X7 remains the primary preset with unchanged strategy settings. The
@@ -57,6 +76,13 @@ without changing any trade or profit. Temporary accounting waits, uncertain
 execution and broker refusals now have distinct diagnostics. Quote silence
 recovery keeps its state across reconnects and uses increasing retry intervals;
 confirmed transport failures retain their recovery path.
+
+The follow-up records engine inputs, state and observed broker responses for
+offline replay. Complete retained prefixes are included in allLogs by default.
+Uncertain rearm opens are reconciled against strict order/account evidence,
+counted once and assigned their original submission time for cooldown. Pending
+reconciliation blocks new exposure while exits remain available; insufficient
+proof requires review. The reconciliation state survives a same-account restart.
 
 The update provides Polish and English labels. Public packages remain free of
 private credentials and Telegram sessions; private installation material stays

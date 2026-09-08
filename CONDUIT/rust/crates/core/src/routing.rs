@@ -187,6 +187,13 @@ impl<B: Broker> Broker for Widok<'_, B> {
         }
     }
     fn execution_session(&self) -> Option<crate::broker::ExecutionSession> { self.inner.execution_session() }
+    fn unconfirmed_open(&self) -> Option<crate::broker::UnconfirmedOpen> {
+        self.inner.unconfirmed_open().filter(|intent| self.kto.moj(intent.basket))
+    }
+    fn confirmed_open(&self, intent: &crate::broker::UnconfirmedOpen) -> Option<crate::types::Ticket> {
+        if !self.kto.moj(intent.basket) { return None; }
+        self.inner.confirmed_open(intent)
+    }
     fn position_identifier(&self, ticket: crate::types::Ticket) -> Option<u64> { self.inner.position_identifier(ticket) }
     fn pending_cancel_snapshot_authoritative(&self) -> bool { self.inner.pending_cancel_snapshot_authoritative() }
     fn cost_net_supported(&self) -> bool { self.inner.cost_net_supported() }
@@ -638,6 +645,8 @@ impl Silniki {
     /// nie rozważamy żadnego) — służy wyłącznie polu
     /// `przeciwny_kierunek`.
     pub fn przelicz_obce<B: Broker>(&mut self, b: &B, strona_sygnalu: Option<Side>) {
+        let rearm_holds: Vec<bool> = self.lista.iter()
+            .map(|s| s.engine.rearm_entry_hold_reason().is_some()).collect();
         // Zbieramy fakty ZE WSZYSTKICH silników, potem każdemu podajemy sumę
         // pomniejszoną o jego własny wkład. Dwa przebiegi zamiast n², i —
         // co ważniejsze — nikt nie liczy siebie jako obcego.
@@ -708,6 +717,7 @@ impl Silniki {
                     0
                 };
             s.engine.obce = ObceObciazenie {
+                rearm_entry_hold: rearm_holds.iter().enumerate().any(|(j, held)| j != i && *held),
                 pozycje: poz_razem.saturating_sub(moje_poz),
                 koszyki: koszyki_razem.saturating_sub(k),
                 zrealizowane_dzis: dzis_razem - d,
@@ -835,6 +845,10 @@ impl Silniki {
         f: impl FnOnce(&mut Engine, &mut Widok<'_, B>) -> R,
     ) -> R {
         self.propagate_continuation_review();
+        // Fresh per call: an earlier slot may just have submitted or reconciled
+        // a rearm. Derive only from local durable batches, never from this input.
+        self.lista[i].engine.obce.rearm_entry_hold = self.lista.iter().enumerate()
+            .any(|(j, slot)| j != i && slot.engine.rearm_entry_hold_reason().is_some());
         let kto = self.wlasnosc(i);
         // Rozbicie na pola, bo `poczekalnia` i `lista` muszą być pożyczone
         // jednocześnie, a przez `self` kompilator tego nie rozróżni.

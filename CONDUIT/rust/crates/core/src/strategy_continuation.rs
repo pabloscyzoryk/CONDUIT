@@ -77,7 +77,7 @@ pub struct ContinuationImportReport {
     pub review: Option<ContinuationReview>,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub(super) struct ContinuationRuntime {
     scope: Option<String>,
     owner: String,

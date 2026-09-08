@@ -453,6 +453,8 @@ export type LogCategory =
      nie widzialo — w tym KRONIKA, zgloszona przez uzytkownika wprost. */
   /** logs/journal/*.jsonl — rozumowanie silnika */
   | "journal"
+  /** Complete ordered engine/broker recording, including bootstrap. */
+  | "replay_capture"
   /** logs/journal/*.log — lustro tekstowe tego samego (duplikat tresci) */
   | "journal_log"
   /** plik kroniki (domyslnie na pulpicie) — caly strumien z Telegrama */

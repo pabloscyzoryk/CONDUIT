@@ -603,7 +603,7 @@ impl Default for SufitEa {
 /// Wszystko, co rodzina A pamięta między pulsami, siedzi TUTAJ i nigdzie
 /// indziej — inaczej cztery osie zbudowałyby cztery własne migawki jednej
 /// chwili, czyli dokładnie ten błąd, dla którego powstał EA-CORE.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct StanRodzinyA {
     /// **A4** — ile STRATNYCH stopów padło w bieżącej dobie.
     ///

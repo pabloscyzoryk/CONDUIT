@@ -776,11 +776,13 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "conduit-ai",
  "conduit-backtest",
  "conduit-core",
  "conduit-monitor",
+ "flate2",
  "futures-util",
  "lettre",
  "mime_guess",

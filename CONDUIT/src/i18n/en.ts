@@ -2534,6 +2534,8 @@ export const EN = {
   "logs.group.sensitive": "Sensitive data",
   "logs.source.journal.label": "decision journal",
   "logs.source.journal.note": "logs/journal/*.jsonl — what the bot did and why",
+  "logs.source.replay_capture.label": "live replay recording",
+  "logs.source.replay_capture.note": "complete retained sessions: initial state, ordered inputs and broker responses",
   "logs.source.kronika.label": "chronicle",
   "logs.source.kronika.note": "complete Telegram stream, before channel filtering",
   "logs.source.wiadomosci.label": "message archive",

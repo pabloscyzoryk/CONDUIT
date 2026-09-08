@@ -6,7 +6,7 @@ type Key = (SourceKey, i64);
 const MAX_ACTIVE: usize = 128;
 const MAX_SESSION_RECORDS: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeferredEntryState {
     Waiting, NoEntry, Cancelled, Expired, RequiresReview, Attempted, Executed, Rejected,
 }
@@ -22,7 +22,7 @@ impl DeferredEntryState {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeferredEntryStatus {
     pub action_id: String,
     pub state: DeferredEntryState,
@@ -31,6 +31,7 @@ pub struct DeferredEntryStatus {
     pub last_received_utc: Ts,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PendingEntry {
     status: DeferredEntryStatus,
     message: IncomingMessage,
@@ -42,7 +43,7 @@ struct PendingEntry {
     protection_done: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct DeferredEntries {
     records: HashMap<Key, PendingEntry>,
     clock_utc: Option<Ts>,

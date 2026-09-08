@@ -9,6 +9,9 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "alllogs_capture.rs"]
+mod capture_export;
+
 /// ANULOWANIE scalania — jedna flaga wystarcza, bo `uruchom` dopuszcza
 /// najwyżej JEDEN job naraz (bail przy `aktywne`). Ustawia ją REST
 /// `POST /api/logs/merge/cancel`, sprawdza pętla po plikach dziennika —
@@ -1316,6 +1319,15 @@ pub fn zbuduj_z_postepem(st: &StateHandle, postep: Option<std::time::Instant>) -
         }
         spis.push(poz);
     }
+
+    // Capture is exported separately from timestamp-sorted diagnostics: replay
+    // requires its complete bootstrap and original sequence, even across days.
+    spis.push(capture_export::append(
+        &mut o,
+        &st.workspace.logs_dir(),
+        wybor.chce("replay_capture", false),
+        postep.is_some(),
+    )?);
 
     // ---------- 11. stopka ----------
     naglowek(&mut o, "11. CZEGO W TYM PLIKU NIE MA");

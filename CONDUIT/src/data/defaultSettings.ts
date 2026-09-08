@@ -475,6 +475,7 @@ export const DEFAULT_SETTINGS: Settings = {
        `settings.json` bez tych pol tez dostanie komplet — aktualizacja bota
        nie ma prawa po cichu wyciac zrodla ze zrzutu. */
     journal: true,
+    replay_capture: true,
     kronika: true,
     wiadomosci: true,
     /* Lustro tekstowe dziennika: TE SAME zdarzenia co `journal`, tylko dla
@@ -792,6 +793,7 @@ export const MERGE_KEYS: {
 }[] = [
   /* --- strumienie z dysku: caly material do odtworzenia przebiegu --- */
   { key: "journal", label: "dziennik decyzji", grupa: "Strumienie z dysku", note: "logs/journal/*.jsonl — CO bot zrobił i dlaczego" },
+  { key: "replay_capture", label: "nagranie odtwarzania live", grupa: "Strumienie z dysku", note: "pełne zachowane sesje: stan początkowy, kolejność wejść i odpowiedzi brokera" },
   { key: "kronika", label: "kronika", grupa: "Strumienie z dysku", note: "cały strumień z Telegrama, przed filtrem kanałów" },
   { key: "wiadomosci", label: "archiwum wiadomości", grupa: "Strumienie z dysku", note: "logs/wiadomosci/*.jsonl — z edycjami i skasowaniami" },
   { key: "journal_log", label: "dziennik (lustro .log)", grupa: "Strumienie z dysku", note: "te same zdarzenia dla oka — DUBLUJE rozmiar pliku" },

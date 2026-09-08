@@ -12,6 +12,7 @@ mod routing;
 mod runtime_python;
 mod receipt_status;
 mod quote_silence;
+mod replay_capture;
 mod strategy_realized_memory;
 #[cfg(any(feature = "window", test))]
 mod shell_lifecycle;
@@ -44,6 +45,7 @@ impl conduit_server::state::PowiadamiaczTg for MostTg {
 
 fn main() -> Result<()> {
     let argv: Vec<String> = std::env::args().collect();
+    if replay_capture::maybe_cli(&argv)? { return Ok(()); }
     let a = match args::parse(argv) {
         Ok(Parsed::Help) => {
             print!("{}", args::HELP);

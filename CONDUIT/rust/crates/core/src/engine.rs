@@ -12,6 +12,10 @@ use std::collections::HashMap;
 #[path = "relot_reconcile.rs"]
 mod relot_reconcile;
 
+#[path = "rearm_reconcile.rs"]
+mod rearm_reconcile;
+pub use rearm_reconcile::RearmReconcileState;
+
 #[path = "entry_edit.rs"]
 mod entry_edit;
 #[path = "pending_validity.rs"]
@@ -24,6 +28,9 @@ pub use entry_edit::EntryEditOutcome;
 
 #[path = "strategy_continuation.rs"]
 mod strategy_continuation;
+#[path = "replay_bootstrap.rs"]
+mod replay_bootstrap;
+pub use replay_bootstrap::ReplayBootstrap;
 pub use strategy_continuation::{
     ContinuationImportReport, ContinuationOrigin, ContinuationReview, ContinuationReviewScope,
     EngineContinuationV1,
@@ -132,7 +139,7 @@ fn diag_wejscie(
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StanZmiennosci {
     pub sezon_suma: [f64; 24],
     pub sezon_ile: [u32; 24],
@@ -416,14 +423,14 @@ impl Gate {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogLine {
     pub ts: Ts,
     pub level: u8, // 0 info, 1 ok, 2 warn, 3 error
     pub text: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IncomingMessage {
     pub ts: Ts,
     pub source: SourceKey,
@@ -446,14 +453,14 @@ pub struct OdrzuconeWejscie {
     pub tp1: Option<Px>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct DesiredStops {
     sl: Option<Px>,
     tp: Option<Px>,
     last_try: Ts,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct QueuedExit {
     target: Px,
     deadline: Ts,
@@ -462,7 +469,7 @@ struct QueuedExit {
 }
 
 /// Reporting-only observations of the configured parser, never entry authority.
-#[derive(Clone,Copy,Debug)]
+#[derive(Clone,Copy,Debug,serde::Serialize,serde::Deserialize)]
 pub struct EntrySourceObservation {pub has_full_entry:bool,pub first_seen_as_edit:bool}
 
 pub struct Engine {
@@ -494,6 +501,7 @@ pub struct Engine {
     fast_addon_invalid_tp_note: HashMap<u32,u64>,
     // Engine-to-Broker call boundary, not a claim of terminal acceptance.
     order_submission_sequence: u64,
+    rearm_reconcile: rearm_reconcile::RearmReconcile,
     loss_streak: u32,
     paused_until: Ts,
     day_stop: i64,
@@ -571,6 +579,7 @@ impl Engine {
             entry_source_observations: HashMap::new(),
             fast_addon_invalid_tp_note: HashMap::new(),
             order_submission_sequence: 0,
+            rearm_reconcile: Default::default(),
             loss_streak: 0,
             paused_until: 0,
             day_stop: i64::MIN,
@@ -1621,6 +1630,7 @@ impl Engine {
     }
 
     fn open_market_order<B: Broker>(&mut self, b: &mut B, mut r: OrderReq) -> BResult<Ticket> {
+        if self.rearm_confirmation_pending() { return Err(BrokerError::Rejected); }
         if self.continuation_entry_blocked() {
             return Err(BrokerError::Rejected);
         }
@@ -1644,6 +1654,7 @@ impl Engine {
     }
 
     fn place_pending_order<B: Broker>(&mut self, b: &mut B, mut r: PendingReq) -> BResult<Ticket> {
+        if self.rearm_confirmation_pending() { return Err(BrokerError::Rejected); }
         if self.continuation_entry_blocked() {
             return Err(BrokerError::Rejected);
         }
@@ -1752,6 +1763,7 @@ impl Engine {
 
 
     pub fn on_message<B: Broker>(&mut self, b: &mut B, m: &IncomingMessage) {
+        self.reconcile_rearm_batches(b);
         // A rejection may occur before handle_entry; never reuse the previous payload.
         self.wejscie_w_obrobce=None;
         self.continuation_observe(b);
@@ -4857,6 +4869,7 @@ impl Engine {
                     }
 
                     let mut cena_wejscia = px_rynek;
+                    let submission_before = self.order_submission_sequence;
                     let res = if jako_rynek {
                         let tp_rynek = if chce_rynek_hybryda {
                             match self.cfg.market_hybrid_tp_stage {
@@ -4987,7 +5000,12 @@ impl Engine {
                             );
                             placed += 1;
                         }
-                        Err(_) => break,
+                        Err(_) => {
+                            if self.order_submission_sequence != submission_before {
+                                self.remember_rearm_unconfirmed(b, id);
+                            }
+                            break;
+                        }
                     }
                 }
             } else if have > want {
@@ -6906,7 +6924,7 @@ impl Engine {
             return false;
         }
         self.ea
-            .set_continuation_entry_hold(self.continuation_entry_blocked());
+            .set_continuation_entry_hold(self.continuation_entry_blocked() || self.rearm_confirmation_pending());
         self.ea.set_profit_budget_anchor((&self.stats).into());
         let pulsed=self.ea.puls(
             &self.cfg,
@@ -6920,6 +6938,7 @@ impl Engine {
     }
 
     pub fn on_tick<B: Broker>(&mut self, b: &mut B, q: &Quote) {
+        self.reconcile_rearm_batches(b);
         self.continuation_observe(b);
         self.deferred_observe(b, q);
         self.refresh_basket_slots();
@@ -7329,7 +7348,7 @@ impl Engine {
 
         if self.cfg.ea_enabled {
             self.ea
-                .set_continuation_entry_hold(self.continuation_entry_blocked());
+                .set_continuation_entry_hold(self.continuation_entry_blocked() || self.rearm_confirmation_pending());
             self.ea.set_profit_budget_anchor((&self.stats).into());
             self.ea.puls(
                 &self.cfg,
@@ -10811,7 +10830,9 @@ impl Engine {
                     b.close_receipts_pending(),
                 )
             });
+            self.begin_rearm_batch(id, q.ts);
             let dostawione = self.sync_grid(b, id, q.ts, false);
+            self.finish_rearm_batch(dostawione);
             if dostawione == 0 {
                 continue;
             }
@@ -11149,6 +11170,9 @@ impl Engine {
             } else {
                 String::new()
             }
+        }
+        if self.rearm_confirmation_pending() {
+            return Gate::Blocked(zd::<MSG>(|| self.rearm_hold_reason().into()), RejectCode::EntryGateBlocked);
         }
         if self.continuation_entry_blocked() {
             return Gate::Halted(zd::<MSG>(|| {

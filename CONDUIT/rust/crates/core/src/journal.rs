@@ -513,7 +513,7 @@ pub struct Excursion {
 /// „zostawione na stole” dla transzy wychodziłoby zawyżone o już zamkniętą
 /// część. Punkty przelicza się na dolary dopiero przy zapisie — wolumenem
 /// tej konkretnej transakcji.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct ExcState {
     mfe_pts: f64,
     mae_pts: f64,
@@ -837,7 +837,7 @@ pub fn session_day_str(broker_ms: Ts, session_offset_ms: i64) -> String {
 // ============================================================
 
 /// Konfiguracja dziennika widziana przez rdzeń.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JournalConfig {
     pub enabled: bool,
     pub min_level: EventLevel,
@@ -867,7 +867,7 @@ impl Default for JournalConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct JournalBuf {
     pub cfg: JournalConfig,
     /// prefiks identyfikatorów zdarzeń — jeden przebieg = jeden prefiks

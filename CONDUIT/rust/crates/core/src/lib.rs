@@ -1,5 +1,6 @@
 
 pub mod broker;
+pub mod recorded_broker;
 /// Versioned pure cost arithmetic only; not wired into ClosedTrade or trading.
 pub mod cost_receipt;
 pub mod strategy_profit;

@@ -15,6 +15,12 @@ path = "src/main.rs"
 # bez WebView2 i wielokrotnie szybszą w budowie.
 default = ["window"]
 window = ["dep:tauri", "dep:tauri-build"]
+# Offline example only: phase timing is absent from ordinary release binaries.
+capture-benchmark = []
+
+[[example]]
+name = "capture_perf"
+required-features = ["capture-benchmark"]
 
 [dependencies]
 conduit-core = { path = "../core" }
@@ -35,6 +41,7 @@ open = { workspace = true }
 tauri = { version = "2", features = ["tray-icon"], optional = true }
 
 [build-dependencies]
+sha2 = { workspace = true }
 tauri-build = { version = "2", optional = true }
 
 [dev-dependencies]

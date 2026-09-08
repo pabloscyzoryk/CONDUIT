@@ -176,6 +176,8 @@ impl Broker for Audit {
     }
     fn receipt_barrier(&self) -> ReceiptBarrier { self.sim.receipt_barrier() }
     fn execution_session(&self) -> Option<ExecutionSession> { self.sim.execution_session() }
+    fn unconfirmed_open(&self) -> Option<UnconfirmedOpen> { self.sim.unconfirmed_open() }
+    fn confirmed_open(&self, intent: &UnconfirmedOpen) -> Option<Ticket> { self.sim.confirmed_open(intent) }
     fn position_identifier(&self, ticket: Ticket) -> Option<u64> { self.sim.position_identifier(ticket) }
     fn pending_cancel_snapshot_authoritative(&self) -> bool { self.sim.pending_cancel_snapshot_authoritative() }
     fn cost_net_supported(&self) -> bool { self.sim.cost_net_supported() }

@@ -7,7 +7,7 @@
 
 use crate::types::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BrokerError {
     /// SL/TP bliżej ceny niż stops level
     InvalidStops,
@@ -30,15 +30,30 @@ pub enum BrokerError {
 pub type BResult<T> = Result<T, BrokerError>;
 
 /// Temporary delivery lag is retryable; uncertain execution requires review.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReceiptBarrier { Clear, Temporary, RequiresReview }
 
 /// Verified account scope plus ephemeral transport generation. Never restore
 /// this generation from persisted baskets or infer it from a quote timestamp.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionSession { pub scope: String, pub generation: u64 }
 
-#[derive(Debug, Clone)]
+/// Exact identity of a submitted OPEN whose acknowledgement was incomplete.
+/// This is never produced for a local validation failure or a definite refusal.
+/// The machine comment contains the adapter's unique local submission ordinal.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UnconfirmedOpen {
+    pub session: ExecutionSession,
+    pub side: Side,
+    pub requested_volume: f64,
+    pub basket: Option<u32>,
+    pub level: i32,
+    pub is_toucher: bool,
+    pub submitted_quote_ts: Ts,
+    pub machine_comment: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrderReq {
     pub side: Side,
     pub volume: f64,
@@ -50,7 +65,7 @@ pub struct OrderReq {
     pub comment: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingReq {
     pub kind: PendingKind,
     pub volume: f64,
@@ -114,6 +129,14 @@ pub trait Broker {
     }
 
     fn execution_session(&self) -> Option<ExecutionSession> { None }
+
+    /// Evidence for the immediately preceding broker operation only; no RPC.
+    fn unconfirmed_open(&self) -> Option<UnconfirmedOpen> { None }
+
+    /// A unique, confirmed current position for this exact submitted intent.
+    /// Implementations must verify account scope and stable position identity.
+    /// A different transport generation is allowed after a same-account restart.
+    fn confirmed_open(&self, _intent: &UnconfirmedOpen) -> Option<Ticket> { None }
 
     /// Verified stable broker position identity. A ticket is only an execution
     /// alias; unknown is None, never a guessed ticket-to-identifier mapping.

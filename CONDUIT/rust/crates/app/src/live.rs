@@ -856,6 +856,7 @@ impl Handle {
 ///    treść. Bez tego odmowa jest widoczna dopiero w logu procesu.
 struct Recording {
     inner: Mt5Bridge,
+    capture: Option<crate::replay_capture::Session>,
     history: Vec<ClosedTrade>,
     /// odmowy od ostatniego odczytu
     errors: Vec<Odmowa>,
@@ -871,7 +872,7 @@ struct Recording {
 /// jakiej cenie i z jakimi stopami. Bez tego wpis w dzienniku mówi tylko,
 /// że coś się nie udało — a to jest dokładnie ta klasa zapisu, przez którą
 /// „rozstawiono 0 zleceń" zajęło nam wieczór.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct Odmowa {
     op: &'static str,
     err: BrokerError,
@@ -920,6 +921,7 @@ impl Recording {
     fn new(inner: Mt5Bridge) -> Self {
         Recording {
             inner,
+            capture: None,
             history: Vec::new(),
             errors: Vec::new(),
             error_count: 0,
@@ -927,7 +929,10 @@ impl Recording {
     }
 
     /// Zapisuje odmowę razem z kontekstem żądania.
-    fn note_ctx<T>(&mut self, op: &'static str, ctx: Odmowa, r: BResult<T>) -> BResult<T> {
+    fn note_ctx<T: serde::Serialize>(&mut self, op: &'static str, ctx: Odmowa, r: BResult<T>) -> BResult<T> {
+        if let Some(c)=&self.capture {
+            c.tape.append("broker_operation", &serde_json::json!({"operation":op,"context":ctx,"result":conduit_core::recorded_broker::exact::encode(&r).ok(),"evidence":self.inner.operation_evidence(),"result_is_command_ack_not_confirmed_net":true}));
+        }
         if let Err(e) = &r {
             let mut o = ctx;
             o.op = op;
@@ -939,7 +944,7 @@ impl Recording {
         r
     }
 
-    fn note<T>(&mut self, op: &'static str, r: BResult<T>) -> BResult<T> {
+    fn note<T: serde::Serialize>(&mut self, op: &'static str, r: BResult<T>) -> BResult<T> {
         let ctx = Odmowa::nowa(op, BrokerError::Rejected);
         self.note_ctx(op, ctx, r)
     }
@@ -979,6 +984,8 @@ impl Broker for Recording {
     }
     fn receipt_barrier(&self) -> conduit_core::broker::ReceiptBarrier { self.inner.receipt_barrier() }
     fn execution_session(&self) -> Option<conduit_core::broker::ExecutionSession> { self.inner.execution_session() }
+    fn unconfirmed_open(&self) -> Option<conduit_core::broker::UnconfirmedOpen> { self.inner.unconfirmed_open() }
+    fn confirmed_open(&self, intent: &conduit_core::broker::UnconfirmedOpen) -> Option<Ticket> { self.inner.confirmed_open(intent) }
     fn position_identifier(&self, ticket: Ticket) -> Option<u64> { self.inner.position_identifier(ticket) }
     fn pending_cancel_snapshot_authoritative(&self) -> bool { self.inner.pending_cancel_snapshot_authoritative() }
     fn cost_net_supported(&self) -> bool { self.inner.cost_net_supported() }
@@ -2363,6 +2370,8 @@ struct TrwalySilnik {
     profit_budget_anchor: Option<conduit_core::profit_budget::BudgetAnchorBits>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_sources: Vec<conduit_core::engine::PendingSourceRecord>,
+    #[serde(default)]
+    rearm_reconcile: conduit_core::engine::RearmReconcileState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     entry_sources: Vec<conduit_core::engine::EntrySourceRecord>,
     #[serde(default,skip_serializing_if="Option::is_none")]
@@ -2459,7 +2468,7 @@ fn sygnatura_ryzyka(silniki: &routing::Silniki) -> String {
     serde_json::to_string(&silniki.lista.iter().map(|s| (
         &s.format, &s.engine.halted, s.engine.risk_override,
         s.engine.stopped_trading_day(), s.engine.pending_source_memory_revision(),
-        s.engine.entry_source_memory_revision(),
+        s.engine.entry_source_memory_revision(),s.engine.rearm_reconcile_revision(),
         (s.engine.cfg.profit_budget_arm_pct!=0.0).then_some((s.engine.stats.day,
             s.engine.stats.day_start_equity.to_bits(),s.engine.stats.day_peak_equity.to_bits())),
     )).collect::<Vec<_>>()).expect("risk signature contains only JSON-safe scalars")
@@ -2479,6 +2488,7 @@ fn save_follow_memory(st: &StateHandle, silniki: &routing::Silniki, toz: &condui
             stopped_trading_day:s.engine.stopped_trading_day(),
             profit_budget_anchor:(s.engine.cfg.profit_budget_arm_pct!=0.0).then(|| (&s.engine.stats).into()),
             pending_sources:s.engine.export_pending_source_memory(),
+            rearm_reconcile:s.engine.rearm_reconcile_state(),
             entry_sources:s.engine.export_entry_source_memory(),
             continuation:s.engine.export_strategy_continuation()})
     }).collect();
@@ -2581,7 +2591,8 @@ fn przetworz_ticki_live(
             );
         }
         let dispatch_utc = conduit_server::now_ms();
-        silniki.kazdy(broker, |e, w| e.on_tick_received(w, q, dispatch_utc));
+        let capture=broker.capture.clone();
+        silniki.kazdy(broker, |e, w| match &capture {Some(c)=>c.tick(e,w,q,dispatch_utc),None=>e.on_tick_received(w,q,dispatch_utc)});
         if let Some(d) = dziennik.as_mut() {
             for s in silniki.lista.iter_mut() {
                 if s.engine.journal.len() >= 512 {
@@ -2591,6 +2602,17 @@ fn przetworz_ticki_live(
             }
         }
     }
+}
+
+// Capture epochs rotate only between complete Engine decisions. This never
+// replaces or resets a trading Engine, source ledger or account state.
+fn seal_capture(broker:&mut Recording,reason:&str)->Option<String>{
+    let c=broker.capture.take()?;let previous=c.tape.run_id.clone();
+    c.tape.append("session_end",&serde_json::json!({"reason":reason,"logical_capture_boundary":true}));c.tape.finish_async();Some(previous)
+}
+fn start_capture_checkpoint(st:&StateHandle,broker:&mut Recording,previous:&str,reason:&str){
+    let run_id=conduit_server::journal::provenance::new_run_id("live-checkpoint");
+    broker.capture=match crate::replay_capture::Session::checkpoint(&st.workspace.logs_dir().join("replay_capture"),&run_id,previous,reason){Ok(c)=>Some(c),Err(e)=>{st.log("system","warn","Replay capture unavailable",format!("{e}"));None}};
 }
 
 fn handel(
@@ -2605,6 +2627,10 @@ fn handel(
 ) -> String {
     let info = most.symbol_info().clone();
     let mut broker = Recording::new(most);
+    let run_id = conduit_server::journal::provenance::new_run_id("live");
+    broker.capture = match crate::replay_capture::Session::start(&st.workspace.logs_dir().join("replay_capture"), &run_id) {
+        Ok(c)=>Some(c),Err(e)=>{st.log("system","warn","Replay capture unavailable",format!("{e}"));None}
+    };
     let follow = broker.inner.transport().config().follow_terminal_account;
     let account_session = if follow {
         connected.store(false, Ordering::Release);
@@ -2664,13 +2690,17 @@ fn handel(
     let kredyt_brokera = broker.account().credit;
     // JEDEN SILNIK NA FORMAT HANDLUJĄCY — patrz `crate::routing`.
     let mut odcisk_biezacy = odcisk_konfiguracji(st);
+    if let Some(c)=&broker.capture { c.tape.append("application_bootstrap",&serde_json::json!({
+        "settings":core,"imported_engine_memory":conduit_core::recorded_broker::exact::encode(&trwale.silniki).ok(),
+        "initial_account":broker.account(),"initial_positions":broker.positions(),"initial_pendings":broker.pendings(),
+        "scope":"account_bound_before_engine_construction; complete warmed decision state follows in each first engine frame"
+    })); }
     let mut silniki = zbuduj_silniki(st, &core, saldo);
     // Concurrent file change after pre-connect check: no new risk can escape.
     if silniki.lista.iter().any(|s| live_sr_v2_requested(&s.engine.cfg)) {
         note_live_sr_hold(st);
         broker.inner.hold_new_entries(LIVE_SR_V2_HOLD);
     }
-    let run_id = conduit_server::journal::provenance::new_run_id("live");
     // Opis szczebli drabinki, na których konto NIE stoi. Budowany tu i przy
     // każdej przebudowie łańcucha — nie w pętli publikacji (4×/s), bo czyta
     // katalog presetów z dysku.
@@ -2879,6 +2909,7 @@ fn handel(
     };
     let mut provenance_start =
         provenance.session_start(provenance_broker_ms, migawka_provenance(st, &silniki));
+    if let Some(c)=&broker.capture {c.tape.append("application_provenance",&provenance_start);}
     if let Some(writer) = dziennik.as_mut() {
         let _ = writer.write(
             std::slice::from_mut(&mut provenance_start),
@@ -2938,6 +2969,10 @@ fn handel(
     // zapamiętanie stanu w `Trwale` i ostatni zrzut na dysk są na ścieżce,
     // której nie da się ominąć nową gałęzią wyjścia dopisaną za pół roku.
     let powod = loop {
+        if broker.capture.as_ref().is_some_and(|c|c.tape.rotation_due()) {
+            if let Some(previous)=seal_capture(&mut broker,"bounded_recording_rotation") {start_capture_checkpoint(st,&mut broker,&previous,"continuous_checkpoint_rotation");}
+        }
+        if let Some(c)=&broker.capture {if let Some(reason)=c.tape.take_warning(){st.log("system","warn","Replay capture incomplete",reason);}}
         let mut sprawdz_provenance = false;
         if let Some(reason)=initial_risk_error.take() { break reason; }
         if stop.load(Ordering::Relaxed) {
@@ -3261,6 +3296,7 @@ fn handel(
                         st.log("telegram", "info", "Sygnał odrzucony", id);
                     }
                     LiveCmd::Panel(cmd) => {
+                        let capture_before=seal_capture(&mut broker,"manual_application_boundary");
                         wykonaj_panel(
                             st,
                             &mut silniki,
@@ -3269,6 +3305,7 @@ fn handel(
                             ostatni_ts,
                             &mut diagnoza_petli,
                         );
+                        if let Some(previous)=capture_before{start_capture_checkpoint(st,&mut broker,&previous,"manual_application_boundary_not_rederived");}
                     }
                 }
             }
@@ -3499,6 +3536,7 @@ fn handel(
         }
     };
 
+    if let Some(c)=&broker.capture {c.tape.append("session_end",&serde_json::json!({"reason":powod}));c.tape.finish();if let Some(reason)=c.tape.take_warning(){st.log("system","warn","Replay capture incomplete",reason);}}
     // ---------- co przeżywa to wyjście ----------
     observe_account_rdd(&mut real_drawdown_day, broker.inner.drain_account_observations(), &toz);
     st.update(Sections::one(Section::Stats), |s| {
@@ -3667,6 +3705,7 @@ fn przenies_pamiec(
             continue;
         };
         s.engine.restore_pending_source_memory(&t.pending_sources);
+        s.engine.restore_rearm_reconcile_state(t.rearm_reconcile.clone());
         s.engine.restore_entry_source_memory(&t.entry_sources);
         let Some(stats) = t.stats.take() else {
             continue;
@@ -4090,6 +4129,7 @@ fn zapamietaj_silniki(
                 stopped_trading_day: s.engine.stopped_trading_day(),
                 profit_budget_anchor:(s.engine.cfg.profit_budget_arm_pct!=0.0).then(|| (&s.engine.stats).into()),
                 pending_sources: s.engine.export_pending_source_memory(),
+                rearm_reconcile:s.engine.rearm_reconcile_state(),
                 entry_sources: s.engine.export_entry_source_memory(),
                 continuation: s.engine.export_strategy_continuation(),
             },
@@ -4169,7 +4209,8 @@ fn skieruj(
             // zakladac cokolwiek o wyniku `on_message`.
             let przed: std::collections::BTreeMap<String, u64> =
                 silniki.z_widokiem(i, broker, |e, _| e.odrzuty.clone());
-            silniki.z_widokiem(i, broker, |e, w| e.on_message_received(w, im, received_utc));
+            let capture=broker.capture.clone();
+            silniki.z_widokiem(i, broker, |e, w| match &capture {Some(c)=>c.message(e,w,im,received_utc),None=>e.on_message_received(w,im,received_utc)});
             let deferred = silniki.z_widokiem(i, broker, |e, _| {
                 e.deferred_entry_status(&im.source, im.edit_of.unwrap_or(im.msg_id))
                     .or_else(|| im.reply_to.and_then(|id| e.deferred_entry_status(&im.source, id)))
@@ -5099,6 +5140,9 @@ fn wznow_handel(
 /// reserves constrain account-wide manual new exposure as well.
 fn manual_profit_budget_allowed<B:Broker>(silniki:&mut routing::Silniki,b:&B,side:Side,entry:Px,
     sl:Option<Px>,requested:f64)->Result<(),String> {
+    // Unresolved rearm submissions may already be live. New manual exposure
+    // uses the same account hold, including management-only engine legs.
+    for slot in &silniki.lista {if let Some(reason)=slot.engine.rearm_entry_hold_reason(){return Err(reason.into());}}
     let mut maximum=requested;
     for engine in silniki.lista.iter_mut().filter(|s|!s.tylko_zarzadzanie).map(|s|&mut s.engine) {
         if engine.cfg.profit_budget_arm_pct!=0.0 && engine.stats.day==conduit_core::day_of(b.quote().ts,engine.cfg.session_offset()) {
@@ -6321,6 +6365,21 @@ mod tests {
     use conduit_backtest::sim::SimBroker;
     use conduit_core::journal::{EventKind, RejectCode};
     use conduit_core::settings::Settings;
+
+    #[test]
+    fn manual_new_exposure_respects_rearm_hold_in_management_only_engine() {
+        let st=stan("manual-rearm-hold");let mut team=zbuduj_silniki(&st,&Settings::default(),600.0);
+        let mut broker=SimBroker::new(600.0,0.0,0.0);
+        broker.on_quote(Quote{ts:1_800_000_000_000,bid:4000.0,ask:4000.2});
+        let pending:conduit_core::engine::RearmReconcileState=serde_json::from_value(serde_json::json!({"batches":[{"basket":1,"submitted_ts":1_800_000_000_000i64,"count_before":0,"last_before":0,"counted":false,"review":null,"intents":[]}]})).unwrap();
+        team.lista[0].engine.restore_rearm_reconcile_state(pending);
+        team.lista[0].tylko_zarzadzanie=true;
+        let before=(broker.positions().len(),broker.pendings().len());
+        let error=manual_profit_budget_allowed(&mut team,&broker,Side::Buy,4000.2,Some(3990.0),0.01).unwrap_err();
+        assert!(error.starts_with("REARM HOLD:"));assert_eq!(before,(broker.positions().len(),broker.pendings().len()));
+        team.lista[0].engine.restore_rearm_reconcile_state(Default::default());
+        assert!(manual_profit_budget_allowed(&mut team,&broker,Side::Buy,4000.2,Some(3990.0),0.01).is_ok());
+    }
 
     #[test]
     fn chat_ui_preserves_utc_while_engine_receives_broker_quote_clock() {

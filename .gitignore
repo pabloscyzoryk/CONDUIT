@@ -27,5 +27,6 @@
 **/*.npy
 **/ChatExport*/
 **/alllogs*.txt
+**/replay_capture/
 **/VPSREADY*/
 **/_work*/
