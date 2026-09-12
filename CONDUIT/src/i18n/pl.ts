@@ -403,7 +403,7 @@ export const PL: Record<keyof typeof EN, string> = {
   "lot.size.hint": "Każde wejście tego presetu zaczyna od tego wolumenu; ograniczenia ryzyka i brokera nadal obowiązują.",
   "lot.manual.size.hint": "Domyślny wolumen ręcznego biletu. Automatyczne wejścia używają ustawień lota własnego presetu.",
   "lot.pct": "Procent konta",
-  "lot.pct.hint": "1% = 0.01 lota przy $100 balansu, 0.10 lota przy $1000.",
+  "lot.pct.hint": "Procent skaluje wielkość zlecenia od wybranej bazy kapitału, nie ryzyko straty do SL. Przed limitami i zaokrągleniem: 1% = 0.01 lota przy bazie $100, 0.10 lota przy $1000. Łączne ryzyko koszyka zależy od wszystkich pozycji, ich wolumenu i odległości SL.",
   "lot.base.balance": "saldo brokera",
   "lot.base.credit": "kredyt",
   "lot.base.base": "podstawa lota",

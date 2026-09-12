@@ -981,7 +981,7 @@ export const SCHEMA_EN: Record<string, GrupaEn> = {
       },
       equity_floor_pct: {
         label: "EQUITY FLOOR",
-        hint: "Below this % of starting capital the bot opens nothing new. Open positions finish normally. 0 = disabled.",
+        hint: "At equity equal to or below this % of starting capital, the account entry gate blocks new entries. It does not cancel pending orders already submitted or close positions; those orders can still fill. If equity rises above the threshold, entries may resume automatically if other rules allow them. This is not a maximum loss limit. 0 = disabled.",
       },
       regime_filter: {
         label: "MARKET REGIME FILTER",

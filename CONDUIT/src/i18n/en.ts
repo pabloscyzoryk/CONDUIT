@@ -415,7 +415,7 @@ export const EN = {
   "lot.size.hint": "Each entry of this preset starts from this volume; risk and broker constraints still apply.",
   "lot.manual.size.hint": "Default volume for the manual order ticket. Automatic entries use their own preset's lot settings.",
   "lot.pct": "Percent of account",
-  "lot.pct.hint": "1% = 0.01 lots at $100 balance, 0.10 lots at $1000.",
+  "lot.pct.hint": "The percentage scales order size from the selected capital basis, not the risk of loss at SL. Before limits and rounding: 1% = 0.01 lots at a $100 basis, 0.10 lots at $1000. Total basket risk depends on all positions, their volume and SL distance.",
   "lot.base.balance": "broker balance",
   "lot.base.credit": "credit",
   "lot.base.base": "lot base",

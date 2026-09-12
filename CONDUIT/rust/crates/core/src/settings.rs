@@ -3826,9 +3826,12 @@ impl Settings {
 
         if self.equity_floor_pct > 0.0 {
             v.push(format!(
-                "`equity_floor_pct = {}` blokuje NOWE wejścia poniżej progu i jest \
-                 STANEM POCHŁANIAJĄCYM: konto zamiera i nie wznowi się samo, \
-                 wymaga ręcznej decyzji. Na VPS oznacza cichy stop.",
+                "`equity_floor_pct = {}` blokuje nowe wejścia sprawdzane przez bramkę rachunku, \
+                 gdy equity jest równe lub niższe od tego % kapitału startowego. \
+                 Nie anuluje wcześniej wystawionych zleceń oczekujących ani nie zamyka pozycji; \
+                 zlecenia te nadal mogą się wykonać. Po wzroście equity ponad próg wejścia \
+                 mogą wznowić się samoczynnie, jeśli inne reguły na to pozwalają. \
+                 To nie limit maksymalnej straty.",
                 self.equity_floor_pct
             ));
         }

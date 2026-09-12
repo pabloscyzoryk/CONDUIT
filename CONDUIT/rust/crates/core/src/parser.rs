@@ -196,6 +196,15 @@ re!(
     RE_RF_INTENCJA,
     r"(?i)\b(?:WILL|LOOK\s+TO|TRY(?:ING)?\s+TO|IF\s+POSSIBLE|LOOKING|SCOPE\s+FOR)\b"
 );
+re!(
+    RE_RF_REMOVED_MESSAGE,
+    concat!(
+        r"(?i)\b(?:REMOVED|DELETED)\s+(?:(?:THE|MY|OUR|OLD|EARLIER|PREVIOUS|PRIOR|ALL|THOSE|BOTH)\s+){0,6}",
+        r"RISK\s*(?:FREE+|FEEE|FRE)\b\s+(?:MESSAGES?|POSTS?|UPDATES?)\b",
+        r"|\bRISK\s*(?:FREE+|FEEE|FRE)\b\s+(?:MESSAGES?|POSTS?|UPDATES?)\s+",
+        r"(?:(?:WAS|WERE|HAVE|HAS|BEEN|ALREADY|JUST|NOW)\s+){0,6}(?:REMOVED|DELETED)\b"
+    )
+);
 re!(RE_OAE, r"(?i)\bOUT\s+AT\s+(?:ENTRY|BE)\b");
 re!(
     RE_OAE_LUZ,
@@ -483,6 +492,13 @@ fn rf_linia_z_intencja(text: &str, (rf_start, rf_end): (usize, usize)) -> bool {
     RE_RF_INTENCJA.is_match(&text[od..dokad])
 }
 
+// Scope the exclusion to the removed-message phrase. Another current RF
+// instruction, or a TP report in the same message, remains actionable.
+fn rf_removed_message_mention(text: &str, rf: regex::Match<'_>) -> bool {
+    RE_RF_REMOVED_MESSAGE.find_iter(text)
+        .any(|m| m.start() <= rf.start() && rf.end() <= m.end())
+}
+
 pub fn parse(text: &str) -> Vec<Signal> {
     parse_z_opcjami(text, OpcjeParsera::default())
 }
@@ -527,9 +543,12 @@ pub fn parse_z_opcjami(text: &str, opcje: OpcjeParsera) -> Vec<Signal> {
         out.push(Signal::TpHit { index: None });
     }
 
-    let rf_traf = RE_RF.captures(text).or_else(|| {
+    let rf_traf = RE_RF.captures_iter(text)
+        .find(|c| !rf_removed_message_mention(text, c.get(0).expect("RF match")))
+        .or_else(|| {
         if opcje.luz_interpunkcyjny {
-            RE_RF_TYPO.captures(text)
+            RE_RF_TYPO.captures_iter(text)
+                .find(|c| !rf_removed_message_mention(text, c.get(0).expect("RF match")))
         } else {
             None
         }
@@ -1269,6 +1288,40 @@ mod public_synthetic_tests {
             parse("RISK FREE AT 2112")[0],
             Signal::RiskFree { level: Some(v) } if v == 2112.0
         ));
+    }
+
+    #[test]
+    fn removed_rf_message_is_not_a_new_command_but_tp_update_survives() {
+        for text in [
+            "I removed the risk free messages because the move was too fast, then we hit TP3",
+            "Deleted previous risk free messages. TP3 HIT",
+            "The risk free messages have been deleted. TP3 HIT",
+        ] {
+            let signals = parse_z_opcjami(text, OpcjeParsera::default());
+            assert!(!signals.iter().any(|s| matches!(s, Signal::RiskFree { .. })), "{text}");
+            assert!(signals.iter().any(|s| matches!(s, Signal::TpHit { index: Some(3) })), "{text}");
+        }
+    }
+
+    #[test]
+    fn deleted_rf_mention_does_not_mask_separate_current_rf_instruction() {
+        let text = "I removed old risk free messages. RISK FREE AT 2112";
+        let signals = parse(text);
+        let levels: Vec<_> = signals.iter().filter_map(|s| match s {
+            Signal::RiskFree { level } => Some(*level), _ => None,
+        }).collect();
+        assert_eq!(levels, vec![Some(2112.0)]);
+    }
+
+    #[test]
+    fn genuine_rf_and_unrelated_deleted_messages_remain_commands() {
+        for text in ["RISK FREE", "RISK FREE AT 2112", "Deleted old messages. RISK FREE AT 2112"] {
+            assert!(parse(text).iter().any(|s| matches!(s, Signal::RiskFree { .. })), "{text}");
+        }
+        let mut options = OpcjeParsera::default();
+        options.rf_wymaga_wykonania = true;
+        assert!(!parse_z_opcjami("Will try to go RISK FREE", options)
+            .iter().any(|s| matches!(s, Signal::RiskFree { .. })));
     }
 
     #[test]

@@ -3276,8 +3276,8 @@
     "RUNNER HAS NO EXIT: `risk_free_runner_target = NoTpTrailOnly` removes the target and delegates management to trailing, `trail_mode`/`trail_runner_mode = Off` disable trailing, `be_offset = {}` makes `sl_is_valid` reject a BE stop, and `riskfree_runner_max_hold_min` does not apply. After RISK FREE the position has NO target, NO ratchet, and NO deadline. Cheapest exit: `runner_max_hold_bez_reguly = true` (does not cap profit or move the stop)."
   ],
   [
-    "`equity_floor_pct = {}` blokuje NOWE wejścia poniżej progu i jest STANEM POCHŁANIAJĄCYM: konto zamiera i nie wznowi się samo, wymaga ręcznej decyzji. Na VPS oznacza cichy stop.",
-    "`equity_floor_pct = {}` blocks NEW entries below the threshold and creates an ABSORBING STATE: the account freezes and will not resume by itself; a manual decision is required. On a VPS this means a silent stop."
+    "`equity_floor_pct = {}` blokuje nowe wejścia sprawdzane przez bramkę rachunku, gdy equity jest równe lub niższe od tego % kapitału startowego. Nie anuluje wcześniej wystawionych zleceń oczekujących ani nie zamyka pozycji; zlecenia te nadal mogą się wykonać. Po wzroście equity ponad próg wejścia mogą wznowić się samoczynnie, jeśli inne reguły na to pozwalają. To nie limit maksymalnej straty.",
+    "`equity_floor_pct = {}` blocks new entries checked by the account entry gate when equity is equal to or below this % of starting capital. It does not cancel pending orders already submitted or close positions; those orders can still fill. If equity rises above the threshold, entries may resume automatically if other rules allow them. This is not a maximum loss limit."
   ],
   [
     "`max_dd_pct = {}` / `max_dd_usd = {}` ZAMYKA WSZYSTKO po cenie dna i wstrzymuje wejścia (także dokładki i odbudowę siatki). Zmierzone na kwietniu-maju: już DWA zadziałania pogarszają i zysk, i dno equity (30,76 $ wobec 31,56 $ bez hamulca), a próg 40 % zbija dno do 6,93 $. Rozważ `max_portfolio_risk_pct` — dławi zamiast zatrzymywać.",

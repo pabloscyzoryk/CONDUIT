@@ -1943,7 +1943,7 @@ export const SETTINGS_SCHEMA: GroupDef[] = [
       {
         key: "equity_floor_pct",
         label: "PODŁOGA EQUITY",
-        hint: "Poniżej tego % kapitału startowego bot nie otwiera już nic nowego. Otwarte pozycje dokańczają normalnie. 0 = wyłączone.",
+        hint: "Przy equity równym lub niższym od tego % kapitału startowego bramka rachunku blokuje nowe wejścia. Nie anuluje wcześniej wystawionych zleceń oczekujących ani nie zamyka pozycji; zlecenia te nadal mogą się wykonać. Po wzroście equity ponad próg wejścia mogą wznowić się samoczynnie, jeśli inne reguły na to pozwalają. To nie limit maksymalnej straty. 0 = wyłączone.",
         type: "num",
         min: 0,
         max: 100,

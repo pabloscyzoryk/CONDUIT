@@ -1025,6 +1025,8 @@ pub fn run_with_progress(
             // poziomu marginesu. `mark` daje sam swap i cenę, czyli dokładnie
             // to, czego wymaga „noc kosztuje".
             //
+            // Legacy incremental counter only; the final report below counts
+            // the full ledger by closing date, independently of this axis.
             // D5: zamknięcia z TEGO bloku (nocne SL/TP z luki oraz `EodFlat`
             // niżej) nie trafiały do `DayStat::trades` ŻADNEGO dnia: pierwsze
             // padały przed `daily.push`, drugie po nim, a licznik zaraz potem
@@ -1368,6 +1370,8 @@ pub fn run_with_progress(
             }
         }
 
+        // Historical incremental counters stay separate from execution.
+        // The final ledger recount below fixes their omissions for every axis.
         // D5b: ZAMKNIĘCIA WYWOŁANE KOMUNIKATEM TEŻ SIĘ NIE LICZYŁY.
         //
         // Znalezione przy mierzeniu wpływu D5 (OMEGA-X2, 18.08): suma
@@ -1748,6 +1752,18 @@ pub fn run_with_progress(
 
     // pełna historia transakcji (kolejkę `drain_closed` konsumuje silnik)
     all_trades.extend(broker.history.iter().cloned());
+
+    // Reporting only: count every closed ledger record on its broker closing
+    // date, including message exits, partial closes and rollover execution.
+    // Do not move the execution/accounting anchors above: the legacy axis also
+    // changes quote ordering and resets. Cash, equity and the ledger stay intact.
+    let mut closed_by_day = HashMap::<i64, u32>::new();
+    for trade in &all_trades {
+        *closed_by_day.entry(day_of(trade.close_ts, tz)).or_default() += 1;
+    }
+    for day in &mut daily {
+        day.trades = closed_by_day.get(&day.day).copied().unwrap_or(0);
+    }
 
     // ON only: report the complete own-equity path (realized + floating).
     // Do NOT use closed trades alone: positions may remain open at the end.

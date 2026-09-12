@@ -36,6 +36,34 @@ const { ENGINE_TEMPLATES } = load('@/i18n/engineTemplates');
 const { presentEngineText } = load('@/i18n/enginePresentation');
 const { tSilnik } = load('@/i18n/silnik');
 
+test('equity floor wording allows old pending fills and conditional recovery; percent lot is not SL risk', () => {
+  const source = readFileSync(resolve(root, '../rust/crates/core/src/settings.rs'), 'utf8');
+  const literal = source.match(/"(`equity_floor_pct = \{\}`[^"\n]*(?:\\\r?\n[^"\n]*)*)"/);
+  assert.ok(literal, 'read the actual production settings warning');
+  const polish = literal[1].replace(/\\\r?\n\s*/g, '').replace('{}', '35');
+  i18n.setLanguage('en');
+  const english = tSilnik(polish);
+  assert.ok(english.startsWith('`equity_floor_pct = 35` blocks new entries checked by the account entry gate'));
+  for (const phrase of ['equal to or below', 'orders can still fill', 'may resume automatically', 'other rules', 'not a maximum loss limit'])
+    assert.ok(english.includes(phrase), phrase);
+  i18n.setLanguage('pl'); assert.equal(tSilnik(english), polish);
+  for (const language of ['pl', 'en']) {
+    i18n.setLanguage(language);
+    const fields = przetlumaczGrupy(SETTINGS_SCHEMA, language).flatMap(g => g.fields);
+    const floor = fields.find(f => f.key === 'equity_floor_pct');
+    assert.ok(floor);
+    const hint = floor.hint;
+    assert.equal(typeof hint, 'string');
+    assert.ok(hint.includes(language === 'pl' ? 'zlecenia te nadal mogą się wykonać' : 'orders can still fill'));
+    assert.ok(hint.includes(language === 'pl' ? 'mogą wznowić się samoczynnie' : 'may resume automatically'));
+    assert.ok(hint.includes(language === 'pl' ? 'inne reguły' : 'other rules'));
+    assert.ok(hint.includes('0 ='));
+    const lot = i18n.t('lot.pct.hint');
+    assert.ok(lot.includes(language === 'pl' ? 'nie ryzyko straty do SL' : 'not the risk of loss at SL'));
+    for (const value of ['1%', '0.01', '$100', '0.10', '$1000']) assert.ok(lot.includes(value));
+  }
+});
+
 test('mode namespaces and passive source quarantine retain counts, history and account scope in PL/EN', () => {
   const live = readFileSync(resolve(root, '../rust/crates/app/src/live.rs'), 'utf8');
   for (const literal of ["T-100 source context", "contexts quarantined after an observation gap; pending history retained, new confirmed signals remain usable", "events; affected old contexts require a new complete source version", "Cannot restore the account's active strategy mode:"])

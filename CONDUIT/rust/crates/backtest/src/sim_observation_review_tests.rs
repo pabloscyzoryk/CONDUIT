@@ -103,9 +103,10 @@ fn physical_rows_preserve_forced_eod_and_new_day_entry_in_reset_and_flat_modes()
                 assert_eq!(new.close_price, 3990.0, "{label}");
                 assert!((result.metrics.total_profit + 8.0).abs() < 1e-8, "{label}");
                 assert_eq!(result.daily.len(), 2, "{label}");
-                assert_eq!(result.daily[0].trades, if v2 { 1 } else { 0 },
-                    "B15 must not silently rewrite legacy D4 daily attribution: {label}");
-                assert_eq!(result.daily[1].trades, 1, "{label}");
+                // The report uses the broker closing date for both records,
+                // independently of D4/B15 execution and reset semantics.
+                assert_eq!(result.daily[0].trades, 0, "{label}");
+                assert_eq!(result.daily[1].trades, 2, "{label}");
             }
         }}
     }}

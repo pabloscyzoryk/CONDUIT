@@ -46,14 +46,14 @@ fn katalog(nazwa: &str) -> std::path::PathBuf {
     d
 }
 
-/// D5: transakcje zamknięte NA GRANICY DOBY należą do dnia zamykanego.
+/// D5: wszystkie zamknięcia należą do raportowej daty ich wykonania.
 ///
 /// Bez osi zamknięcia z `EodFlat` padają PO `daily.push`, a licznik zaraz
 /// potem wraca do zera — więc suma `DayStat::trades` po wszystkich dniach
-/// jest MNIEJSZA niż liczba transakcji przebiegu. To psuje tryb dzienny,
-/// czyli główne kryterium wyboru presetu.
+/// była MNIEJSZA niż liczba transakcji przebiegu. Raport liczy teraz pełny
+/// ledger niezależnie od osi, bez zmiany granic wyceny i resetowania konta.
 #[test]
-fn d5_transakcje_z_granicy_doby_trafiaja_do_dnia_zamykanego() {
+fn d5_transakcje_z_granicy_doby_trafiaja_do_dnia_wykonania() {
     let dir = katalog("d5_granica");
     let plik = dir.join("ticks.bin");
 
@@ -93,6 +93,12 @@ fn d5_transakcje_z_granicy_doby_trafiaja_do_dnia_zamykanego() {
             ..Default::default()
         };
         let r = run(&dane, &msgs, &cfg);
+        for day in &r.daily {
+            let closed = r.trades.iter()
+                .filter(|t| t.close_ts.div_euclid(86_400_000) == day.day)
+                .count() as u32;
+            assert_eq!(day.trades, closed, "broker closing date, axis={os}");
+        }
         let suma_dni: u32 = r.daily.iter().map(|d| d.trades).sum();
         (r.metrics.trades, suma_dni)
     };
@@ -112,10 +118,9 @@ fn d5_transakcje_z_granicy_doby_trafiaja_do_dnia_zamykanego() {
         trejdy_bez, trejdy_z,
         "sama oś księgowania nie ma prawa zmienić LICZBY transakcji"
     );
-    assert!(
-        dni_bez < trejdy_bez,
-        "warunek testu: bez osi transakcje z granicy doby mają GINĄĆ \
-         ({dni_bez} z {trejdy_bez})"
+    assert_eq!(
+        dni_bez, trejdy_bez,
+        "raport obejmuje zamknięcia także przy starej osi wykonania"
     );
     assert_eq!(
         dni_z, trejdy_z,
@@ -198,8 +203,8 @@ fn d5b_zamkniecie_komunikatem_trafia_do_dnia() {
         "oś księgowania nie zmienia LICZBY transakcji"
     );
     assert_eq!(
-        dni_bez, 0,
-        "warunek testu: bez osi zamknięcia z komunikatu mają GINĄĆ co do jednego"
+        dni_bez, trejdy_bez,
+        "raport obejmuje komunikaty także przy starej osi wykonania"
     );
     assert_eq!(
         dni_z, trejdy_z,
@@ -207,6 +212,65 @@ fn d5b_zamkniecie_komunikatem_trafia_do_dnia() {
     );
 
     let _ = std::fs::remove_file(&plik);
+}
+
+/// Reporting includes both RF-message exits and later broker SL exits,
+/// with either execution ordering and without enabling the legacy D axis.
+#[test]
+fn daily_count_includes_rf_message_and_tick_exits_in_both_orderings() {
+    let dir = katalog("daily_count_rf_message");
+    let plik = dir.join("ticks.bin");
+    let t0: Ts = 1_775_000_000_000;
+    zapisz_ticki(&plik, &[
+        (t0 - 1_000, 4008.0, 4008.2),
+        (t0, 4008.0, 4008.2),
+        (t0 + 2_000, 3999.0, 3999.2),
+        (t0 + 3_000, 4001.0, 4001.2),
+        (t0 + 4_000, 4001.0, 4001.2),
+        (t0 + 5_000, 3990.0, 3990.2),
+    ]);
+    let ticks = TickData::open(&plik).unwrap();
+    let messages = [
+        ReplayMessage { ts: t0, telegram_published_ts: None, msg_id: 1,
+            reply_to: None, edit_of: None, kanal: String::new(),
+            text: "BUY LIMITS GOLD @ 4005/4000 AREA\nTP 4010\nTP 4020\nTP 4030\nSL 3995".into() },
+        ReplayMessage { ts: t0 + 3_000, telegram_published_ts: None, msg_id: 2,
+            reply_to: Some(1), edit_of: None, kanal: String::new(),
+            text: "RISK FREE 4000".into() },
+    ];
+    let mut expected_execution = None;
+    for accounting_axis in [false, true] {
+        for strict_order in [false, true] {
+            let mut s = ustawienia();
+            s.server_tz_offset_ms = 0;
+            s.runner_ksiegowanie_v2 = accounting_axis;
+            s.live_tick_order_strict = strict_order;
+            s.entry_units = 3;
+            s.lot_fixed = 0.01;
+            s.lot_max = 0.01;
+            s.risk_free_mode = conduit_core::settings::RiskFreeMode::CloseAllKeepNearest;
+            s.risk_free_runners = 1;
+            let r = run(&ticks, &messages, &RunConfig {
+                from: t0 - 1_000, to: t0 + 5_001, start_balance: 1000.0,
+                settings: s, ..Default::default()
+            });
+            assert!(r.trades.iter().any(|t| t.reason == conduit_core::types::CloseReason::RiskFree));
+            assert!(r.trades.iter().any(|t| t.reason == conduit_core::types::CloseReason::Sl));
+            assert_eq!(r.daily.len(), 1);
+            assert_eq!(r.daily[0].trades as usize, r.trades.len(),
+                "all closed records, accounting={accounting_axis}, strict={strict_order}");
+            let execution = serde_json::json!({
+                "trades": r.trades, "balance": r.balance_curve, "equity": r.equity_curve,
+            });
+            if let Some(expected) = &expected_execution {
+                assert_eq!(&execution, expected, "reporting must not change this execution fixture");
+            } else {
+                expected_execution = Some(execution);
+            }
+        }
+    }
+    drop(ticks);
+    std::fs::remove_file(plik).unwrap();
 }
 
 /// D6: `EodFlat` nie ma prawa trafić do NOWEGO silnika.
