@@ -44,36 +44,11 @@ pub fn apply_scoped(st: &StateHandle, cmd: &Command, account_session: Option<&st
     match cmd {
         // ---------------- konfiguracja ----------------
         Command::SetMode { mode } => {
-            // DWIE SEKCJE, bo zmiana trybu przestawia też, KTÓRA drabinka jest
-            // skuteczna (projekt EA-2c) — a drabinka jedzie w `Settings`.
-            // Oznaczenie samego `Mode` zostawiłoby panel z drabinką drugiego
-            // trybu na ekranie aż do najbliższej niezwiązanej zmiany ustawień.
-            st.update(Sections::two(Section::Mode, Section::Settings), |s| {
-                s.mode = *mode;
-                ui::przelicz_izolacje_drabinek(s);
-            });
-            persist_settings(st)?;
-            let (d_wsp, d_ea) = st.read(|s| (s.drabinka.enabled, s.drabinka_ea.enabled));
-            st.log(
-                "commands",
-                "info",
-                format!("Zmiana trybu → {}", mode_label(*mode)),
-                format!(
-                    "Drabinki po zmianie: {} — {} · {} — {}. Drabinka NIE-swojego trybu jest \
-                     bezczynna (jej wyłącznik zostaje zapamiętany i wraca razem z trybem).",
-                    ui::KtoraDrabinka::Wspolna.nazwa(),
-                    if d_wsp { "SKUTECZNA" } else { "bezczynna" },
-                    ui::KtoraDrabinka::Ea.nazwa(),
-                    if d_ea { "SKUTECZNA" } else { "bezczynna" },
-                ),
-            );
-            // MANUAL nie uruchamia zarządzania pozycją, więc sprzeczności
-            // w nim śpią — ostrzegamy dokładnie w chwili, w której zaczynają
-            // mieć znaczenie, czyli przy przejściu na AUTO/AI.
-            if !matches!(mode, ui::TradingMode::Manual) {
-                zglos_niespojnosci(st, &format!("przejście w tryb {}", mode_label(*mode)));
+            let rt = st.runtime.read().clone();
+            if rt.defer_mode_change(*mode, st, account_session)? {
+                return Ok(()); // Accepted for verification, never an applied-mode acknowledgement.
             }
-            Ok(())
+            commit_mode_change(st, *mode)
         }
 
         Command::ApplyPreset { id, values } => {
@@ -687,6 +662,41 @@ Zmiana wchodzi w życie przy najbliższym podłączeniu do MT5 —              
     }
 }
 
+/// Commit only after the live loop verified its current broker/account state.
+/// This function does not dispatch again; the runtime owns safe transition checks.
+pub fn commit_mode_change(st: &StateHandle, mode: ui::TradingMode) -> Result<()> {
+    // DWIE SEKCJE, bo zmiana trybu przestawia też, KTÓRA drabinka jest
+    // skuteczna (projekt EA-2c) — a drabinka jedzie w `Settings`.
+    // Oznaczenie samego `Mode` zostawiłoby panel z drabinką drugiego
+    // trybu na ekranie aż do najbliższej niezwiązanej zmiany ustawień.
+    st.update(Sections::two(Section::Mode, Section::Settings), |s| {
+        s.mode = mode;
+        ui::przelicz_izolacje_drabinek(s);
+    });
+    persist_settings(st)?;
+    let (d_wsp, d_ea) = st.read(|s| (s.drabinka.enabled, s.drabinka_ea.enabled));
+    st.log(
+        "commands",
+        "info",
+        format!("Zmiana trybu → {}", mode_label(mode)),
+        format!(
+            "Drabinki po zmianie: {} — {} · {} — {}. Drabinka NIE-swojego trybu jest \
+             bezczynna (jej wyłącznik zostaje zapamiętany i wraca razem z trybem).",
+            ui::KtoraDrabinka::Wspolna.nazwa(),
+            if d_wsp { "SKUTECZNA" } else { "bezczynna" },
+            ui::KtoraDrabinka::Ea.nazwa(),
+            if d_ea { "SKUTECZNA" } else { "bezczynna" },
+        ),
+    );
+    // MANUAL nie uruchamia zarządzania pozycją, więc sprzeczności
+    // w nim śpią — ostrzegamy dokładnie w chwili, w której zaczynają
+    // mieć znaczenie, czyli przy przejściu na AUTO/AI.
+    if !matches!(mode, ui::TradingMode::Manual) {
+        zglos_niespojnosci(st, &format!("przejście w tryb {}", mode_label(mode)));
+}
+Ok(())
+}
+
 pub fn drabinka_krok(st: &StateHandle, balance: f64) -> Option<String> {
     let (tryb, drabinka, aktywny) = st.read(|s| {
         (
@@ -772,6 +782,8 @@ pub fn drabinka_krok(st: &StateHandle, balance: f64) -> Option<String> {
 
 /// Łatka ustawień: scalenie + zapis + delta.
 pub fn apply_settings_patch(st: &StateHandle, patch: &serde_json::Value) -> Result<()> {
+    st.read(|s| settings_map::validate_t100_patch(&s.settings, patch))
+        .map_err(anyhow::Error::msg)?;
     let patch = if let Some(jezyk) = patch
         .get("language")
         .and_then(|v| v.as_str())
@@ -877,6 +889,9 @@ pub fn apply_settings_patch(st: &StateHandle, patch: &serde_json::Value) -> Resu
         .unwrap_or(false);
 
     st.update(Sections::one(Section::Settings), |s| {
+        // Recheck under the mutation lock: another settings patch may have
+        // changed a coupled T-100 bound since the early validation.
+        settings_map::validate_t100_patch(&s.settings, patch)?;
         settings_map::merge_patch(&mut s.settings, patch);
         // ręczna zmiana ustawienia zdejmuje etykietę presetu — inaczej panel
         // pokazywałby preset, którym silnik już nie gra (błąd znany z bot.py)
@@ -886,7 +901,8 @@ pub fn apply_settings_patch(st: &StateHandle, patch: &serde_json::Value) -> Resu
         if let Some(l) = settings_map::preset_lot(&s.settings) {
             s.lot = l;
         }
-    });
+        Ok::<(), String>(())
+    }).map_err(anyhow::Error::msg)?;
     persist_settings(st)?;
     // Tylko przy łatce ruszającej SILNIK. Zmiana motywu panelu albo numeru
     // rachunku nie ma jak wprowadzić sprzeczności w zarządzaniu pozycją,
@@ -1118,6 +1134,76 @@ mod tests {
             ..Default::default()
         };
         crate::bootstrap(&cfg, crate::default_auth()).unwrap()
+    }
+
+    #[test]
+    fn mode_change_deferred_runtime_preserves_state_and_disk_until_verified_commit() {
+        struct Deferred(std::sync::Mutex<Vec<(ui::TradingMode, Option<String>)>>);
+        impl crate::Runtime for Deferred {
+            fn command(&self, _: &Command, _: &StateHandle) -> anyhow::Result<()> {
+                anyhow::bail!("unexpected generic dispatch")
+            }
+            fn defer_mode_change(&self, mode: ui::TradingMode, _: &StateHandle,
+                account_session: Option<&str>) -> anyhow::Result<bool> {
+                self.0.lock().unwrap().push((mode, account_session.map(str::to_owned)));
+                Ok(true)
+            }
+        }
+        let st = stan("mode-deferred");
+        commit_mode_change(&st, ui::TradingMode::Auto).unwrap();
+        let before = st.read(|s| (s.mode, s.settings.clone(), s.drabinka.clone(), s.drabinka_ea.clone()));
+        let disk = std::fs::read(st.workspace.settings_path()).unwrap();
+        let runtime = std::sync::Arc::new(Deferred(std::sync::Mutex::new(Vec::new())));
+        st.set_runtime(runtime.clone());
+        apply_scoped(&st, &Command::SetMode { mode: ui::TradingMode::AutoEa }, Some("render-A-17")).unwrap();
+        assert_eq!(st.read(|s| (s.mode, s.settings.clone(), s.drabinka.clone(), s.drabinka_ea.clone())), before);
+        assert_eq!(std::fs::read(st.workspace.settings_path()).unwrap(), disk);
+        assert_eq!(*runtime.0.lock().unwrap(), vec![(ui::TradingMode::AutoEa, Some("render-A-17".into()))]);
+        // The live loop alone invokes this after broker checks; no recursive dispatch.
+        commit_mode_change(&st, ui::TradingMode::AutoEa).unwrap();
+        assert_eq!(st.read(|s| s.mode), ui::TradingMode::AutoEa);
+        assert_eq!(runtime.0.lock().unwrap().len(), 1);
+        assert_eq!(st.workspace.load_settings().mode, ui::TradingMode::AutoEa);
+    }
+
+    #[test]
+    fn mode_change_rejected_runtime_never_falls_back_to_offline_commit() {
+        struct Rejected;
+        impl crate::Runtime for Rejected {
+            fn command(&self, _: &Command, _: &StateHandle) -> anyhow::Result<()> { Ok(()) }
+            fn defer_mode_change(&self, _: ui::TradingMode, _: &StateHandle,
+                _: Option<&str>) -> anyhow::Result<bool> {
+                anyhow::bail!("synthetic reconnect with unresolved exposure")
+            }
+        }
+        let st = stan("mode-rejected");
+        commit_mode_change(&st, ui::TradingMode::AutoEa).unwrap();
+        let before = std::fs::read(st.workspace.settings_path()).unwrap();
+        st.set_runtime(std::sync::Arc::new(Rejected));
+        assert!(apply(&st, &Command::SetMode { mode: ui::TradingMode::Auto }).is_err());
+        assert_eq!(st.read(|s| s.mode), ui::TradingMode::AutoEa);
+        assert_eq!(std::fs::read(st.workspace.settings_path()).unwrap(), before);
+        // Explicit NoRuntime preserves the existing offline configuration behavior.
+        st.set_runtime(std::sync::Arc::new(crate::state::NoRuntime));
+        apply(&st, &Command::SetMode { mode: ui::TradingMode::Auto }).unwrap();
+        assert_eq!(st.read(|s| s.mode), ui::TradingMode::Auto);
+    }
+
+    #[test]
+    fn t100_invalid_patch_rejects_before_settings_language_or_disk_mutation() {
+        let st = stan("t100-atomic");
+        let disk_before = std::fs::read(st.workspace.settings_path()).ok();
+        let before = st.read(|s| (s.settings.clone(), s.language.clone(), s.preset_id.clone()));
+        assert!(apply_settings_patch(&st, &json!({"language":"pl", "t100":{"enabled":true,"risk_pct":false}})).is_err());
+        assert_eq!(st.read(|s| (s.settings.clone(), s.language.clone(), s.preset_id.clone())), before);
+        assert_eq!(std::fs::read(st.workspace.settings_path()).ok(), disk_before);
+        apply_settings_patch(&st, &json!({"t100":{"enabled":false,"risk_pct":2.0,"portfolio_risk_pct":3.0}})).unwrap();
+        apply_settings_patch(&st, &json!({"t100":{"signal_weight":0.0}})).unwrap();
+        let now = st.read(|s| settings_map::core_from_ui(&s.settings).t100);
+        assert_eq!(now.risk_pct, 2.0);
+        assert_eq!(now.portfolio_risk_pct, 3.0);
+        assert_eq!(now.signal_weight, 0.0);
+        assert!(!now.enabled);
     }
 
     fn follow_account_fixture() -> Value {

@@ -81,6 +81,13 @@ pub struct PendingReq {
 }
 
 pub trait Broker {
+    /// Authoritative closed BID M1 bars after the caller's decision cursor.
+    /// None is reserved for a complete simulated tick tape; Some(empty) waits.
+    /// This is a pure cache read: no RPC and no consuming a shared slot's data.
+    fn complete_m1_bars(&self, _after_ts: Option<Ts>) -> Option<&[crate::t100::Bar]> { None }
+    /// Unknown adapters are unqualified. The simulator declares its explicit
+    /// XAU/USD contract; live checks actual instrument and account metadata.
+    fn t100_contract_supported(&self) -> bool { false }
     fn quote(&self) -> Quote;
     fn account(&self) -> Account;
     fn stops_level(&self) -> f64;

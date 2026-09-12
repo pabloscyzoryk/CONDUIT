@@ -362,6 +362,24 @@ pub struct AccountIdent {
     pub trade_mode: u8,
 }
 
+/// Separate, opt-in complete BID candles. Raw broker stamps are not UTC-shifted.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawM1Bars {
+    pub schema: u32,
+    pub symbol: String,
+    pub account: M1Account,
+    pub observed_utc_ms: i64,
+    pub available_at_ms: i64,
+    pub complete: bool,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub catchup_truncated: bool,
+    pub bars: Vec<conduit_core::t100::Bar>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct M1Account { pub login: i64, pub server: String, pub trade_mode: u8 }
+
 impl AccountIdent {
     /// `DEMO` / `KONKURS` / `REAL` — etykieta dla panelu.
     pub fn kind(&self) -> &'static str {

@@ -85,6 +85,18 @@ class MappingContractTests(unittest.TestCase):
         _, report = contract.build(defaults, {"market_hybrid_now_units": 1}, source, "synthetic.csv")
         self.assertIn("market_hybrid_now_units", [x["field"] for x in report["errors"]])
 
+    def test_t100_inactive_defaults_preserve_xt_but_active_policy_is_not_native(self):
+        defaults, source = self.baseline()
+        defaults["t100"] = {"enabled": False, "risk_pct": 1.0, "experts": 15}
+        _, inactive = contract.build(defaults, {}, source, "synthetic.csv")
+        self.assertEqual(inactive["errors"], [])
+        self.assertEqual(inactive["fields"]["t100"], "unsupported_feature_inactive")
+        for value in [{"enabled": True}, {"enabled": 0}, {"enabled": "false"}, {}, None]:
+            _, report = contract.build(defaults, {"t100": value}, source, "synthetic.csv")
+            self.assertFalse(report["mapping_complete"], value)
+            self.assertIn("t100", [row["field"] for row in report["errors"]])
+            self.assertFalse(report["execution_parity_proven"])
+
     def test_older_binary_explicitly_disables_new_profit_budget(self):
         defaults, source = self.baseline()
         for name in list(defaults):

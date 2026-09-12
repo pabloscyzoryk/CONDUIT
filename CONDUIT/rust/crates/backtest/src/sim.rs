@@ -975,6 +975,7 @@ impl SimBroker {
 }
 
 impl Broker for SimBroker {
+    fn t100_contract_supported(&self) -> bool { true }
     fn execution_session(&self) -> Option<ExecutionSession> { self.synthetic_continuation_session.clone() }
     fn quote(&self) -> Quote {
         self.q

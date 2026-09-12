@@ -145,6 +145,10 @@ impl<B: Broker> Drop for Widok<'_, B> {
 }
 
 impl<B: Broker> Broker for Widok<'_, B> {
+    fn t100_contract_supported(&self) -> bool { self.inner.t100_contract_supported() }
+    fn complete_m1_bars(&self, after_ts: Option<crate::types::Ts>) -> Option<&[crate::t100::Bar]> {
+        self.inner.complete_m1_bars(after_ts)
+    }
     fn quote(&self) -> crate::types::Quote {
         self.inner.quote()
     }

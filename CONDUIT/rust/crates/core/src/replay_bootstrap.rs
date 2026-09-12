@@ -16,6 +16,8 @@ macro_rules! decision_fields {
     ($action:ident) => {
         $action!(
             cfg,
+            t100,
+            t100_execution,
             rearm_reconcile,
             pending_sources,
             entry_sources,
@@ -85,7 +87,7 @@ macro_rules! decision_fields {
 }
 impl Engine {
     pub fn export_replay_bootstrap(&self) -> Result<ReplayBootstrap, String> {
-        if self.cfg.ea_enabled || self.cfg.ai_enabled {
+        if (self.cfg.ea_enabled && !self.cfg.t100.enabled) || self.cfg.ai_enabled {
             return Err("unsupported AI/EA decision-state contract".into());
         }
         let mut fields = BTreeMap::new();
@@ -101,8 +103,11 @@ impl Engine {
             .map_err(|e| e.to_string())?;
         let mut engine = Engine::new(cfg, 0.0);
         engine.apply_replay_patch(&seed.fields, true)?;
-        if engine.cfg.ea_enabled || engine.cfg.ai_enabled {
+        if (engine.cfg.ea_enabled && !engine.cfg.t100.enabled) || engine.cfg.ai_enabled {
             return Err("unsupported AI/EA decision-state contract".into());
+        }
+        if engine.cfg.t100.enabled && !engine.t100.valid_state() {
+            return Err("invalid T100 decision-state checkpoint".into());
         }
         Ok(engine)
     }
@@ -123,7 +128,7 @@ impl Engine {
         if used != patch.len() {
             return Err("unknown bootstrap/patch field".into());
         }
-        if self.cfg.ea_enabled || self.cfg.ai_enabled {
+        if (self.cfg.ea_enabled && !self.cfg.t100.enabled) || self.cfg.ai_enabled {
             return Err("unsupported AI/EA decision-state contract".into());
         }
         Ok(())

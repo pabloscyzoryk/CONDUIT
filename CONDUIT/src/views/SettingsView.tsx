@@ -33,6 +33,8 @@ import {
   type ZnaczenieZera,
 } from "@/data/settingsSchema";
 import { DEFAULT_SETTINGS } from "@/data/defaultSettings";
+import { T100Panel } from "@/components/panels/T100Panel";
+import { bindT100Settings, t100Document, t100Errors } from "@/store/t100Settings";
 import { AI_MODELS } from "@/data/telegram";
 import { OcenaPresetu } from "@/components/panels/OcenaPresetu";
 import { WartoscNog } from "@/components/panels/WartoscNog";
@@ -86,7 +88,7 @@ export function SettingsView({ request }: { request?: SettingsRequest } = {}) {
      podmienia nakładka `settingsSchema.en.ts` scalana PO KLUCZU pola —
      klucze ustawień zostają nietknięte (kanarek Rusta ich pilnuje). */
   const groups = useMemo<GroupDef[]>(() => {
-    /* AUTO-EA = zaawansowane AUTO: pokazuje te same grupy zarządzania
+    /* AUTO i AUTO-EA to rozłączne tryby: współdzielą widok grup zarządzania
        (kontrakt zera) PLUS sekcję „Warstwa EA (AUTO-EA)" — SZKIELET warstwy
        (własny zegar, maszyna Obrona/Neutral/Agresja, zapadka, dozór SL)
        i dom nadchodzących osi rodzin A–G. W zwykłym AUTO sekcja jest
@@ -94,7 +96,7 @@ export function SettingsView({ request }: { request?: SettingsRequest } = {}) {
     const bazowe =
       app.mode === "AUTO" || app.mode === "AUTO-EA"
         ? [
-            ...MANAGEMENT_GROUPS.filter((g) => g.id !== "ea_layer" || app.mode === "AUTO-EA"),
+            ...MANAGEMENT_GROUPS.filter((g) => g.id !== "t100" && (g.id !== "ea_layer" || app.mode === "AUTO-EA")),
             ...GENERAL_GROUPS,
           ]
         : [...GENERAL_GROUPS];
@@ -369,6 +371,9 @@ export function SettingsView({ request }: { request?: SettingsRequest } = {}) {
 
       {tab === "config" && (
         <>
+          {!szukanie && <EdycjaPresetuCtx.Provider key={presetKonfig || "global-t100"} value={edycjaCtx}>
+            <T100Section blocked={wielosilnik && !edycjaCtx} />
+          </EdycjaPresetuCtx.Provider>}
           {app.mode === "AI" && <AiSection />}
           {app.mode === "MANUAL" && (
             <Card>
@@ -633,10 +638,23 @@ function GroupCard({ group }: { group: GroupDef }) {
   );
 }
 
+function T100Section({ blocked = false }: { blocked?: boolean } = {}) {
+  const app = useApp();
+  const editor = useContext(EdycjaPresetuCtx);
+  const binding = bindT100Settings(app, editor, blocked);
+  const config = t100Document(binding.value);
+  if (app.mode !== "AUTO-EA" && config?.enabled !== true && t100Errors(config).length === 0) return null;
+  return <T100Panel mode={app.mode} value={binding.value} owner={binding.owner} blocked={binding.blocked} onSave={binding.save} />;
+}
+
 function SettingField({ field, grupa }: { field: FieldDef; grupa: GroupDef }) {
   const app = useApp();
   const t = useT();
   const edycja = useContext(EdycjaPresetuCtx);
+  if (field.key === "t100") {
+    const binding = bindT100Settings(app, edycja);
+    return <T100Panel mode={app.mode} value={binding.value} owner={binding.owner} blocked={binding.blocked} onSave={binding.save} />;
+  }
   /* W trybie per preset kontrolka czyta i pisze dokument PRESETU, nie panelu —
      ALE tylko dla pól warstwy „preset". Pole RACHUNKU w grupie presetowej
      (`konto_dzwignia`) musi dalej jechać dokumentem, bo `ustawienia_formatu`

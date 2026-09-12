@@ -204,7 +204,14 @@ macro_rules! read_scalar {
     };
 }
 impl<B: Broker> Broker for Recorder<'_, B> {
+    fn complete_m1_bars(&self, after_ts: Option<Ts>) -> Option<&[crate::t100::Bar]> {
+        self.before();
+        let result = self.inner.complete_m1_bars(after_ts);
+        self.push("complete_m1_bars", &after_ts, &result);
+        result
+    }
     read_scalar!(quote, Quote);
+    read_scalar!(t100_contract_supported, bool);
     read_scalar!(account, Account);
     read_scalar!(stops_level, f64);
     read_scalar!(volume_min, f64);
@@ -347,6 +354,7 @@ struct Decoded {
     positions: Option<std::sync::Arc<Vec<Position>>>,
     pendings: Option<std::sync::Arc<Vec<PendingOrder>>>,
     found: Option<Position>,
+    bars: Option<std::sync::Arc<Vec<crate::t100::Bar>>>,
 }
 pub struct ReplayBroker {
     values: Vec<Exact>,
@@ -367,6 +375,7 @@ impl ReplayBroker {
             std::collections::HashMap::<usize, std::sync::Arc<Vec<Position>>>::new();
         let mut pending_cache =
             std::collections::HashMap::<usize, std::sync::Arc<Vec<PendingOrder>>>::new();
+        let mut bar_cache = std::collections::HashMap::<usize, Option<std::sync::Arc<Vec<crate::t100::Bar>>>>::new();
         for call in trace.calls {
             if trace.values.get(call.args).is_none() {
                 return Err("broker arguments reference missing".into());
@@ -402,11 +411,19 @@ impl ReplayBroker {
             } else {
                 None
             };
+            let bars = if call.method == "complete_m1_bars" {
+                if !bar_cache.contains_key(&call.result) {
+                    let bars: Option<Vec<crate::t100::Bar>> = decode(value).map_err(|e| e.to_string())?;
+                    bar_cache.insert(call.result, bars.map(std::sync::Arc::new));
+                }
+                bar_cache.get(&call.result).cloned().flatten()
+            } else { None };
             calls.push(Decoded {
                 call,
                 positions,
                 pendings,
                 found,
+                bars,
             });
         }
         Ok(Self {
@@ -503,7 +520,13 @@ macro_rules! replay_scalar {
     };
 }
 impl Broker for ReplayBroker {
+    fn complete_m1_bars(&self, after_ts: Option<Ts>) -> Option<&[crate::t100::Bar]> {
+        self.before();
+        let i = self.consume("complete_m1_bars", &after_ts);
+        self.calls[i].bars.as_deref().map(Vec::as_slice)
+    }
     replay_scalar!(quote, Quote);
+    replay_scalar!(t100_contract_supported, bool);
     replay_scalar!(account, Account);
     replay_scalar!(stops_level, f64);
     replay_scalar!(volume_min, f64);

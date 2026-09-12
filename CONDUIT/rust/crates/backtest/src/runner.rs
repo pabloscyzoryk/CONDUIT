@@ -427,6 +427,9 @@ fn zrzuc_koszyki(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResult {
+    /// Optional autonomous policy evidence; absent preserves legacy archives.
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub t100: Vec<T100Diagnostic>,
     /// Present only for deliberately approximate screening runs.  Absence is
     /// the backwards-compatible exact result contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,6 +521,17 @@ pub struct RunResult {
     pub przelaczenia: Vec<Przelaczenie>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct T100Diagnostic {
+    pub revision:String,
+    pub format:String,
+    pub scope:String,
+    pub diagnostics:conduit_core::t100::Diagnostics,
+    pub contexts_observed:usize,
+    pub contexts_used:usize,
+    pub entry_hold:Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApproximationInfo {
     pub schema: String,
@@ -544,6 +558,7 @@ impl RunResult {
             ("SIM EXECUTION", self.sim_execution_reconciliation_required.as_deref()),
             ("CONTINUATION", self.continuation_reconciliation_required.as_deref()),
         ].into_iter().find_map(|(kind, reason)| reason.map(|reason| (kind, reason)))
+            .or_else(||self.t100.iter().find_map(|s|s.entry_hold.as_deref().map(|reason|("T100",reason))))
     }
 
 
@@ -651,6 +666,19 @@ pub fn run_with_progress(
 ) -> RunResult {
     let t_start = std::time::Instant::now();
 
+    let autonomous=cfg.settings.t100.enabled || cfg.formaty.iter().any(|f|f.settings.t100.enabled)
+        || cfg.drabinka.iter().flat_map(|s|&s.formaty).any(|f|f.settings.t100.enabled);
+    if autonomous && !cfg.auto_ea {
+        return rejected_t100(cfg,"T100: AUTO-EA mode is required; pass --auto-ea for this preset");
+    }
+    if autonomous && (cfg.daily_reset || cfg.flat_na_dobie || !cfg.drabinka.is_empty()) {
+        return rejected_t100(cfg,"T100: use separate fresh-window runs; in-run resets or chain switches lack a complete autonomous state lineage");
+    }
+    if autonomous && (cfg.settings.t100.enabled && !cfg.settings.t100.valid()
+        || cfg.formaty.iter().any(|f|f.settings.t100.enabled && !f.settings.t100.valid())) {
+        return rejected_t100(cfg,"T100: invalid configuration");
+    }
+
     if cfg.sim_native_swap_cash_digits.is_some_and(|digits| digits > 8) {
         return rejected_sim_execution(cfg, "native swap cash digits must be in 0..=8".into());
     }
@@ -673,6 +701,7 @@ pub fn run_with_progress(
     let i1 = ticks.index_at(cfg.to).min(ticks.len());
     if i1 <= i0 {
         return RunResult {
+            t100: Vec::new(),
             approximation: approximation_info(cfg.quick_tick_stride, 0, 0),
             cost_reconciliation_required: None,
             sr_warmup_reconciliation_required: None,
@@ -1199,11 +1228,13 @@ pub fn run_with_progress(
                     // (Sam `EaRdzen` celowo NIE przechodzi — wymiana silnika
                     // jest modelem restartu, a N19 każe odtworzyć stan.)
                     let auto_ea = engine.tryb_auto_ea;
+                    let t100 = engine.t100_checkpoint();
                     *engine = Engine::new(ust, cfg.start_balance);
                     engine.restore_entry_source_observations(entry_observations);
                     engine.przypisz_slot(slot);
                     engine.pulapy = pulapy;
                     engine.tryb_auto_ea = auto_ea;
+                    if let Some(saved)=t100.as_ref() {let _=engine.restore_t100_checkpoint(Some(saved));}
                     engine.odrzuty = odrz;
                     engine.odrzucone_wejscia = odrz_w;
                     engine.stats.relot_up_zdarzen = rl.0;
@@ -2199,6 +2230,15 @@ pub fn run_with_progress(
     source_funnel.apply(&mut metrics.stat_sygnalow.lejek);
 
     RunResult {
+        t100: zespol.lista.iter().filter(|s|s.engine.cfg.t100.enabled).map(|s|T100Diagnostic {
+            revision:conduit_core::t100::REVISION.into(),
+            format:if s.format.is_empty(){cfg.source_name.clone()}else{s.format.clone()},
+            scope:if cfg.daily_reset || cfg.flat_na_dobie || !cfg.drabinka.is_empty(){"last_segment"}else{"whole_run"}.into(),
+            diagnostics:s.engine.t100.diagnostics.clone(),
+            contexts_observed:s.engine.t100.context.contexts.len(),
+            contexts_used:s.engine.t100.context.used_count(),
+            entry_hold:s.engine.t100_entry_hold_reason().map(str::to_owned),
+        }).collect(),
         approximation: approximation_info(
             cfg.quick_tick_stride,
             end_idx.saturating_sub(i0),
@@ -2387,6 +2427,7 @@ fn rozgrzej_dynamiczne_sr_v2(engine: &mut Engine,
 
 fn rejected_sr_warmup(cfg: &RunConfig, reason: String) -> RunResult {
     RunResult {
+        t100: Vec::new(),
         approximation: approximation_info(cfg.quick_tick_stride, 0, 0),
         cost_reconciliation_required: None, sr_warmup_reconciliation_required: Some(reason),
         sim_execution_reconciliation_required: None,
@@ -2398,6 +2439,15 @@ fn rejected_sr_warmup(cfg: &RunConfig, reason: String) -> RunResult {
         journal_lines: 0, swap_paid: 0.0, stop_outs: 0, cancelled: false,
         formaty: Vec::new(), bez_trasy: BTreeMap::new(), szczeble: Vec::new(), przelaczenia: Vec::new(),
     }
+}
+
+fn rejected_t100(cfg:&RunConfig,reason:&str)->RunResult {
+    let mut result=rejected_sr_warmup(cfg,String::new());
+    result.sr_warmup_reconciliation_required=None;
+    result.t100.push(T100Diagnostic {revision:conduit_core::t100::REVISION.into(),format:String::new(),
+        scope:"rejected".into(),diagnostics:Default::default(),contexts_observed:0,contexts_used:0,
+        entry_hold:Some(reason.into())});
+    result
 }
 
 fn rejected_sim_execution(cfg: &RunConfig, reason: String) -> RunResult {
@@ -2760,6 +2810,7 @@ fn przelacz_szczebel(
                 // tryb przebiegu przeżywa zmianę szczebla drabinki — patrz
                 // ta sama linijka przy wymianie dobowej
                 let auto_ea = engine.tryb_auto_ea;
+                let t100 = engine.t100_checkpoint();
                 let ust = conduit_core::wielosilnik::ustawienia_formatu(&f.settings, &cfg.settings);
                 // saldo bieżące, nie startowe: nowy silnik ma liczyć lot od
                 // stanu konta, który zastał — dokładnie jak bot włączony dziś
@@ -2769,6 +2820,7 @@ fn przelacz_szczebel(
                 engine.przypisz_slot(slot);
                 engine.pulapy = sz.pulapy.clone();
                 engine.tryb_auto_ea = auto_ea;
+                if let Some(saved)=t100.as_ref() {let _=engine.restore_t100_checkpoint(Some(saved));}
                 engine.odrzuty = odrz;
                 engine.odrzucone_wejscia = odrz_w;
                 engine.stats.relot_up_zdarzen = rl.0;
@@ -3490,6 +3542,7 @@ SL 2990"
         // `TickData` wymaga pliku, więc tu sprawdzamy tylko kontrakt typu:
         // domyślnie `cancelled` jest fałszem i nie ma czego raportować.
         let r = RunResult {
+            t100: Vec::new(),
             approximation: None,
             cost_reconciliation_required: None,
             sr_warmup_reconciliation_required: None,

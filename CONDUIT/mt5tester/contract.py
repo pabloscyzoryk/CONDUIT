@@ -235,7 +235,13 @@ def build(defaults: dict, explicit: dict, source: str, bridge: str,
     for name, value in settings.items():
         if name in states:
             continue
-        if name in RUNTIME:
+        if name == "t100":
+            # XT has no autonomous T-100 policy. The nested defaults must not
+            # break legacy comparisons, or be mistaken for a native mapping.
+            states[name] = ("unsupported_feature_inactive"
+                            if isinstance(value, dict) and value.get("enabled") is False
+                            else "unmapped_requires_review")
+        elif name in RUNTIME:
             states[name] = "runtime_or_clock_configured_separately"
         elif name in MOST_ONLY:
             states[name] = "shared_parser_bridge"

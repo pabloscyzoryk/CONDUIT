@@ -9,6 +9,10 @@ use crate::settings::*;
 use crate::types::*;
 use std::collections::HashMap;
 
+#[path = "engine/t100_execution.rs"]
+mod t100_execution;
+pub use t100_execution::T100Checkpoint;
+
 #[path = "relot_reconcile.rs"]
 mod relot_reconcile;
 
@@ -474,6 +478,8 @@ pub struct EntrySourceObservation {pub has_full_entry:bool,pub first_seen_as_edi
 
 pub struct Engine {
     pub cfg: Settings,
+    pub t100: crate::t100::Runtime,
+    t100_execution: t100_execution::ExecutionState,
     pending_sources: std::collections::BTreeMap<u32, PendingSourceRecord>,
     entry_sources: HashMap<(SourceKey,i64),EntrySourceRecord>,
     entry_source_aliases: HashMap<(SourceKey,i64),i64>,
@@ -554,6 +560,8 @@ impl Engine {
     pub fn new(cfg: Settings, start_balance: f64) -> Self {
         let jcfg = cfg.journal_config();
         Engine {
+            t100: Default::default(),
+            t100_execution: t100_execution::ExecutionState::new(&cfg.t100),
             pending_sources: Default::default(),
             entry_sources: Default::default(),
             entry_source_aliases: Default::default(),
@@ -1253,6 +1261,17 @@ impl Engine {
         self.next_basket_id
     }
 
+    /// Restore an account-wide allocator floor without adopting another
+    /// strategy's baskets or borrowing its performance counters.
+    pub fn ensure_next_basket_id_floor(&mut self, floor: u32) -> Result<(), &'static str> {
+        if floor < crate::wielosilnik::pierwszy_numer(self.slot)
+            || crate::wielosilnik::slot_koszyka(floor) != self.slot {
+            return Err("basket allocator floor is outside the engine slot");
+        }
+        self.next_basket_id = self.next_basket_id.max(floor);
+        Ok(())
+    }
+
 
     pub fn basket_view<B: Broker>(&self, b: &B, id: u32) -> Option<BasketView> {
         let bk = self.basket(id)?;
@@ -1844,6 +1863,10 @@ impl Engine {
             );
         }
 
+        if self.cfg.t100.enabled {
+            self.t100_context(m, &signals);
+            return;
+        }
         self.observe_source_reply(m, &signals);
         let withdrawn=self.entry_source_withdrawn(m);
         let late_new=m.edit_of.is_none() && self.entry_source_record(&m.source,m.msg_id)
@@ -6920,7 +6943,7 @@ impl Engine {
 
 
     pub fn ea_zegar<B: Broker>(&mut self, b: &mut B, ts: Ts) -> bool {
-        if !self.cfg.ea_enabled {
+        if !self.cfg.ea_enabled || self.cfg.t100.enabled {
             return false;
         }
         self.ea
@@ -6938,6 +6961,7 @@ impl Engine {
     }
 
     pub fn on_tick<B: Broker>(&mut self, b: &mut B, q: &Quote) {
+        if self.cfg.t100.enabled { self.t100_reconcile(b); }
         self.reconcile_rearm_batches(b);
         self.continuation_observe(b);
         self.deferred_observe(b, q);
@@ -7101,6 +7125,9 @@ impl Engine {
             self.stats.realized_today += profit;
             self.closed_today.push(profit);
             self.obs.na_zamknieciu(c.close_ts, profit);
+            if self.cfg.t100.enabled {
+                self.t100_closed(c);
+            }
             if let Some(bid) = c.basket {
                 if let Some(bk) = self.basket_mut(bid) {
                     bk.realized += profit;
@@ -7128,7 +7155,7 @@ impl Engine {
                 }
             }
         }
-        if self.cfg.be_covers_late_fills {
+        if self.cfg.be_covers_late_fills && !self.cfg.t100.enabled {
             let mut do_krycia: Vec<(Ticket, Px, Option<Px>)> = Vec::new();
             for p in b.positions() {
                 let Some(bid) = p.basket else { continue };
@@ -7178,7 +7205,7 @@ impl Engine {
 
         self.retry_confirmed_exits(b, ts);
 
-        if self.cfg.tp_stage_from_broker_fill {
+        if self.cfg.tp_stage_from_broker_fill && !self.cfg.t100.enabled {
             let hits: Vec<(u32, Px)> = closed
                 .iter()
                 .filter(|c| c.reason == CloseReason::Tp)
@@ -7346,7 +7373,7 @@ impl Engine {
 
         self.update_basket_peaks(b, q);
 
-        if self.cfg.ea_enabled {
+        if self.cfg.ea_enabled && !self.cfg.t100.enabled {
             self.ea
                 .set_continuation_entry_hold(self.continuation_entry_blocked() || self.rearm_confirmation_pending());
             self.ea.set_profit_budget_anchor((&self.stats).into());
@@ -7363,6 +7390,11 @@ impl Engine {
         self.check_guards(b, q);
 
         self.retry_stops(b, ts);
+
+        if self.cfg.t100.enabled {
+            self.t100_tick(b, q);
+            return;
+        }
 
         let reguly_wlaczone = !(self.cfg.ai_enabled && self.cfg.ai_replaces_management);
         if reguly_wlaczone {
@@ -12262,6 +12294,7 @@ mod testy_pakiet_a {
     }
 
     impl Broker for Atrapa {
+        fn t100_contract_supported(&self) -> bool { true }
         fn quote(&self) -> Quote {
             self.q
         }

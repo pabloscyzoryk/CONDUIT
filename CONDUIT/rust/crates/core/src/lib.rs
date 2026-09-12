@@ -17,6 +17,7 @@ pub mod pending_cancel_proof;
 /// wyłącznikach w zerze — kontrakt zera jest tu POTRÓJNY i to jest cała
 /// bramka akceptacji tej fali.
 pub mod ea;
+pub mod t100;
 pub mod engine;
 pub mod formaty;
 pub mod journal;

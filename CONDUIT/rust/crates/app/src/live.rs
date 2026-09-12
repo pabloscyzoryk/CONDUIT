@@ -3,6 +3,9 @@
 #[path = "restart_differential_tests.rs"]
 mod restart_differential_tests;
 
+#[path="mode_memory.rs"]
+mod mode_memory;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -127,6 +130,10 @@ fn live_sr_start_allowed(st: &StateHandle) -> bool {
     let (core,balance)=st.read(|s| (live_core_from_ui(&s.settings),s.stats.balance));
     // Use actual chain/file ownership, not an unrelated global strategy checkbox.
     let team=zbuduj_silniki(st,&core,balance);
+    if !tryb_auto_ea(st) && team.lista.iter().any(|s|s.engine.cfg.t100.enabled) {
+        st.log("mt5","error","T-100","T-100 HOLD: AUTO-EA mode is required; AUTO cannot use this preset");
+        return false;
+    }
     if !team.lista.iter().any(|s| live_sr_v2_requested(&s.engine.cfg)) { return true; }
     note_live_sr_hold(st); false
 }
@@ -155,12 +162,91 @@ fn live_cost_start_allowed(st: &StateHandle) -> bool {
     false
 }
 
+#[cfg(test)]
 fn przeladuj_ustawienia(
+    st: &StateHandle, silniki: &mut routing::Silniki, core: &mut conduit_core::Settings,
+    stops_level: f64, mtime_presetow: &mut std::collections::HashMap<String, std::time::SystemTime>,
+) { przeladuj_ustawienia_z_brokerem(st,silniki,core,stops_level,mtime_presetow,false,None); }
+
+#[cfg(test)]
+fn apply_live_t100_change(st:&StateHandle, engine:&mut Engine, proposed:conduit_core::Settings, broker_flat:bool)->conduit_core::Settings {
+    apply_live_t100_change_on_account(st,engine,proposed,broker_flat,None)
+}
+
+fn apply_live_t100_change_on_account(st:&StateHandle, engine:&mut Engine, mut proposed:conduit_core::Settings,
+    broker_flat:bool,account_day:Option<(i64,f64)>)->conduit_core::Settings {
+    let changed=engine.cfg.t100!=proposed.t100;
+    let was_enabled=engine.cfg.t100.enabled;
+    if let Err(reason)=engine.apply_t100_configuration(&proposed.t100,broker_flat) {
+        proposed.t100=engine.cfg.t100.clone();
+        st.log("settings","warn","T-100",reason);
+    } else if was_enabled && !engine.cfg.t100.enabled {
+        // Legacy EA will no longer observe this book. Retain pending history
+        // and learning, but do not certify its validity on a later re-enable.
+        engine.t100.context.quarantine_existing();
+    } else if changed && engine.cfg.t100.enabled {
+        if let Some((day,equity))=account_day {
+            st.read(|s|mode_memory::import_account_risk(engine,&s.stats,day,equity));
+        }
+    }
+    proposed
+}
+
+fn t100_live_feed_required(auto_ea:bool,team:&routing::Silniki)->bool {
+    auto_ea && team.lista.iter().any(|s|s.engine.cfg.t100.enabled)
+}
+
+fn apply_live_mode_change(st:&StateHandle, team:&routing::Silniki, broker_flat:bool,
+    before:ui::TradingMode, next:ui::TradingMode)->anyhow::Result<()> {
+    validate_live_mode_change(st,team,broker_flat,before,next)?;
+    conduit_server::commands::commit_mode_change(st,next)
+}
+
+fn validate_live_mode_change(st:&StateHandle, team:&routing::Silniki, broker_flat:bool,
+    before:ui::TradingMode, next:ui::TradingMode)->anyhow::Result<()> {
+    anyhow::ensure!(st.read(|s|s.mode)==before,"Tryb zmienił się od wysłania polecenia; wybierz tryb ponownie");
+    if before==next {return Ok(());}
+    anyhow::ensure!(broker_flat && team.lista.iter().all(|s|
+        s.engine.baskets.iter().all(|b|!b.alive()) && s.engine.rearm_entry_hold_reason().is_none()
+            && !s.engine.continuation_entry_blocked()),
+        "Zmiana trybu wymaga potwierdzonego pustego rachunku i uzgodnienia wszystkich zleceń; dotychczasowa ochrona pozostaje aktywna");
+    if next!=ui::TradingMode::AutoEa {
+        let (names,fallback)=st.read(|s|{
+            let names:Vec<String>=ui::lancuch_dla(&s.lancuchy,&s.aktywny_ea,next)
+                .map(|l|l.presety.values().filter(|name|!name.is_empty()).cloned().collect()).unwrap_or_default();
+            (if names.is_empty(){vec![s.preset_id.clone()]}else{names},live_core_from_ui(&s.settings).t100.enabled)
+        });
+        let loaded:Vec<_>=st.workspace.load_presets().into_iter().filter(|p|names.iter().any(|name|name.eq_ignore_ascii_case(&p.name))).collect();
+        anyhow::ensure!(!(loaded.iter().any(|p|p.settings.t100.enabled) || loaded.is_empty() && fallback),
+            "T-100 HOLD: AUTO-EA mode is required; AUTO cannot use this preset");
+    }
+    Ok(())
+}
+
+fn apply_mode_with_memory(st:&StateHandle,team:&routing::Silniki,memory:&mut Trwale,broker_flat:bool,
+    before:ui::TradingMode,next:ui::TradingMode,diagnosis:&str,
+    persist:impl FnOnce(&mode_memory::ModeMemory)->anyhow::Result<()>)->anyhow::Result<()> {
+    validate_live_mode_change(st,team,broker_flat,before,next)?;
+    if before==next {return Ok(());}
+    let mut candidate=memory.modes.clone();candidate.capture(team,diagnosis);
+    persist(&candidate)?; // a write failure cannot commit a new mode
+    conduit_server::commands::commit_mode_change(st,next)?;
+    memory.modes=candidate;
+    Ok(())
+}
+
+fn lancuchy_trybu(s:&ui::UiSnapshot)->conduit_core::formaty::Lancuchy {
+    let mut result=s.lancuchy.clone();result.aktywny=s.aktywny_lancuch_nazwa().to_owned();result
+}
+
+fn przeladuj_ustawienia_z_brokerem(
     st: &StateHandle,
     silniki: &mut routing::Silniki,
     core: &mut conduit_core::Settings,
     stops_level: f64,
     mtime_presetow: &mut std::collections::HashMap<String, std::time::SystemTime>,
+    broker_flat: bool,
+    account_day:Option<(i64,f64)>,
 ) {
     let mut nowe = st.read(|s| {
         let mut c = live_core_from_ui(&s.settings);
@@ -187,6 +273,7 @@ fn przeladuj_ustawienia(
         // istnieje dokładnie po to, żeby tak się nie stało. Rachunek (koszty,
         // opóźnienie, dziennik) i owszem, ma być świeży.
         let mut sr_transition_rejected=false;
+        let mut t100_transition_rejected=false;
         for s in silniki.lista.iter_mut() {
             let proposed = if s.z_pliku || s.tylko_zarzadzanie {
                 conduit_core::wielosilnik::ustawienia_formatu(&s.engine.cfg, core)
@@ -194,16 +281,19 @@ fn przeladuj_ustawienia(
                 core.clone()
             };
             sr_transition_rejected |= live_sr_v2_requested(&proposed);
-            s.engine.cfg = reject_live_sr_transition(st, proposed, &s.engine.cfg);
+            let proposed = reject_live_sr_transition(st, proposed, &s.engine.cfg);
+            let requested_t100=proposed.t100.clone();
+            s.engine.cfg = apply_live_t100_change_on_account(st, &mut s.engine, proposed, broker_flat,account_day);
+            t100_transition_rejected |= s.engine.cfg.t100 != requested_t100;
             s.engine.continuation_configuration_changed();
         }
-        st.log(
+        if !t100_transition_rejected { st.log(
             "settings",
             if sr_transition_rejected { "warn" } else { "info" },
             if sr_transition_rejected { "Zmiana ustawień S/R V2 odrzucona — dotychczasowa ochrona pozostaje" }
                 else { "Ustawienia przeładowane w locie" },
             String::new(),
-        );
+        ); }
     }
     // ---------- EDYCJA PRESETU NA DYSKU → SILNIK FORMATU ----------
     //
@@ -239,8 +329,11 @@ fn przeladuj_ustawienia(
         };
         let proposed=conduit_core::wielosilnik::ustawienia_formatu(&p.settings, core);
         let sr_transition_rejected=live_sr_v2_requested(&proposed);
-        s.engine.cfg = reject_live_sr_transition(st, proposed, &s.engine.cfg);
+        let proposed = reject_live_sr_transition(st, proposed, &s.engine.cfg);
+        let requested_t100=proposed.t100.clone();
+        s.engine.cfg = apply_live_t100_change_on_account(st, &mut s.engine, proposed, broker_flat,account_day);
         s.engine.continuation_configuration_changed();
+        if s.engine.cfg.t100 != requested_t100 {continue;}
         st.log(
             "settings",
             if sr_transition_rejected { "warn" } else { "info" },
@@ -281,10 +374,11 @@ fn loty_nog(
                 })
                 .map(|z| z.volume)
                 .sum();
-            // Silnik bez formatu nie ma jak dostać wiadomości
-            // (`routing::trasa` → `KanalBezFormatu`/`FormatNieHandluje`),
-            // więc jego lot nie jest lotem, którym cokolwiek zagra.
-            let handluje = !sl.tylko_zarzadzanie && !sl.format.is_empty() && sl.powod.is_empty();
+            // T-100 may run without a Telegram source; its entry signal is
+            // market data. Legacy engines still require a routed format.
+            let autonomous = sl.engine.cfg.t100.enabled && sl.engine.tryb_auto_ea;
+            let handluje = !sl.tylko_zarzadzanie && sl.powod.is_empty()
+                && (autonomous || !sl.format.is_empty());
             let powod = if handluje {
                 String::new()
             } else if !sl.powod.is_empty() {
@@ -400,7 +494,7 @@ fn zbuduj_szczeble(
     aktywny_lancuch: &str,
     aktywne_nogi: &[(String, String)],
 ) -> Vec<WierszSzczebla> {
-    let (drabinka, lancuchy) = st.read(|s| (s.drabinka.clone(), s.lancuchy.clone()));
+    let (drabinka, lancuchy) = st.read(|s| (s.drabinka_biezaca().clone(), lancuchy_trybu(s)));
     let presety: std::collections::BTreeMap<String, conduit_core::Settings> = st
         .workspace
         .load_presets()
@@ -714,6 +808,7 @@ const ALARM_DD_KROK_PP: f64 = 5.0;
 
 /// Wszystko, co wchodzi do pętli silnika z zewnątrz.
 enum LiveCmd {
+    Mode { before: ui::TradingMode, next: ui::TradingMode },
     /// Ręczna intencja należy do sesji widocznej w chwili jej podjęcia.
     Scoped { account_session: String, command: Box<LiveCmd> },
     /// komenda handlowa z panelu
@@ -734,6 +829,7 @@ pub struct LiveRuntime {
     tx: Sender<LiveCmd>,
     /// nazwa źródła używana dla sygnałów wpisanych ręcznie w panelu
     connected: Arc<AtomicBool>,
+    thread_running: Arc<AtomicBool>,
 }
 
 impl LiveRuntime {
@@ -745,6 +841,24 @@ impl LiveRuntime {
 }
 
 impl conduit_server::Runtime for LiveRuntime {
+    fn defer_mode_change(&self, next:ui::TradingMode, state:&StateHandle, expected_session:Option<&str>)->anyhow::Result<bool> {
+        if !self.thread_running.load(Ordering::Acquire) {return Ok(false);}
+        anyhow::ensure!(self.connected.load(Ordering::Acquire),
+            "Zmiana trybu czeka na potwierdzone połączenie i pusty rachunek MT5");
+        let (before,follow,session,verified)=state.read(|s|(s.mode,
+            s.settings.get("mt5_follow_terminal_account").and_then(Value::as_bool)==Some(true),
+            s.connection.account_session.clone(),s.connection.account_verified=="ok" && s.connection.mt5=="connected"));
+        let command=LiveCmd::Mode{before,next};
+        if follow {
+            anyhow::ensure!(verified && !session.is_empty() && expected_session==Some(session.as_str()),
+                "Zmiana trybu wymaga aktualnego identyfikatora sesji rachunku (accountSession)");
+            self.send(LiveCmd::Scoped{account_session:session,command:Box::new(command)})?;
+        } else {
+            anyhow::ensure!(expected_session.unwrap_or("").is_empty(),"Zmiana trybu pochodzi ze starej sesji FOLLOW");
+            self.send(command)?;
+        }
+        Ok(true)
+    }
     fn command(&self, cmd: &Command, state: &StateHandle) -> anyhow::Result<()> {
         anyhow::ensure!(!state.read(|s| s.settings.get("mt5_follow_terminal_account").and_then(Value::as_bool).unwrap_or(false)),
             "Ręczne polecenie wymaga identyfikatora aktualnej sesji rachunku. Odśwież widok i podejmij decyzję ponownie.");
@@ -957,6 +1071,10 @@ impl Recording {
 type BResult<T> = Result<T, BrokerError>;
 
 impl Broker for Recording {
+    fn t100_contract_supported(&self) -> bool { self.inner.t100_contract_supported() }
+    fn complete_m1_bars(&self, after_ts: Option<Ts>) -> Option<&[conduit_core::t100::Bar]> {
+        self.inner.complete_m1_bars(after_ts)
+    }
     fn quote(&self) -> Quote {
         self.inner.quote()
     }
@@ -1557,7 +1675,7 @@ fn odcisk_zrodel(st: &StateHandle) -> Vec<String> {
 fn odcisk_konfiguracji(st: &StateHandle) -> String {
     let zrodla = odcisk_zrodel(st).join(",");
     st.read(|s| {
-        let l = s.lancuchy.aktywny();
+        let l = s.aktywny_lancuch();
         let nogi = l
             .map(|l| {
                 l.presety
@@ -1569,8 +1687,8 @@ fn odcisk_konfiguracji(st: &StateHandle) -> String {
             .unwrap_or_default();
         let pulapy = l.map(|l| format!("{:?}", l.pulapy)).unwrap_or_default();
         format!(
-            "zrodla[{zrodla}] lancuch[{}] nogi[{nogi}] pulapy[{pulapy}]",
-            s.lancuchy.aktywny
+            "zrodla[{zrodla}] tryb[{:?}] lancuch[{}] nogi[{nogi}] pulapy[{pulapy}]",
+            s.mode, s.aktywny_lancuch_nazwa()
         )
     })
 }
@@ -1664,7 +1782,8 @@ fn zbuduj_silniki(st: &StateHandle, core: &conduit_core::Settings, saldo: f64) -
     // wielosilnikowy (a z nim przenumerowanie koszyków) na rachunku, na
     // którym dalej gra jedno źródło.
     let uzywane = odcisk_zrodel(st);
-    let (lancuchy, preset_id) = st.read(|s| (s.lancuchy.clone(), s.preset_id.clone()));
+    let (lancuchy, preset_id, auto_ea) = st.read(|s| (lancuchy_trybu(s), s.preset_id.clone(), s.mode==ui::TradingMode::AutoEa));
+    let preset_files = st.workspace.load_presets();
     let lancuch = lancuchy.aktywny().cloned().unwrap_or_default();
     // PORÓWNANIE NAZW FORMATU: bez rozróżniania wielkości liter i bez
     // otaczających spacji. Nazwa formatu jest kluczem w DWÓCH niezależnych
@@ -1675,7 +1794,9 @@ fn zbuduj_silniki(st: &StateHandle, core: &conduit_core::Settings, saldo: f64) -
     let formaty_lancucha = lancuchy.formaty_handlujace();
     let handlujace: Vec<String> = formaty_lancucha
         .iter()
-        .filter(|f| uzywane.iter().any(|u| pasuje(u, f)))
+        .filter(|f| uzywane.iter().any(|u| pasuje(u, f)) || (auto_ea
+            && lancuch.preset_dla(f).is_some_and(|name|preset_files.iter()
+                .any(|p|p.name.eq_ignore_ascii_case(name) && p.settings.t100.enabled))))
         .cloned()
         .collect();
 
@@ -1694,9 +1815,8 @@ fn zbuduj_silniki(st: &StateHandle, core: &conduit_core::Settings, saldo: f64) -
         let cfg_nogi: Option<conduit_core::Settings> = if preset.is_empty() {
             None
         } else {
-            st.workspace
-                .load_presets()
-                .into_iter()
+            preset_files
+                .iter()
                 .find(|p| p.name.eq_ignore_ascii_case(&preset))
                 .map(|p| conduit_core::wielosilnik::ustawienia_formatu(&p.settings, core))
         };
@@ -1715,6 +1835,7 @@ fn zbuduj_silniki(st: &StateHandle, core: &conduit_core::Settings, saldo: f64) -
         }
         let z_pliku = cfg_nogi.is_some();
         let mut engine = Engine::new(cfg_nogi.unwrap_or_else(|| core.clone()), saldo);
+        engine.tryb_auto_ea = auto_ea;
         engine.pulapy = lancuch.pulapy.clone();
         if z_pliku {
             st.log(
@@ -1727,7 +1848,7 @@ fn zbuduj_silniki(st: &StateHandle, core: &conduit_core::Settings, saldo: f64) -
                     .to_string(),
             );
         }
-        if !powod.is_empty() || format.is_empty() {
+        if (!powod.is_empty() || format.is_empty()) && !(auto_ea && engine.cfg.t100.enabled) {
             st.log(
                 "settings",
                 "warn",
@@ -1745,8 +1866,9 @@ fn zbuduj_silniki(st: &StateHandle, core: &conduit_core::Settings, saldo: f64) -
                 ),
             );
         }
+        let autonomous = auto_ea && engine.cfg.t100.enabled;
         let mut s = routing::Silniki::pojedynczy(engine, format, preset, lancuch, z_pliku);
-        s.lista[0].powod = powod;
+        s.lista[0].powod = if autonomous {String::new()} else {powod};
         return s;
     }
 
@@ -1762,13 +1884,18 @@ fn zbuduj_silniki(st: &StateHandle, core: &conduit_core::Settings, saldo: f64) -
         .presety
         .retain(|f, _| handlujace.contains(f));
 
-    let presety: std::collections::BTreeMap<String, conduit_core::Settings> = st
-        .workspace
-        .load_presets()
+    let presety: std::collections::BTreeMap<String, conduit_core::Settings> = preset_files
         .into_iter()
         .map(|p| (p.name, p.settings))
         .collect();
-    let (silniki, braki) = routing::Silniki::zbuduj(&lancuch_uzywany, &presety, core, saldo);
+    let (mut silniki, braki) = routing::Silniki::zbuduj(&lancuch_uzywany, &presety, core, saldo);
+    for slot in &mut silniki.lista {
+        slot.engine.tryb_auto_ea = auto_ea;
+        if slot.tylko_zarzadzanie && slot.engine.cfg.t100.enabled {
+            slot.engine.hold_strategy_continuation(conduit_core::engine::ContinuationReviewScope::Engine,
+                slot.powod.clone());
+        }
+    }
 
     for b in &braki {
         // Cisza jest zakazana: format wpisany do łańcucha, którego presetu nie
@@ -2027,10 +2154,12 @@ pub fn start(
     let (tx, rx) = std::sync::mpsc::channel::<LiveCmd>();
     let stop = Arc::new(AtomicBool::new(false));
     let connected = Arc::new(AtomicBool::new(false));
+    let thread_running = Arc::new(AtomicBool::new(true));
 
     st.set_runtime(Arc::new(LiveRuntime {
         tx: tx.clone(),
         connected: Arc::clone(&connected),
+        thread_running: Arc::clone(&thread_running),
     }));
 
     // Wiadomości z Telegrama wpadają do tej samej skrzynki, co polecenia
@@ -2174,10 +2303,16 @@ pub fn start(
     let st2 = st.clone();
     let stop2 = Arc::clone(&stop);
     let conn2 = Arc::clone(&connected);
+    let running2 = Arc::clone(&thread_running);
     let handle = std::thread::Builder::new()
         .name("conduit-live".into())
-        .spawn(move || petla(st2, rx, stop2, conn2))
-        .ok()?;
+        .spawn(move || {
+            struct Running(Arc<AtomicBool>);
+            impl Drop for Running {fn drop(&mut self){self.0.store(false,Ordering::Release);}}
+            let _running=Running(running2);
+            petla(st2, rx, stop2, conn2)
+        })
+        .ok().or_else(|| {thread_running.store(false,Ordering::Release); None})?;
     drop(handle);
     Some(Handle { stop })
 }
@@ -2323,6 +2458,9 @@ fn petla(
 
 #[derive(Default)]
 struct Trwale {
+    modes: mode_memory::ModeMemory,
+    mode_baskets_known: bool,
+    mode_fresh: bool,
     /// Operational process memory only: reconnects must not refresh a cached tick.
     quote_silence: crate::quote_silence::QuoteSilence,
     /// pamięć każdego silnika z osobna, kluczowana NAZWĄ FORMATU
@@ -2358,6 +2496,8 @@ struct Trwale {
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct TrwalySilnik {
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    t100: Option<conduit_core::engine::T100Checkpoint>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     strategy_realized: Option<crate::strategy_realized_memory::StrategyRealizedMemory>,
     stats: Option<conduit_core::types::Stats>,
@@ -2438,6 +2578,14 @@ struct FollowAccountMemory {
     magic: i64,
     symbol: String,
     silniki: std::collections::BTreeMap<String, TrwalySilnik>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    auto_ea:Option<mode_memory::ModeBucket>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    auto_baskets:Option<Vec<Basket>>,
+    #[serde(default)]
+    active_auto_ea:bool,
+    #[serde(default)]
+    basket_allocator:std::collections::BTreeMap<u32,u32>,
     peak_equity: f64,
     ui_stats: ui::Stats,
     risk_override: ui::RiskOverride,
@@ -2461,6 +2609,7 @@ fn read_follow_memory(st: &StateHandle, toz: &conduit_mt5::proto::AccountIdent, 
         && m.trade_mode==toz.trade_mode && m.magic==magic && m.symbol==symbol
         && m.ui_stats.konto_kotwic==follow_account_key(toz,symbol),
         "niezgodna tożsamość w risk_state.json; nie resetuję ochrony rachunku");
+    anyhow::ensure!(!m.active_auto_ea || m.auto_ea.is_some(),"missing active AUTO-EA memory bucket");
     Ok(Some(m))
 }
 
@@ -2469,6 +2618,7 @@ fn sygnatura_ryzyka(silniki: &routing::Silniki) -> String {
         &s.format, &s.engine.halted, s.engine.risk_override,
         s.engine.stopped_trading_day(), s.engine.pending_source_memory_revision(),
         s.engine.entry_source_memory_revision(),s.engine.rearm_reconcile_revision(),
+        s.engine.t100_memory_revision(),
         (s.engine.cfg.profit_budget_arm_pct!=0.0).then_some((s.engine.stats.day,
             s.engine.stats.day_start_equity.to_bits(),s.engine.stats.day_peak_equity.to_bits())),
     )).collect::<Vec<_>>()).expect("risk signature contains only JSON-safe scalars")
@@ -2476,32 +2626,37 @@ fn sygnatura_ryzyka(silniki: &routing::Silniki) -> String {
 
 fn save_follow_memory(st: &StateHandle, silniki: &routing::Silniki, toz: &conduit_mt5::proto::AccountIdent,
     magic: i64, symbol: &str, peak_equity: f64, diagnosis: &str) -> anyhow::Result<()> {
-    let memory=silniki.lista.iter().map(|s| {
-        let halted=s.engine.halted.as_deref().and_then(|r| {
-            let rest=if diagnosis.is_empty() {r} else if r==diagnosis {""} else {
-                r.strip_prefix(diagnosis).and_then(|x| x.strip_prefix(ui::HALT_SEP)).unwrap_or(r)
-            };
-            (!rest.is_empty()).then(|| rest.to_string())
-        });
-        (s.format.clone(),TrwalySilnik{strategy_realized:Some(crate::strategy_realized_memory::StrategyRealizedMemory::capture(&s.engine)),stats:Some(s.engine.stats.clone()),halted,
-            risk_override:s.engine.risk_override,closed_today:s.engine.closed_today.clone(),
-            stopped_trading_day:s.engine.stopped_trading_day(),
-            profit_budget_anchor:(s.engine.cfg.profit_budget_arm_pct!=0.0).then(|| (&s.engine.stats).into()),
-            pending_sources:s.engine.export_pending_source_memory(),
-            rearm_reconcile:s.engine.rearm_reconcile_state(),
-            entry_sources:s.engine.export_entry_source_memory(),
-            continuation:s.engine.export_strategy_continuation()})
-    }).collect();
+    save_follow_memory_modes(st,silniki,toz,magic,symbol,peak_equity,diagnosis,&Default::default())
+}
+
+fn save_follow_memory_modes(st:&StateHandle,silniki:&routing::Silniki,toz:&conduit_mt5::proto::AccountIdent,
+    magic:i64,symbol:&str,peak_equity:f64,diagnosis:&str,modes:&mode_memory::ModeMemory)->anyhow::Result<()> {
+    let mut modes=modes.clone();modes.capture(silniki,diagnosis);
     let (mut ui_stats,risk_override)=st.read(|s|(s.stats.clone(),s.risk_override.clone()));
     ui_stats.konto_kotwic=follow_account_key(toz,symbol);
     let m=FollowAccountMemory{version:1,login:toz.login,server:toz.server.clone(),trade_mode:toz.trade_mode,
-        magic,symbol:symbol.to_string(),silniki:memory,peak_equity,ui_stats,risk_override,
+        magic,symbol:symbol.to_string(),silniki:modes.auto.silniki,
+        auto_baskets:modes.auto.initialized.then_some(modes.auto.koszyki),auto_ea:modes.auto_ea,
+        active_auto_ea:modes.active_auto_ea,basket_allocator:modes.allocator,
+        peak_equity,ui_stats,risk_override,
         risk_halt:rozbij_klasy_zatrzymania(silniki,diagnosis).1};
     conduit_server::store::write_json_atomic(&follow_risk_path(st,toz,magic,symbol),&m)
 }
 
 fn apply_follow_memory(st: &StateHandle, trwale: &mut Trwale, memory: FollowAccountMemory) {
-    trwale.silniki=memory.silniki;
+    let auto_baskets_known=memory.auto_baskets.is_some();
+    let auto_initialized=auto_baskets_known || !memory.silniki.is_empty();
+    trwale.modes.auto=mode_memory::ModeBucket {silniki:memory.silniki,
+        initialized:auto_initialized,koszyki:memory.auto_baskets.unwrap_or_default(),..Default::default()};
+    trwale.modes.auto_ea=memory.auto_ea;
+    trwale.modes.active_auto_ea=memory.active_auto_ea;
+    trwale.modes.allocator=memory.basket_allocator;
+    // The time outside this process has no observed source-delivery proof.
+    trwale.modes.queue(mode_memory::PassiveEvent::Gap{reason:"source observation gap during process stop".into(),observed_utc:conduit_server::now_ms()});
+    let active=trwale.modes.active().clone();
+    trwale.mode_baskets_known=if memory.active_auto_ea {active.initialized}else{auto_baskets_known};
+    trwale.silniki=active.silniki;trwale.koszyki=active.koszyki;
+    trwale.next_basket_id=trwale.modes.allocator.values().copied().max().unwrap_or(1);
     trwale.szczyt_equity=memory.peak_equity;
     st.update(Sections::all(),|s| {
         s.stats=memory.ui_stats;
@@ -2688,10 +2843,25 @@ fn handel(
     core.stops_level = info.stops_level_price();
     let saldo = broker.account().balance;
     let kredyt_brokera = broker.account().credit;
+    let requested_ea=tryb_auto_ea(st);
+    if requested_ea!=trwale.modes.active_auto_ea {
+        if broker.inner.t100_configuration_flat() {
+            mode_memory::select_mode(trwale,requested_ea);
+        } else {
+            let retained=if trwale.modes.active_auto_ea {ui::TradingMode::AutoEa}else{ui::TradingMode::Auto};
+            if let Err(e)=conduit_server::commands::commit_mode_change(st,retained) {
+                return format!("Cannot restore the account's active strategy mode: {e}");
+            }
+            st.log("settings","warn","Zmiana trybu odrzucona",
+                "Zmiana trybu wymaga potwierdzonego pustego rachunku i uzgodnienia wszystkich zleceń; dotychczasowa ochrona pozostaje aktywna");
+        }
+    }
     // JEDEN SILNIK NA FORMAT HANDLUJĄCY — patrz `crate::routing`.
     let mut odcisk_biezacy = odcisk_konfiguracji(st);
     if let Some(c)=&broker.capture { c.tape.append("application_bootstrap",&serde_json::json!({
         "settings":core,"imported_engine_memory":conduit_core::recorded_broker::exact::encode(&trwale.silniki).ok(),
+        "active_auto_ea":trwale.modes.active_auto_ea,
+        "passive_context_events":trwale.modes.auto_ea.as_ref().map(|b|&b.context_events),
         "initial_account":broker.account(),"initial_positions":broker.positions(),"initial_pendings":broker.pendings(),
         "scope":"account_bound_before_engine_construction; complete warmed decision state follows in each first engine frame"
     })); }
@@ -2867,7 +3037,11 @@ fn handel(
     let mut zrzut_ostatni = wznow_koszyki(st, &mut silniki, &broker, &toz, symbol, trwale);
     restore_strategy_realized_memory(&mut silniki,trwale,broker.quote().ts);
     let continuation_origin=live_continuation_origin(st,&broker,&toz,symbol,trwale);
-    let continuation_reports=restore_strategy_memory(&mut silniki,trwale,&broker,continuation_origin);
+    let continuation_reports=restore_strategy_memory(&mut silniki,trwale,&broker,
+        if trwale.mode_fresh {ContinuationOrigin::Fresh}else{continuation_origin});
+    mode_memory::restore_context(&mut silniki,trwale);
+    mode_memory::restore_allocator(&mut silniki,&trwale.modes);
+    st.read(|s|mode_memory::preserve_account_risk(&mut silniki,&s.stats,broker.quote().ts.div_euclid(86_400_000),broker.account().equity));
     log_continuation_reports(st,&continuation_reports);
     let mut zrzut_kiedy = Instant::now();
     let mut zrzut_exit_signature = sygnatura_pending_exit(silniki.lista.iter()
@@ -2920,6 +3094,7 @@ fn handel(
     let mut bufor: Vec<ui::ChatMessage> = st.read(|s| s.messages.clone());
     let mut ostatnia_publikacja = Instant::now() - Duration::from_secs(60);
     let mut ostatnie_ustawienia = Instant::now();
+    let mut t100_feed_issue: Option<String> = None;
     // mtime plików presetów — do przeładowania edycji per preset w locie
     let mut mtime_presetow: std::collections::HashMap<String, std::time::SystemTime> =
         std::collections::HashMap::new();
@@ -2960,8 +3135,10 @@ fn handel(
     let mut czekajace = std::mem::take(&mut trwale.czekajace);
 
     let mut risk_state_signature = String::new();
-    let mut initial_risk_error = save_follow_memory(st, &silniki, &toz,
-        broker.inner.transport().config().magic, symbol, szczyt_equity, &diagnoza_petli)
+    let mut context_quarantine_logged=None;
+    let mut context_overflow_logged=0;
+    let mut initial_risk_error = save_follow_memory_modes(st, &silniki, &toz,
+        broker.inner.transport().config().magic, symbol, szczyt_equity, &diagnoza_petli,&trwale.modes)
         .err().map(|e| format!("Nie można zapisać pamięci ryzyka rachunku — handel wstrzymany: {e}"));
     trwale.follow_persist_failed = initial_risk_error.is_some();
 
@@ -2974,6 +3151,16 @@ fn handel(
         }
         if let Some(c)=&broker.capture {if let Some(reason)=c.tape.take_warning(){st.log("system","warn","Replay capture incomplete",reason);}}
         let mut sprawdz_provenance = false;
+        let (tg_connected,tg_generation)=st.read(|s|(s.connection.telegram=="connected",s.connection.telegram_reconnects));
+        if (!tg_connected && !trwale.modes.telegram_unavailable)
+            || trwale.modes.telegram_generation.is_some_and(|old|old!=tg_generation) {
+            let utc=conduit_server::now_ms();
+            let event=mode_memory::PassiveEvent::Gap{reason:"Telegram delivery continuity is unknown".into(),observed_utc:utc};
+            if let Some(c)=&broker.capture {c.tape.append("passive_context_event",&event);}
+            mode_memory::context_gap(trwale,&mut silniki,"Telegram delivery continuity is unknown",utc);
+        }
+        trwale.modes.telegram_unavailable=!tg_connected;
+        trwale.modes.telegram_generation=Some(tg_generation);
         if let Some(reason)=initial_risk_error.take() { break reason; }
         if stop.load(Ordering::Relaxed) {
             break "Program zamykany.".to_string();
@@ -3017,13 +3204,12 @@ fn handel(
         }
 
         // ---------- tryb AUTO-EA ----------
-        // Flaga runtime dla nadchodzących osi warstwy EA (trailing S/R,
-        // cykl harvest). KONTRAKT ZERA: dziś żadna oś jej nie czyta, więc
-        // AUTO-EA zachowuje się co do bitu jak AUTO. Odświeżana co obrót
-        // pętli, bo tryb przełącza się w panelu bez restartu — a ustawiana
-        // TUTAJ, przed poleceniami i tickami, żeby wszystko, co silniki
-        // zrobią w tym obrocie, widziało już bieżący tryb.
+        // AUTO and AUTO-EA are exclusive runtime modes. A T-100 preset
+        // requires AUTO-EA; the core refuses it in AUTO without legacy fallback.
+        // Without T-100, AUTO-EA retains the separate existing EA baseline.
+        // Refresh before commands/ticks so a mode change has one boundary.
         let auto_ea = tryb_auto_ea(st);
+        let mut mode_changes = Vec::new();
         for s in silniki.lista.iter_mut() {
             s.engine.tryb_auto_ea = auto_ea;
         }
@@ -3042,6 +3228,20 @@ fn handel(
         }
         if kolejka_zamknieta {
             break "Kolejka poleceń zamknięta.".to_string();
+        }
+
+        // T-100 consumes complete BID candles only. Enabling it is explicit;
+        // the default strategy never makes this additional broker request.
+        let t100_enabled = t100_live_feed_required(auto_ea,&silniki);
+        let m1_subscription = broker.inner.configure_t100_bars(t100_enabled).err().map(|e|e.to_string());
+        let current_m1_issue = if t100_enabled {
+            m1_subscription.or_else(||broker.inner.t100_bars_issue().map(str::to_owned))
+        } else {None};
+        if current_m1_issue != t100_feed_issue {
+            if let Some(reason)=&current_m1_issue {
+                st.log("mt5", "warn", "T-100 M1", format!("T-100 M1: {reason}; nowe wejścia czekają na pełne świece"));
+            }
+            t100_feed_issue = current_m1_issue;
         }
 
         // ---------- kwotowania ----------
@@ -3113,6 +3313,7 @@ fn handel(
                     continue;
                 };
                 match c {
+                    LiveCmd::Mode{before,next} => mode_changes.push((before,next)),
                     LiveCmd::Scoped { .. } => unreachable!("session envelope is removed by the dispatch gate"),
                     // Wiadomość z kanału — BRAMKA TRYBU. W MANUAL bot nic nie
                     // otwiera sam: wiadomość ląduje w panelu z przyciskami
@@ -3164,6 +3365,11 @@ fn handel(
                         }
                         // UI retains Telegram UTC; only the engine receives broker time.
                         let mut m = wiadomosc_ui_przed_zegarem_brokera(st, &mut im, received_utc, ostatni_ts);
+                        if !trwale.modes.active_auto_ea && im.source_name.to_lowercase().contains("synergy") {
+                            let event=mode_memory::PassiveEvent::Message{message:im.clone(),received_utc};
+                            if let Some(c)=&broker.capture {c.tape.append("passive_context_event",&event);}
+                            trwale.modes.queue(event);
+                        }
                         ostrzez_o_nieczytelnym_sygnale(st, &im);
                         let auto = tryb_automatyczny(st);
                         if auto {
@@ -3210,6 +3416,14 @@ fn handel(
                                     im.text
                                 ),
                             );
+                        }
+                        if trwale.modes.active_auto_ea && trwale.modes.source_gap_utc.is_some_and(|gap|received_utc<=gap) {
+                            for slot in silniki.lista.iter_mut().filter(|s|s.engine.cfg.t100.enabled) {
+                                slot.engine.t100.context.quarantine_source_version(&im);
+                            }
+                            if let Some(c)=&broker.capture {c.tape.append("passive_context_event",
+                                &mode_memory::PassiveEvent::UnverifiedMessage{message:im.clone(),received_utc});}
+                            trwale.modes.revision=trwale.modes.revision.wrapping_add(1);
                         }
                         dopisz(&mut bufor, m);
                     }
@@ -3343,12 +3557,15 @@ fn handel(
             ostatnie_ustawienia = Instant::now();
             sprawdz_provenance = true;
             prog_wieku = prog_wieku_sygnalu(st);
-            przeladuj_ustawienia(
+            let broker_flat = broker.inner.t100_configuration_flat();
+            przeladuj_ustawienia_z_brokerem(
                 st,
                 &mut silniki,
                 &mut core,
                 info.stops_level_price(),
                 &mut mtime_presetow,
+                broker_flat,
+                Some((broker.quote().ts.div_euclid(86_400_000),broker.account().equity)),
             );
             if st.read(|s| s.halt.diagnoza.contains(LIVE_SR_V2_HOLD)) {
                 sr_warmup_hold=true;
@@ -3417,11 +3634,24 @@ fn handel(
         // Source revisions change on restore, alias or withdrawal. The complete
         // ledger is serialized by zapisz_zrzut only when dirty or on its regular
         // interval; unchanged history must not be copied on every live tick.
-        let risk_signature = sygnatura_ryzyka(&silniki);
+        let quarantine_count:usize=silniki.lista.iter().filter(|s|s.engine.cfg.t100.enabled)
+            .map(|s|s.engine.t100.context.quarantined_count()).sum();
+        if context_quarantine_logged!=Some(quarantine_count) {
+            if quarantine_count>0 {st.log("telegram","warn","T-100 source context",
+                format!("T-100: {quarantine_count} contexts quarantined after an observation gap; pending history retained, new confirmed signals remain usable"));}
+            context_quarantine_logged=Some(quarantine_count);
+        }
+        let context_overflow=trwale.modes.auto_ea.as_ref().map_or(0,|b|b.context_overflow);
+        if context_overflow>context_overflow_logged {
+            st.log("telegram","warn","T-100 source context",
+                format!("T-100: passive context queue lost {context_overflow} events; affected old contexts require a new complete source version"));
+            context_overflow_logged=context_overflow;
+        }
+        let risk_signature = format!("{}:{}",sygnatura_ryzyka(&silniki),trwale.modes.revision);
         if zrzut_kiedy.elapsed() >= ZRZUT_CO || exit_signature != zrzut_exit_signature
             || risk_signature != risk_state_signature {
             zrzut_kiedy = Instant::now();
-            if zapisz_zrzut(st, &silniki, &toz, symbol, &mut zrzut_ostatni, follow, broker.inner.transport().config().magic, szczyt_equity, &diagnoza_petli) {
+            if zapisz_zrzut_modes(st, &silniki, &toz, symbol, &mut zrzut_ostatni, follow, broker.inner.transport().config().magic, szczyt_equity, &diagnoza_petli,&trwale.modes) {
                 zrzut_exit_signature = exit_signature;
                 risk_state_signature = risk_signature;
                 trwale.follow_persist_failed=false;
@@ -3438,9 +3668,15 @@ fn handel(
         // faktyczną przebudowę robi strażnik niżej — WSPÓLNA ścieżka dla
         // zmiany ręcznej z panelu i drabinkowej, więc adopcja koszyków jest
         // jedna i testowana raz.
+        for (before,next) in mode_changes {
+            if let Err(e)=apply_mode_with_memory(st,&silniki,trwale,broker.inner.t100_configuration_flat(),before,next,&diagnoza_petli,
+                |m|save_follow_memory_modes(st,&silniki,&toz,broker.inner.transport().config().magic,symbol,szczyt_equity,&diagnoza_petli,m)) {
+                st.log("settings","warn","Zmiana trybu odrzucona",e.to_string());
+            }
+        }
         drabinka_tick(st, &broker, &mut drabinka_o);
         {
-            let aktywny = st.read(|s| s.lancuchy.aktywny.clone());
+            let aktywny = st.read(|s| s.aktywny_lancuch_nazwa().to_owned());
             // KAŻDA zmiana konfiguracji, na której stoją silniki, przebudowuje
             // je od nowa — nie tylko zmiana nazwy łańcucha (patrz
             // `odcisk_konfiguracji`).
@@ -3536,6 +3772,10 @@ fn handel(
         }
     };
 
+    let stop_utc=conduit_server::now_ms();
+    let gap=mode_memory::PassiveEvent::Gap{reason:"source observation gap while live loop stopped".into(),observed_utc:stop_utc};
+    if let Some(c)=&broker.capture {c.tape.append("passive_context_event",&gap);}
+    mode_memory::context_gap(trwale,&mut silniki,"source observation gap while live loop stopped",stop_utc);
     if let Some(c)=&broker.capture {c.tape.append("session_end",&serde_json::json!({"reason":powod}));c.tape.finish();if let Some(reason)=c.tape.take_warning(){st.log("system","warn","Replay capture incomplete",reason);}}
     // ---------- co przeżywa to wyjście ----------
     observe_account_rdd(&mut real_drawdown_day, broker.inner.drain_account_observations(), &toz);
@@ -3545,7 +3785,7 @@ fn handel(
     // OSTATNI ZRZUT. Bez tego utrata sidecara gubiłaby koszyki powstałe od
     // ostatniego zapisu — czyli dokładnie te, których wznowienie najbardziej
     // potrzebuje.
-    let saved=zapisz_zrzut(st, &silniki, &toz, symbol, &mut zrzut_ostatni, broker.inner.transport().config().follow_terminal_account, broker.inner.transport().config().magic, szczyt_equity, &diagnoza_petli);
+    let saved=zapisz_zrzut_modes(st, &silniki, &toz, symbol, &mut zrzut_ostatni, broker.inner.transport().config().follow_terminal_account, broker.inner.transport().config().magic, szczyt_equity, &diagnoza_petli,&trwale.modes);
     trwale.follow_persist_failed=!saved;
     if let Some(d) = dziennik.as_mut() {
         for s in silniki.lista.iter_mut() {
@@ -3706,6 +3946,7 @@ fn przenies_pamiec(
         };
         s.engine.restore_pending_source_memory(&t.pending_sources);
         s.engine.restore_rearm_reconcile_state(t.rearm_reconcile.clone());
+        let _ = s.engine.restore_t100_checkpoint(t.t100.as_ref());
         s.engine.restore_entry_source_memory(&t.entry_sources);
         let Some(stats) = t.stats.take() else {
             continue;
@@ -3744,6 +3985,12 @@ fn restore_strategy_realized_memory(silniki:&mut routing::Silniki,trwale:&Trwale
 fn restore_strategy_memory<B:Broker>(silniki:&mut routing::Silniki,trwale:&Trwale,
     broker:&B,origin:ContinuationOrigin)->Vec<(String,ContinuationImportReport)> {
     let mut reports=Vec::new();
+    for slot in silniki.lista.iter_mut().filter(|s|s.engine.cfg.t100.enabled) {
+        let saved=trwale.silniki.get(&slot.format).and_then(|m|m.t100.as_ref());
+        if saved.is_some() || !matches!(origin,ContinuationOrigin::Fresh) {
+            let _=slot.engine.restore_t100_checkpoint(saved);
+        }
+    }
     for slot in silniki.lista.iter_mut().filter(|s|s.engine.cfg.restore_strategy_continuation) {
         let snapshot=trwale.silniki.get(&slot.format).and_then(|m|m.continuation.as_ref());
         let report=slot.engine.import_strategy_continuation(broker,&slot.format,snapshot,origin);
@@ -3846,6 +4093,7 @@ fn przebuduj_lancuch(
 
     // ---------- 2. pamięć do Trwale (koszyki wyjęte z silników) ----------
     zapamietaj_silniki(trwale, silniki, szczyt_equity, diagnoza);
+    mode_memory::select_mode(trwale,tryb_auto_ea(st));
 
     // ---------- 3. nowe silniki z NOWEGO aktywnego łańcucha ----------
     for s in nowe.lista.iter_mut() {
@@ -3953,7 +4201,12 @@ fn przebuduj_lancuch(
     rozgrzej_historie(st, broker, &mut nowe, symbol);
     let zrzut_json = wznow_koszyki(st, &mut nowe, broker, toz, symbol, trwale);
     restore_strategy_realized_memory(&mut nowe,trwale,broker.quote().ts);
-    let continuation_reports=restore_strategy_memory(&mut nowe,trwale,broker,ContinuationOrigin::Memory);
+    let continuation_reports=restore_strategy_memory(&mut nowe,trwale,broker,
+        if trwale.mode_fresh {ContinuationOrigin::Fresh}else{ContinuationOrigin::Memory});
+    mode_memory::restore_context(&mut nowe,trwale);
+    mode_memory::restore_allocator(&mut nowe,&trwale.modes);
+    st.read(|s|mode_memory::preserve_account_risk(&mut nowe,&s.stats,broker.quote().ts.div_euclid(86_400_000),broker.account().equity));
+    st.read(|s|mode_memory::preserve_account_halt(&mut nowe,&s.halt.ryzyko));
     log_continuation_reports(st,&continuation_reports);
 
     let ile_koszykow = nowe.koszyki().len();
@@ -4010,8 +4263,8 @@ fn drabinka_tick(st: &StateHandle, broker: &Recording, ostatnie: &mut Instant) {
     // w silniku.
     let (drabinka, aktywny, credit_cfg) = st.read(|s| {
         (
-            s.drabinka.clone(),
-            s.lancuchy.aktywny.clone(),
+            s.drabinka_biezaca().clone(),
+            s.aktywny_lancuch_nazwa().to_owned(),
             conduit_server::settings_map::core_from_ui(&s.settings),
         )
     });
@@ -4034,7 +4287,7 @@ fn drabinka_tick(st: &StateHandle, broker: &Recording, ostatnie: &mut Instant) {
     if lancuch == aktywny {
         if (drabinka.biezacy_prog - prog).abs() > 1e-9 {
             st.update(Sections::one(Section::Settings), |s| {
-                s.drabinka.biezacy_prog = prog
+                s.drabinka_biezaca_mut().biezacy_prog = prog
             });
         }
         return;
@@ -4048,8 +4301,9 @@ fn drabinka_tick(st: &StateHandle, broker: &Recording, ostatnie: &mut Instant) {
     ) {
         Ok(()) => {
             st.update(Sections::one(Section::Settings), |s| {
-                s.drabinka.biezacy_prog = prog;
-                s.drabinka.ostatnia_zmiana_ts = conduit_server::now_ms();
+                let current = s.drabinka_biezaca_mut();
+                current.biezacy_prog = prog;
+                current.ostatnia_zmiana_ts = conduit_server::now_ms();
             });
             let kierunek = if prog >= drabinka.biezacy_prog {
                 "≥"
@@ -4098,6 +4352,9 @@ fn zapamietaj_silniki(
     // Zdanie klasy DIAGNOZA obowiązujące w tej chwili — patrz niżej.
     diagnoza: &str,
 ) {
+    trwale.modes.capture(silniki,diagnoza);
+    trwale.mode_baskets_known=true;
+    trwale.mode_fresh=false;
     trwale.silniki.clear();
     trwale.koszyki.clear();
     trwale.next_basket_id = silniki.next_basket_id();
@@ -4121,6 +4378,7 @@ fn zapamietaj_silniki(
         trwale.silniki.insert(
             s.format.clone(),
             TrwalySilnik {
+                t100: s.engine.t100_checkpoint(),
                 strategy_realized,
                 stats: Some(s.engine.stats.clone()),
                 halted,
@@ -4392,7 +4650,7 @@ fn wznow_koszyki(
     // PAMIĘĆ PRZED DYSKIEM. Przy ponownym podłączeniu (czkawka terminala)
     // koszyki w pamięci są z definicji świeższe niż zrzut, który zapisuje się
     // co 5 s. Przy starcie procesu pamięć jest pusta i wtedy liczy się dysk.
-    let (zrzut, skad) = if trwale.bylo_polaczenie && !trwale.koszyki.is_empty() {
+    let (zrzut, skad) = if trwale.mode_baskets_known || (trwale.bylo_polaczenie && !trwale.koszyki.is_empty()) {
         (
             Some(wznowienie::Zrzut {
                 wersja: wznowienie::WERSJA,
@@ -4540,7 +4798,12 @@ fn zapisz_zrzut(
     peak_equity: f64,
     diagnosis: &str,
 ) -> bool {
-    if let Err(e)=save_follow_memory(st,silniki,toz,magic,symbol,peak_equity,diagnosis) {
+    zapisz_zrzut_modes(st,silniki,toz,symbol,ostatni,follow,magic,peak_equity,diagnosis,&Default::default())
+}
+
+fn zapisz_zrzut_modes(st:&StateHandle,silniki:&routing::Silniki,toz:&conduit_mt5::proto::AccountIdent,
+    symbol:&str,ostatni:&mut String,follow:bool,magic:i64,peak_equity:f64,diagnosis:&str,modes:&mode_memory::ModeMemory)->bool {
+    if let Err(e)=save_follow_memory_modes(st,silniki,toz,magic,symbol,peak_equity,diagnosis,modes) {
         st.log("mt5","error","Nie zapisano pamięci ryzyka rachunku",format!("{e}; zapis zostanie ponowiony, sesja wstrzymana do odzyskania trwałej ochrony."));
         return false;
     }
@@ -6145,7 +6408,7 @@ fn opublikuj(
         s.stats.lot_nogi = loty_nog(
             silniki,
             szczeble,
-            s.drabinka.biezacy_prog,
+            s.drabinka_biezaca().biezacy_prog,
             acc.balance,
             &zamkniete,
         );
@@ -6290,10 +6553,8 @@ fn tryb_automatyczny(st: &StateHandle) -> bool {
 /// Czy panel stoi w trybie AUTO-EA („potwór": zarządzanie klasy EA
 /// + kierunek z sygnałów traderów).
 ///
-/// KONTRAKT ZERA: wynik ląduje wyłącznie we fladze
-/// [`conduit_core::Engine::tryb_auto_ea`], której dziś żadna oś nie czyta —
-/// AUTO-EA zachowuje się co do bitu jak AUTO. Flagę będą konsultować dopiero
-/// nadchodzące osie warstwy EA (trailing S/R, cykl harvest).
+/// This selects the exclusive EA mode. A T-100 preset requires it; otherwise
+/// the existing EA implementation remains the separate baseline.
 fn tryb_auto_ea(st: &StateHandle) -> bool {
     st.read(|s| matches!(s.mode, ui::TradingMode::AutoEa))
 }
@@ -6361,10 +6622,118 @@ fn wiadomosc_ui(st: &StateHandle, im: &IncomingMessage, received_utc: Option<i64
 
 #[cfg(test)]
 mod tests {
+    include!("mode_memory_tests.rs");
     use super::*;
     use conduit_backtest::sim::SimBroker;
     use conduit_core::journal::{EventKind, RejectCode};
     use conduit_core::settings::Settings;
+
+    #[test]
+    fn t100_live_memory_restores_exact_context_and_rejects_missing_continuation() {
+        let mut cfg=Settings::default();cfg.t100.enabled=true;
+        let mut team=jeden(Engine::new(cfg.clone(),1000.0));team.lista[0].engine.tryb_auto_ea=true;let mut broker=broker_z_cena();
+        let message=IncomingMessage{ts:broker.quote().ts,source:SourceKey::new(1,None),
+            source_name:"Synergy".into(),msg_id:7,reply_to:None,edit_of:Some(7),
+            text:"BUY GOLD @ 4000/3995\nSL 3990\nTP 4020".into()};
+        team.lista[0].engine.on_message(&mut broker,&message);
+        let expected=team.lista[0].engine.t100_checkpoint().unwrap();
+        let state=TrwalySilnik{t100:Some(expected.clone()),stats:Some(team.lista[0].engine.stats.clone()),..Default::default()};
+        let restored:TrwalySilnik=serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let mut memory=Trwale::default();memory.silniki.insert("ATFX".into(),restored);
+        let mut next=jeden(Engine::new(cfg.clone(),1000.0));next.lista[0].engine.tryb_auto_ea=true;
+        przenies_pamiec(&mut next,&mut memory,1000.0,0.0);
+        restore_strategy_memory(&mut next,&memory,&broker,ContinuationOrigin::Memory);
+        assert_eq!(next.lista[0].engine.t100_checkpoint(),Some(expected));
+        assert!(next.lista[0].engine.t100_entry_hold_reason().is_none());
+        let mut fresh=jeden(Engine::new(cfg.clone(),1000.0));fresh.lista[0].engine.tryb_auto_ea=true;
+        restore_strategy_memory(&mut fresh,&Trwale::default(),&broker,ContinuationOrigin::Fresh);
+        assert!(fresh.lista[0].engine.t100_entry_hold_reason().is_none());
+        let mut missing=jeden(Engine::new(cfg,1000.0));missing.lista[0].engine.tryb_auto_ea=true;
+        restore_strategy_memory(&mut missing,&Trwale::default(),&broker,ContinuationOrigin::Memory);
+        assert!(missing.lista[0].engine.t100_entry_hold_reason().is_some());
+        assert!(manual_profit_budget_allowed(&mut missing,&broker,Side::Buy,4000.3,Some(3990.0),0.01).is_err());
+    }
+
+    #[test]
+    fn t100_live_apply_requires_flat_and_preserves_past_runtime() {
+        let st=stan("t100-flat-apply");let mut e=Engine::new(Settings::default(),1000.0);e.tryb_auto_ea=true;
+        let mut proposed=e.cfg.clone();proposed.t100.enabled=true;
+        let rejected=apply_live_t100_change(&st,&mut e,proposed.clone(),false);
+        assert!(!rejected.t100.enabled);assert!(!e.cfg.t100.enabled);
+        let accepted=apply_live_t100_change(&st,&mut e,proposed,true);
+        assert!(accepted.t100.enabled);assert!(e.t100_entry_hold_reason().is_none());
+        let mut b=broker_z_cena();let q=b.quote();e.on_tick(&mut b,&q);
+        let runtime=conduit_core::recorded_broker::exact::encode(&e.t100).unwrap();
+        let mut next=e.cfg.clone();next.t100.risk_pct=0.5;
+        e.cfg=apply_live_t100_change(&st,&mut e,next,true);
+        assert_eq!(conduit_core::recorded_broker::exact::encode(&e.t100).unwrap(),runtime);
+    }
+
+    #[test]
+    fn t100_mode_queue_keeps_origin_and_reconnect_is_not_offline() {
+        use conduit_server::Runtime;
+        let st=stan("t100-mode-queue");let (tx,rx)=std::sync::mpsc::channel();
+        let connected=Arc::new(AtomicBool::new(true));let running=Arc::new(AtomicBool::new(true));
+        let runtime=LiveRuntime{tx,connected:connected.clone(),thread_running:running.clone()};
+        st.update(Sections::all(),|s|{s.mode=ui::TradingMode::Auto;
+            s.settings["mt5_follow_terminal_account"]=serde_json::json!(true);
+            s.connection.mt5="connected".into();s.connection.account_verified="ok".into();s.connection.account_session="synthetic-A".into();});
+        assert!(runtime.defer_mode_change(ui::TradingMode::AutoEa,&st,Some("synthetic-old")).is_err());
+        assert!(runtime.defer_mode_change(ui::TradingMode::AutoEa,&st,Some("synthetic-A")).unwrap());
+        assert_eq!(st.read(|s|s.mode),ui::TradingMode::Auto);
+        let queued=rx.try_recv().unwrap();assert!(command_for_live_session(queued,true,"synthetic-B").is_none());
+        connected.store(false,Ordering::Release);
+        assert!(runtime.defer_mode_change(ui::TradingMode::AutoEa,&st,Some("synthetic-A")).is_err());
+        running.store(false,Ordering::Release);
+        assert!(!runtime.defer_mode_change(ui::TradingMode::AutoEa,&st,None).unwrap());
+        sprzataj(&st);
+    }
+
+    #[test]
+    fn t100_autonomous_legs_do_not_require_telegram_channels() {
+        use conduit_core::formaty::Lancuch;
+        let st=stan("t100-no-source");let mut cfg=Settings::default();cfg.t100.enabled=true;
+        st.workspace.save_preset(&conduit_core::Preset{name:"T100_FIX".into(),description:String::new(),
+            format:"Synergy".into(),settings:cfg.clone(),ea:None}).unwrap();
+        st.update(Sections::all(),|s|{s.mode=ui::TradingMode::AutoEa;s.aktywny_ea="AUTONOMOUS".into();
+            s.lancuchy.lista=vec![Lancuch{nazwa:"AUTONOMOUS".into(),presety:std::collections::BTreeMap::from([
+                ("Synergy".into(),"T100_FIX".into()),("ZEN".into(),"T100_FIX".into())]),..Default::default()}];});
+        assert!(odcisk_zrodel(&st).is_empty());
+        let team=zbuduj_silniki(&st,&Settings::default(),600.0);
+        assert_eq!(team.lista.len(),2);
+        assert!(team.lista.iter().all(|s|s.engine.cfg.t100.enabled && s.engine.tryb_auto_ea && s.powod.is_empty()));
+        let levels=zbuduj_szczeble(&st,&Settings::default(),600.0,&team.lancuch,&pary_nog(&team));
+        assert_eq!(loty_nog(&team,&levels,0.0,600.0,&[]).iter().filter(|n|n.handluje).count(),2);
+        // An explicitly manage-only recovery leg never advertises new entries.
+        let mut manage=team;manage.lista[0].tylko_zarzadzanie=true;
+        assert!(!loty_nog(&manage,&[],0.0,600.0,&[])[0].handluje);
+        sprzataj(&st);
+    }
+
+    #[test]
+    fn t100_exclusive_mode_uses_own_chain_and_refuses_exposure_both_directions() {
+        use conduit_core::formaty::Lancuch;
+        let st=stan("t100-exclusive-chain");let auto=ui::TradingMode::Auto;let ea=ui::TradingMode::AutoEa;
+        let g7=Settings::default();let mut t100=g7.clone();t100.t100.enabled=true;
+        for (name,settings) in [("AUTO_FIX",g7.clone()),("EA_FIX",t100)] {
+            st.workspace.save_preset(&conduit_core::Preset{name:name.into(),description:String::new(),format:"Synergy".into(),settings,ea:None}).unwrap();
+        }
+        st.update(Sections::all(),|s|{s.mode=auto;s.aktywny_ea="EA_CHAIN".into();s.lancuchy.aktywny="AUTO_CHAIN".into();
+            s.lancuchy.lista=vec![Lancuch{nazwa:"AUTO_CHAIN".into(),presety:std::collections::BTreeMap::from([("Synergy".into(),"AUTO_FIX".into())]),..Default::default()},
+                Lancuch{nazwa:"EA_CHAIN".into(),presety:std::collections::BTreeMap::from([("Synergy".into(),"EA_FIX".into())]),..Default::default()}];});
+        let team=zbuduj_silniki(&st,&g7,600.0);assert_eq!(team.lista[0].preset,"AUTO_FIX");assert!(!team.lista[0].engine.cfg.t100.enabled);
+        let fingerprint=odcisk_konfiguracji(&st);
+        assert!(apply_live_mode_change(&st,&team,false,auto,ea).is_err());assert_eq!(st.read(|s|s.mode),auto);
+        apply_live_mode_change(&st,&team,true,auto,ea).unwrap();assert_ne!(odcisk_konfiguracji(&st),fingerprint);
+        let mut team=zbuduj_silniki(&st,&g7,600.0);assert_eq!(team.lista[0].preset,"EA_FIX");assert!(team.lista[0].engine.cfg.t100.enabled);
+        team.lista[0].engine.tryb_auto_ea=true;
+        assert!(apply_live_mode_change(&st,&team,false,ea,auto).is_err());assert_eq!(st.read(|s|s.mode),ea);
+        let mut unknown=zbuduj_silniki(&st,&g7,600.0);unknown.lista[0].engine.tryb_auto_ea=true;
+        assert!(unknown.lista[0].engine.restore_t100_checkpoint(None).is_err());
+        assert!(apply_live_mode_change(&st,&unknown,true,ea,auto).is_err());assert_eq!(st.read(|s|s.mode),ea);
+        apply_live_mode_change(&st,&team,true,ea,auto).unwrap();assert_eq!(zbuduj_silniki(&st,&g7,600.0).lista[0].preset,"AUTO_FIX");
+        sprzataj(&st);
+    }
 
     #[test]
     fn manual_new_exposure_respects_rearm_hold_in_management_only_engine() {
@@ -6510,7 +6879,7 @@ mod tests {
         let st = stan("follow-manual-session");
         let (tx, rx) = std::sync::mpsc::channel();
         let connected = Arc::new(AtomicBool::new(false));
-        let runtime = LiveRuntime { tx, connected: connected.clone() };
+        let runtime = LiveRuntime { tx, connected: connected.clone(), thread_running: Arc::new(AtomicBool::new(true)) };
         let cmd = Command::ClosePosition { ticket: 7 };
         st.update(Sections::all(), |s| {
             s.settings["mt5_follow_terminal_account"] = serde_json::json!(true);

@@ -42,6 +42,7 @@ export interface OpisWarstwyPola {
    explicit. Archived keys remain readable for compatibility; the mapper
    explicitly ignores them, so presenting an operative switch would mislead. */
 const POLA_POZA_SCHEMATEM: Partial<Record<SettingKey, OpisWarstwyPola>> = {
+  t100: { zakres: "preset", dowod: "settings_map::core_from_ui → Settings.t100; outside POLA_RACHUNKU" },
   day_target_pct: { zakres: "preset", dowod: "settings_map::core_from_ui → Settings.day_target_pct; outside POLA_RACHUNKU" },
   day_trail_arm_pct: { zakres: "preset", dowod: "settings_map::core_from_ui → Settings.day_trail_arm_pct; outside POLA_RACHUNKU" },
   day_trail_stop_pct: { zakres: "preset", dowod: "settings_map::core_from_ui → Settings.day_trail_stop_pct; outside POLA_RACHUNKU" },

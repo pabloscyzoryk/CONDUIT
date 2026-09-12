@@ -516,6 +516,7 @@ impl Verify {
             "application_bootstrap"
             | "application_provenance"
             | "broker_operation"
+            | "passive_context_event"
             | "session_end" => {}
             _ => bail!("unknown event kind: {}", event.kind),
         }

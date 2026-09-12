@@ -194,6 +194,10 @@ pub struct Mt5Bridge {
     magic: i64,
 
     q: Quote,
+    m1_cache: crate::complete_m1::Cache,
+    m1_enabled: bool,
+    m1_generation: Option<u64>,
+    m1_last_attempt: Option<Instant>,
     acc: Account,
     collect_account_observations: bool,
     account_observations: Vec<AccountObservation>,
@@ -374,6 +378,10 @@ impl Mt5Bridge {
                 bid: 0.0,
                 ask: 0.0,
             },
+            m1_cache: Default::default(),
+            m1_enabled: false,
+            m1_generation: None,
+            m1_last_attempt: None,
             acc: Account {
                 balance: 0.0,
                 equity: 0.0,
@@ -857,7 +865,54 @@ impl Mt5Bridge {
                 out.push(q);
             }
         }
+        self.poll_complete_m1();
         out
+    }
+
+    /// Opt-in only. The default GOD-X7 path performs no candle RPC.
+    /// Retry registration after reconnect; all candle reads by Engine are cached.
+    pub fn configure_t100_bars(&mut self, enabled: bool) -> anyhow::Result<()> {
+        if self.m1_enabled != enabled {
+            self.m1_enabled = enabled;
+            self.m1_generation = None;
+            self.m1_last_attempt = None;
+            self.m1_cache.clear("M1 feed configuration changed");
+            self.tr.drain_m1_bars();
+        } else if !enabled && self.m1_generation.is_none() && self.m1_last_attempt.is_none() { return Ok(()); }
+        let generation = self.tr.execution_generation();
+        if self.m1_generation == Some(generation) && self.tr.is_connected() { return Ok(()); }
+        self.m1_cache.clear("M1 waiting for current connection");
+        if self.m1_last_attempt.is_some_and(|last|last.elapsed() < Duration::from_secs(5)) {return Ok(());}
+        self.m1_last_attempt = Some(Instant::now());
+        let result = self.tr.call("t100_bars", json!({"enabled":enabled}))?;
+        anyhow::ensure!(result.get("enabled").and_then(Value::as_bool)==Some(enabled)
+            && result.get("schema").and_then(Value::as_u64)==Some(1), "M1 feed acknowledgement is invalid");
+        anyhow::ensure!(self.tr.execution_generation()==generation && self.tr.is_connected(), "M1 connection changed during subscription");
+        self.m1_generation = enabled.then_some(generation);
+        if !enabled { self.m1_last_attempt = None; }
+        Ok(())
+    }
+
+    fn poll_complete_m1(&mut self) {
+        if !self.m1_enabled { return; }
+        if !self.tr.is_connected()
+            || self.m1_generation != Some(self.tr.execution_generation()) {
+            self.tr.drain_m1_bars();
+            self.m1_cache.clear("M1 feed not ready for current connection");
+            return;
+        }
+        for packet in self.tr.drain_m1_bars() {
+            self.m1_cache.accept(packet, &self.ident, &self.sym.symbol, self.q.ts);
+        }
+    }
+
+    pub fn t100_bars_issue(&self) -> Option<&str> { self.m1_cache.issue.as_deref() }
+
+    pub fn t100_configuration_flat(&self) -> bool {
+        self.execution_session().is_some_and(|session|self.open_snapshot_session.as_ref()==Some(&session))
+            && self.receipt_barrier()==ReceiptBarrier::Clear
+            && self.positions.is_empty() && self.pendings.is_empty()
+            && self.foreign_pos.is_empty() && self.foreign_ord.is_empty()
     }
 
     /// Pobiera zamknięcia i okresowo odświeża konto, pozycje oraz zlecenia.
@@ -1852,6 +1907,15 @@ pub fn deal_reason(r: i32) -> CloseReason {
 // ============================================================
 
 impl Broker for Mt5Bridge {
+    fn t100_contract_supported(&self) -> bool {
+        self.sym.contract_size == XAU_CONTRACT && self.ident.currency == "USD"
+            && matches!(self.sym.symbol.as_str(), "XAUUSD" | "XAUUSD.s")
+    }
+    fn complete_m1_bars(&self, after_ts: Option<Ts>) -> Option<&[conduit_core::t100::Bar]> {
+        if !self.m1_enabled || !self.tr.is_connected()
+            || self.m1_generation != Some(self.tr.execution_generation()) { return Some(&[]); }
+        Some(self.m1_cache.after(after_ts, self.q.ts))
+    }
     fn quote(&self) -> Quote {
         self.q
     }

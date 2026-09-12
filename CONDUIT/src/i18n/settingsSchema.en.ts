@@ -22,6 +22,9 @@ const gapTrapEn = (s: Settings) =>
     : null;
 
 export const SCHEMA_EN: Record<string, GrupaEn> = {
+  t100: { title: "T-100 · experimental", desc: "Autonomous policy for the selected preset. Its enable switch applies independently of application mode.", fields: {
+    t100: { label: "T-100 — autonomous entries, exits and Synergy context", hint: "Experimental configuration: entry rules, risk, SL/TP, volatility, Synergy context and UTC session." },
+  } },
   /* ================= ENTRIES ================= */
   entry: {
     title: "Entries and zone",

@@ -266,13 +266,16 @@ impl Engine {
         // Own state only: routing derives other-slot holds from this accessor.
         // Including obce here would make a cleared account hold feed itself.
         (!self.rearm_reconcile.state.batches.is_empty()).then(|| self.rearm_hold_reason())
+            .or_else(|| self.t100_entry_hold_reason())
     }
 
     pub(super) fn rearm_confirmation_pending(&self) -> bool {
         !self.rearm_reconcile.state.batches.is_empty() || self.obce.rearm_entry_hold
+            || self.t100_entry_hold_reason().is_some()
     }
 
     pub(super) fn rearm_hold_reason(&self) -> &'static str {
+        if let Some(reason) = self.t100_entry_hold_reason() { return reason; }
         if self.rearm_reconcile.state.batches.iter().any(|b| b.review.is_some()) {
             "REARM REVIEW: brak pełnego dowodu wysłanej intencji; wymagane uzgodnienie historii brokera i pamięci koszyka"
         } else {

@@ -293,8 +293,31 @@ fn znajdz_secrets() -> Option<PathBuf> {
     kand.into_iter().find(|p| p.exists())
 }
 
+/// Informacyjne flagi nie wymagają konfiguracji, sesji ani połączenia.
+fn offline_cli_output(args: &[String]) -> Option<String> {
+    if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h")) {
+        return Some(format!(
+            "CONDUIT exporter {}\n\
+             Usage: eksport [--help | --version]\n\n\
+             --help, -h     Show this help without reading credentials or connecting.\n\
+             --version, -V  Show the version without reading credentials or connecting.\n\n\
+             With no informational flag, starts the existing local export interface.\n\
+             Its JSON format is not qualified as byte-identical to Telegram Desktop.\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    if args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-V")) {
+        return Some(format!("eksport {}\n", env!("CARGO_PKG_VERSION")));
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Some(output) = offline_cli_output(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        print!("{output}");
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -471,3 +494,40 @@ btn.addEventListener('click',()=>{
    }).catch(e=>{btn.disabled=false; wyn.className='wynik blad'; wyn.textContent='BŁĄD: '+e;});
 });
 </script></body></html>"#;
+
+#[cfg(test)]
+mod offline_cli_tests {
+    use super::offline_cli_output;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn help_and_alias_are_available_without_configuration() {
+        let help = offline_cli_output(&args(&["--help"])).unwrap();
+        assert!(help.contains("Usage: eksport"));
+        assert!(help.contains("without reading credentials or connecting"));
+        assert_eq!(offline_cli_output(&args(&["-h"])), Some(help));
+    }
+
+    #[test]
+    fn version_and_alias_are_offline() {
+        let expected = Some(format!("eksport {}\n", env!("CARGO_PKG_VERSION")));
+        assert_eq!(offline_cli_output(&args(&["--version"])), expected);
+        assert_eq!(offline_cli_output(&args(&["-V"])), expected);
+    }
+
+    #[test]
+    fn help_takes_precedence_without_starting_normal_path() {
+        assert!(offline_cli_output(&args(&["--version", "--help"]))
+            .unwrap()
+            .contains("Usage: eksport"));
+    }
+
+    #[test]
+    fn normal_arguments_keep_the_existing_startup_path() {
+        assert_eq!(offline_cli_output(&[]), None);
+        assert_eq!(offline_cli_output(&args(&["normal-legacy-argument"])), None);
+    }
+}

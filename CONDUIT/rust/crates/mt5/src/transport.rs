@@ -148,6 +148,7 @@ struct Shared {
     writer: Mutex<Option<TcpStream>>,
     pending: Mutex<HashMap<u64, Pending>>,
     ticks: Mutex<VecDeque<RawTick>>,
+    m1_bars: Mutex<VecDeque<Result<proto::RawM1Bars, String>>>,
     closed: Mutex<Vec<RawClosed>>,
     /// Zamknięcia SPOZA bota. Osobna kolejka, bo `closed` karmi statystyki
     /// silnika — wrzucenie tam cudzych transakcji zafałszowałoby wynik bota.
@@ -221,6 +222,7 @@ impl Transport {
             writer: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             ticks: Mutex::new(VecDeque::with_capacity(TICK_BUFFER)),
+            m1_bars: Mutex::new(VecDeque::new()),
             closed: Mutex::new(Vec::new()),
             foreign_closed: Mutex::new(Vec::new()),
             hello: Mutex::new(None),
@@ -388,6 +390,10 @@ impl Transport {
         q.drain(..).collect()
     }
 
+    pub(crate) fn drain_m1_bars(&self) -> Vec<Result<proto::RawM1Bars, String>> {
+        self.sh.m1_bars.lock().drain(..).collect()
+    }
+
     /// Zabiera wszystkie zamknięcia odebrane od ostatniego wywołania.
     pub fn drain_closed(&self) -> Vec<RawClosed> {
         std::mem::take(&mut *self.sh.closed.lock())
@@ -494,6 +500,7 @@ fn wywolaj(sh: &Arc<Shared>, cmd: &'static str, mut args: Value) -> Result<Value
         Ok(Err(CallError::Broker(e))) if e.code == -6 => {
             sh.account_changed.store(true, Ordering::Release);
             sh.ticks.lock().clear();
+            sh.m1_bars.lock().clear();
             sh.closed.lock().clear();
             sh.foreign_closed.lock().clear();
             Err(CallError::Broker(e))
@@ -821,22 +828,41 @@ fn run_session(sh: &Arc<Shared>, stream: TcpStream) {
 fn handle_event(sh: &Arc<Shared>, kind: &str, body: Value) {
     // No data or execution acknowledgements qualify a connection before ready.
     if !sh.connected.load(Ordering::Acquire)
-        && matches!(kind, "tick" | "closed" | "closed_foreign") {
+        && matches!(kind, "tick" | "closed" | "closed_foreign" | "m1_bars") {
         return;
     }
     if (sh.cfg.follow_terminal_account || sh.cfg.close_receipt_reconcile)
-        && matches!(kind, "tick" | "closed" | "closed_foreign") {
+        && matches!(kind, "tick" | "closed" | "closed_foreign" | "m1_bars") {
         let bound = sh.bound_account.lock().clone();
         let Some(bound) = bound else { return; }; // no account-bound data before handshake
         if sh.account_changed.load(Ordering::Acquire) || body.get("account") != Some(&bound) {
+            if kind == "m1_bars" {
+                // A failed history/account read is not itself proof that the
+                // terminal switched accounts. Hold this optional feed only;
+                // existing authoritative quote/account guards remain active.
+                let mut queue = sh.m1_bars.lock(); queue.clear();
+                queue.push_back(Err("M1 account identity unconfirmed or changed".into()));
+                return;
+            }
             sh.account_changed.store(true, Ordering::Release);
             sh.ticks.lock().clear();
+            sh.m1_bars.lock().clear();
             sh.closed.lock().clear();
             sh.foreign_closed.lock().clear();
             return;
         }
     }
     match kind {
+        "m1_bars" => {
+            let packet = serde_json::from_value::<proto::RawM1Bars>(body)
+                .map_err(|_| "M1 malformed wire frame".to_string());
+            let mut queue = sh.m1_bars.lock();
+            if queue.len() >= 8 {
+                queue.clear();
+                queue.push_back(Err("M1 delivery queue overflow; warmup recovery required".into()));
+            }
+            queue.push_back(packet);
+        }
         "tick" => match serde_json::from_value::<RawTick>(body) {
             Ok(t) => sh.push_tick(t),
             Err(e) => warn!(%e, "MT5: zły tick"),

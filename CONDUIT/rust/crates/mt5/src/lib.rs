@@ -32,6 +32,7 @@
 pub mod bridge;
 pub mod comment;
 mod cost_adapter;
+mod complete_m1;
 pub mod errors;
 pub mod market;
 pub mod operation_evidence;

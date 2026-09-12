@@ -44,6 +44,11 @@ pub trait Runtime: Send + Sync {
     fn command_scoped(&self, cmd: &Command, state: &StateHandle, _account_session: Option<&str>) -> anyhow::Result<()> {
         self.command(cmd, state)
     }
+    /// True means queued for authoritative checks, with NO mode/state mutation.
+    /// NoRuntime keeps offline selection; live must also defer during reconnect.
+    /// Preserve the original UI account-session token rather than rebinding it.
+    fn defer_mode_change(&self, _mode: ui::TradingMode, _state: &StateHandle,
+        _account_session: Option<&str>) -> anyhow::Result<bool> { Ok(false) }
     /// Krótki opis do panelu diagnostycznego.
     fn name(&self) -> &'static str {
         "brak"

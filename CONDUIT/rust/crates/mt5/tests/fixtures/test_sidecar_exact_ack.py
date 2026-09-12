@@ -7,11 +7,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from pathlib import Path
 import sys
 import types
 import unittest
 from unittest.mock import patch
 
+# Embedded Python may intentionally omit the script directory from sys.path.
+# Add only this synthetic fixture directory, never a global environment path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_sidecar_history_order_identity as old
 
 FAKE = old.FAKE

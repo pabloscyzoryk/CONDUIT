@@ -178,6 +178,8 @@ fn replay_clock_contract(
 }
 
 struct Args {
+    /// Explicit identity for a single-source replay. Never inferred from message text.
+    source_name: String,
     ticks: PathBuf,
     signals: PathBuf,
     /// Jawna normalizacja zegara strumienia replayu. To właściwość
@@ -389,7 +391,7 @@ fn main_run_config(a: &Args, p: &Wariant, from: i64, to: i64,
         daily_reset: a.daily_reset,
         auto_ea: a.auto_ea,
         flat_na_dobie: a.flat_na_dobie,
-        source_name: "ATFX VIP SIGNALS".into(),
+        source_name: a.source_name.clone(),
         curve_interval_ms: a.krzywa_ms,
         journal_path: journal.clone(),
         // 0 = zimny start = ścieżka parytetu; patrz `Args::rozgrzewka_h`.
@@ -436,6 +438,7 @@ fn parse_args() -> Result<Args> {
     let mut a = Args {
         ticks: "data/ticks.bin".into(),
         signals: "data/signals.json".into(),
+        source_name: "ATFX VIP SIGNALS".into(),
         signal_time_offset_min: 0,
         signal_time_offset_explicit: false,
         sim_limit_price_improvement: false,
@@ -565,6 +568,12 @@ fn parse_args() -> Result<Args> {
             "--balance" => a.balance = next()?.parse()?,
             "--daily-reset" => a.daily_reset = true,
             "--auto-ea" => a.auto_ea = true,
+            "--source-name" => {
+                a.source_name = next()?;
+                if a.source_name.trim().is_empty() {
+                    bail!("--source-name requires a nonempty source identity");
+                }
+            },
             "--flat-na-dobie" => a.flat_na_dobie = true,
             "--reset-co" => a.reset_co = next()?.parse()?,
             "--zzn" => a.zzn = true,
@@ -645,6 +654,7 @@ fn parse_args() -> Result<Args> {
                      \x20                     flagi mierzy ŚLEPY filtr reżimu.\n\
                      --balance <kwota>     kapitał startowy (domyślnie 200)\n\
                      --daily-reset         każdy dzień liczony osobno od kwoty startowej\n\
+                     --source-name NAME    tożsamość źródła pojedynczego replayu, np. Synergy.\n\
                      --auto-ea             tryb AUTO-EA (flaga Engine::tryb_auto_ea).\n\
                      \x20                     Dziś nie czyta jej ŻADNA oś, więc przebieg ma\n\
                      \x20                     wyjść co do centa jak bez niej — to jest punkt\n\
@@ -1428,6 +1438,8 @@ fn main() -> Result<()> {
     // Ile przebiegów WYZEROWAŁO konto. Jedyny próg bezwzględny (PROMPT0 §4a):
     // konto na zerze nie ma już jak odrobić, więc liczba na wierzchu.
     let zerowe = Arc::new(AtomicUsize::new(0));
+    let bez_transakcji = Arc::new(AtomicUsize::new(0));
+    let t100_study = warianty.iter().any(|p|p.settings.t100.enabled || p.formaty.iter().any(|f|f.settings.t100.enabled));
 
     // Wyniki do przeglądarki monitora powstają W TRAKCIE sweepu, nie dopiero
     // po `par_iter().collect()`. Pisarz jest wspólny także w `--summary-only`:
@@ -1468,6 +1480,7 @@ fn main() -> Result<()> {
         let gotowe = gotowe.clone();
         let najlepszy = najlepszy.clone();
         let zerowe = zerowe.clone();
+        let bez_transakcji = bez_transakcji.clone();
         let sloty = sloty.clone();
         let nazwy_slotow = nazwy_slotow.clone();
         let koniec = koniec.clone();
@@ -1515,10 +1528,27 @@ fn main() -> Result<()> {
             data_czas_ludzki(t_first),
             data_czas_ludzki(t_last)
         );
+        // `messages` already contains the CLI clock shift. The runner adds
+        // the effective preset shift and latency exactly once at dispatch.
+        // Show the same clock as the measured ticks when all variants agree.
+        let mut offsets: Vec<(i64,i64)> = warianty.iter()
+            .map(|p| (p.settings.msg_offset(),p.settings.exec_latency_ms)).collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        let wspolny_offset = if offsets.len()==1 { Some(offsets[0]) } else { None };
+        let zegar_zdarzen = match wspolny_offset {
+            Some((offset,latency)) => format!(
+                "czas wykonania jak ticki · CLI {:+} min · preset {:+.3} min · opóźnienie {} ms",
+                a.signal_time_offset_min,offset as f64/60_000.0,latency),
+            None => "czas pliku po CLI · offset lub opóźnienie różne między presetami".to_string(),
+        };
         let zdarzenia_w_oknie: Vec<i64> = messages
             .iter()
-            .filter(|m| m.ts >= from && m.ts < to)
-            .map(|m| m.ts)
+            .map(|m| match wspolny_offset {
+                Some((offset,latency)) => m.ts.saturating_add(offset).saturating_add(latency),
+                None => m.ts,
+            })
+            .filter(|ts| *ts >= from && *ts < to)
             .collect();
         let zakres_zdarzen = match (zdarzenia_w_oknie.first(), zdarzenia_w_oknie.last()) {
             (Some(a), Some(b)) => format!(
@@ -1688,7 +1718,14 @@ fn main() -> Result<()> {
                     }
                 }
                 st.dodaj("zakres mierzony", zakres_mierzony.clone());
+                if t100_study {
+                    let idle=bez_transakcji.load(Ordering::Relaxed).min(g);
+                    st.dodaj("T-100: aktywność ukończonych",format!("{} z zamknięciami · {idle} bez zamknięć",g.saturating_sub(idle)));
+                    st.dodaj("T-100: rozgrzewka", "zimny start · pełne BID M1/M5/M15 · zwykle co najmniej 60 min");
+                    st.dodaj("T-100: ocena lidera", "wynik roboczy — aktywność i walidacja oceniane po zakończeniu");
+                }
                 st.dodaj("zdarzenia eksportu", zakres_zdarzen.clone());
+                st.dodaj("zegar zdarzeń", zegar_zdarzen.clone());
                 st.dodaj("pełne dane ticków", dane_tickow.clone());
                 st.dodaj("rozgrzewka rynku/SR", rozgrzewka.clone());
                 st.dodaj("kapitał startowy", kapital.clone());
@@ -1745,6 +1782,7 @@ fn main() -> Result<()> {
                 if r.metrics.blown {
                     zerowe.fetch_add(1, Ordering::Relaxed);
                 }
+                if r.metrics.trades == 0 { bez_transakcji.fetch_add(1,Ordering::Relaxed); }
                 let oc = score(&r.metrics);
                 if let Ok(mut n) = najlepszy.lock() {
                     if n.as_ref().map(|x| oc > x.ocena).unwrap_or(true) {
@@ -2117,7 +2155,7 @@ fn main() -> Result<()> {
             //
             // Tu wychodzi dokładnie to, co policzył silnik: pełna krzywa
             // kapitału ze znacznikami czasu i statystyki każdego dnia.
-            let dane = serde_json::json!({
+            let mut dane = serde_json::json!({
                 "preset": name,
                 "od": fmt_ts(from),
                 "do": fmt_ts(to),
@@ -2154,10 +2192,17 @@ fn main() -> Result<()> {
                 "dni": &r.daily,
                 "metryki": &r.metrics,
             });
+            if !r.t100.is_empty() {
+                dane["t100"]=serde_json::to_value(&r.t100)?;
+                dane["source_name"]=serde_json::json!(&a.source_name);
+            }
             std::fs::write(
                 a.out.join(format!("{safe}_{tag}_dane.json")),
                 serde_json::to_string(&dane)?,
             )?;
+        }
+        if !r.t100.is_empty() {
+            std::fs::write(a.out.join(format!("{safe}_{tag}_t100.json")),serde_json::to_string(&r.t100)?)?;
         }
         // KAZDA POJEDYNCZA TRANSAKCJA — osobny plik, niezalezny od `--no-charts`.
         //
@@ -2473,7 +2518,7 @@ where
                 n_dni: a.reset_co,
                 zzn: a.zzn,
                 zzn_max_dni: a.zzn_max_dni,
-                source_name: "ATFX VIP SIGNALS".into(),
+                source_name: a.source_name.clone(),
                 formaty: p.nogi().to_vec(),
                 pulapy: p.sufity().clone(),
             };
@@ -2791,6 +2836,7 @@ mod testy_konfiguracji_walk_forward {
     let mut a = Args {
         ticks: "data/ticks.bin".into(),
         signals: "data/signals.json".into(),
+        source_name: "ATFX VIP SIGNALS".into(),
         signal_time_offset_min: 0,
         signal_time_offset_explicit: false,
         sim_limit_price_improvement: false,
@@ -2924,6 +2970,16 @@ mod testy_konfiguracji_walk_forward {
             .map(|(key,value)| format!("{key}: expected={value}, actual={}",got[key]))
             .collect();
         assert!(diff.is_empty(),"RunConfig propagation differences:\n{}",diff.join("\n"));
+    }
+
+    #[test]
+    fn explicit_source_identity_reaches_main_and_walk_forward() {
+        let mut a = args();
+        a.source_name = "Synergy".into();
+        let main = main_run_config(&a, &variant(), 1, 99, None);
+        assert_eq!(main.source_name, "Synergy");
+        assert_eq!(walk_forward_run_config(&main, 11, 22).source_name, "Synergy");
+        assert_eq!(args().source_name, "ATFX VIP SIGNALS");
     }
 
     #[test]

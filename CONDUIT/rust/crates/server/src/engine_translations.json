@@ -1,5 +1,201 @@
 [
   [
+    "Kontekst źródła T-100",
+    "T-100 source context"
+  ],
+  [
+    "T-100: liczba kontekstów w kwarantannie po luce w obserwacji: {n}; historia oczekujących zdarzeń zachowana, nowe potwierdzone sygnały nadal mogą być używane",
+    "T-100: {n} contexts quarantined after an observation gap; pending history retained, new confirmed signals remain usable"
+  ],
+  [
+    "T-100: bierna kolejka kontekstu utraciła {n} zdarzeń; dotknięte luką stare konteksty wymagają nowej pełnej wersji źródła",
+    "T-100: passive context queue lost {n} events; affected old contexts require a new complete source version"
+  ],
+  [
+    "Nie można przywrócić aktywnego trybu strategii rachunku: {e}",
+    "Cannot restore the account's active strategy mode: {e}"
+  ],
+  [
+    "nieprawidłowe dzienne kotwice rachunku (invalid_account_day_anchors)",
+    "invalid_account_day_anchors"
+  ],
+  [
+    "nieaktualne dzienne kotwice rachunku (stale_account_day_anchors)",
+    "stale_account_day_anchors"
+  ],
+  [
+    "M1: nieprawidłowe potwierdzenie strumienia",
+    "M1 feed acknowledgement is invalid"
+  ],
+  [
+    "M1: połączenie zmieniło się podczas subskrypcji",
+    "M1 connection changed during subscription"
+  ],
+  [
+    "Tryb zmienił się od wysłania polecenia; wybierz tryb ponownie",
+    "The mode changed after the request was sent; select the mode again"
+  ],
+  [
+    "Zmiana trybu wymaga potwierdzonego pustego rachunku i uzgodnienia wszystkich zleceń; dotychczasowa ochrona pozostaje aktywna",
+    "Changing mode requires a confirmed flat account and reconciliation of all orders; existing protection remains active"
+  ],
+  [
+    "Zmiana trybu czeka na potwierdzone połączenie i pusty rachunek MT5",
+    "Changing mode awaits a confirmed connection and a flat MT5 account"
+  ],
+  [
+    "Zmiana trybu wymaga aktualnego identyfikatora sesji rachunku (accountSession)",
+    "Changing mode requires the current account session identifier (accountSession)"
+  ],
+  [
+    "Zmiana trybu pochodzi ze starej sesji FOLLOW",
+    "The mode-change request belongs to an old FOLLOW session"
+  ],
+  [
+    "M1: zmieniono konfigurację strumienia",
+    "M1 feed configuration changed"
+  ],
+  [
+    "M1: oczekiwanie na bieżące połączenie",
+    "M1 waiting for current connection"
+  ],
+  [
+    "M1: strumień nie jest gotowy dla bieżącego połączenia",
+    "M1 feed not ready for current connection"
+  ],
+  [
+    "M1: niezgodny schemat albo rachunek/instrument",
+    "M1 schema or account/symbol mismatch"
+  ],
+  [
+    "M1: niepełne dane",
+    "M1 incomplete"
+  ],
+  [
+    "M1: nieprawidłowe dane albo świeca nie jest zamknięta",
+    "M1 malformed or not closed"
+  ],
+  [
+    "M1: ograniczone uzupełnienie; pominięto starsze niedostępne świece",
+    "M1 bounded catchup: older unavailable candles were omitted"
+  ],
+  [
+    "M1: tożsamość rachunku niepotwierdzona albo zmieniona",
+    "M1 account identity unconfirmed or changed"
+  ],
+  [
+    "M1: nieprawidłowa ramka transportu",
+    "M1 malformed wire frame"
+  ],
+  [
+    "M1: przepełnienie kolejki dostaw; wymagane ponowne zebranie historii",
+    "M1 delivery queue overflow; warmup recovery required"
+  ],
+  [
+    "Konfiguracja T-100 jest nieprawidłowa",
+    "T-100 configuration is invalid"
+  ],
+  [
+    "Zmiana konfiguracji T-100 wymaga potwierdzonego braku ekspozycji na rachunku i uzgodnionego stanu decyzji",
+    "T-100 configuration change requires confirmed flat account and reconciled decision state"
+  ],
+  [
+    "T-100 HOLD: wymagany tryb AUTO-EA; AUTO nie może użyć tego presetu",
+    "T-100 HOLD: AUTO-EA mode is required; AUTO cannot use this preset"
+  ],
+  [
+    "nieobsługiwany kontrakt brokera lub waluta rachunku",
+    "unsupported broker contract or account currency"
+  ],
+  [
+    "T-100 WERYFIKACJA: {reason}; nowe wejścia zablokowane, ochrona pozostaje aktywna",
+    "T-100 REVIEW: {reason}; new exposure blocked, protection remains active"
+  ],
+  [
+    "T-100 WERYFIKACJA: niepełny stan decyzji; przed nowymi wejściami przywróć zgodny zapis stanu",
+    "T-100 REVIEW: incomplete decision state; restore the matching checkpoint before new exposure"
+  ],
+  [
+    "T-100 HOLD: wysłane wejście oczekuje na dokładne potwierdzenie brokera",
+    "T-100 HOLD: submitted entry awaits exact broker confirmation"
+  ],
+  [
+    "T-100 WEJŚCIE: decyzja {} potwierdzona w koszyku {}",
+    "T-100 ENTRY: decision {} confirmed in basket {}"
+  ],
+  [
+    "T-100 M1: {reason}; nowe wejścia czekają na pełne świece",
+    "T-100 M1: {reason}; new entries await complete candles"
+  ],
+  [
+    "brak zapisu stanu T100",
+    "missing T100 checkpoint"
+  ],
+  [
+    "nieobsługiwana wersja zapisu stanu T100",
+    "unsupported T100 checkpoint revision"
+  ],
+  [
+    "konfiguracja zapisu stanu T100 jest inna",
+    "T100 checkpoint configuration differs"
+  ],
+  [
+    "zamknięta transakcja nie ma zweryfikowanej podstawy netto",
+    "closed receipt has no validated net basis"
+  ],
+  [
+    "potwierdzone wejście nie ma zgodnej migawki pozycji",
+    "acknowledged entry has no matching position snapshot"
+  ],
+  [
+    "parametry potwierdzonego wejścia są nieprawidłowe",
+    "confirmed entry geometry is invalid"
+  ],
+  [
+    "identyfikator autonomicznego koszyka jest już zajęty",
+    "autonomous basket identity is already occupied"
+  ],
+  [
+    "nieprawidłowa konfiguracja T100",
+    "invalid T100 configuration"
+  ],
+  [
+    "konfiguracja zmieniła się bez zgodnego stanu decyzji",
+    "configuration changed without matching decision state"
+  ],
+  [
+    "przesunięcie UTC brokera nie jest jawną obsługiwaną liczbą pełnych godzin",
+    "broker UTC offset is not an explicit supported whole hour"
+  ],
+  [
+    "wyczerpano numerację koszyków",
+    "basket sequence exhausted"
+  ],
+  [
+    "wyczerpano numerację koszyków w slocie",
+    "basket slot exhausted"
+  ],
+  [
+    "wysłane wejście nie ma dokładnego identyfikatora potwierdzenia",
+    "submitted entry has no exact confirmation identity"
+  ],
+  [
+    "Ustawienia T-100: oczekiwano obiektu",
+    "T-100 settings: expected an object"
+  ],
+  [
+    "Ustawienia T-100: nieznane pole {key}",
+    "T-100 settings: unknown field {key}"
+  ],
+  [
+    "Ustawienia T-100: nieprawidłowe typy pól",
+    "T-100 settings: invalid field types"
+  ],
+  [
+    "Ustawienia T-100: wartości poza dozwolonym zakresem",
+    "T-100 settings: values outside the allowed range"
+  ],
+  [
     "BRAK PAKIETU MetaTrader5. Zainstaluj: pip install MetaTrader5",
     "MetaTrader5 PACKAGE MISSING. Install: pip install MetaTrader5"
   ],

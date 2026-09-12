@@ -669,6 +669,9 @@ async fn patch_preset_settings(
         }
     };
     let mut doc = crate::settings_map::preset_to_ui(&stare);
+    if let Err(error) = crate::settings_map::validate_t100_patch(&doc, &patch) {
+        return blad(StatusCode::BAD_REQUEST, error);
+    }
     crate::settings_map::merge_patch(&mut doc, &patch);
     preset.settings = crate::settings_map::core_from_ui(&doc);
     if let Err(e) = st.workspace.save_preset(&preset) {
@@ -1284,6 +1287,32 @@ mod testy {
             ..Default::default()
         };
         crate::bootstrap(&cfg, crate::default_auth()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn t100_preset_patch_preserves_owner_and_rejects_without_writing() {
+        let st = stan("t100-preset");
+        let preset = conduit_core::Preset {
+            name: "SYNTHETIC-T100".into(), description: String::new(), format: "Synthetic".into(),
+            settings: conduit_core::Settings::default(), ea: None,
+        };
+        st.workspace.save_preset(&preset).unwrap();
+        let path = st.workspace.presets_dir().join("SYNTHETIC-T100.json");
+        let before = std::fs::read(&path).unwrap();
+        let global = st.read(|s| s.settings.clone());
+        let bad = patch_preset_settings(State(st.clone()), Path(preset.name.clone()),
+            Json(serde_json::json!({"t100":{"risk_pct":false}}))).await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let ok = patch_preset_settings(State(st.clone()), Path(preset.name.clone()),
+            Json(serde_json::json!({"t100":{"enabled":true,"risk_pct":2.0}}))).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let changed: conduit_core::Preset = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(changed.settings.t100.enabled);
+        assert_eq!(changed.settings.t100.risk_pct, 2.0);
+        assert_eq!(changed.settings.t100.experts, preset.settings.t100.experts);
+        assert_eq!(changed.settings.ea_enabled, preset.settings.ea_enabled);
+        assert_eq!(st.read(|s| s.settings.clone()), global);
     }
 
     fn skad(adres: &str) -> ConnectInfo<std::net::SocketAddr> {

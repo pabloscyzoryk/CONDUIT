@@ -343,6 +343,8 @@ pub enum SmartSlMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Autonomous policy; independent of legacy AUTO-EA and off in old presets.
+    pub t100: crate::t100::Config,
     pub lot_mode_percent: bool,
     pub lot_fixed: f64,
     pub lot_percent: f64,
@@ -1689,6 +1691,7 @@ impl Default for Settings {
             parser_geometryczny: false,
             parser_min_pewnosc: 0.0,
 
+            t100: crate::t100::Config::default(),
             ea_enabled: false,
             ea_tick_s: 0.0,
             ea_state_src: default_ea_state_src(),

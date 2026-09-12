@@ -558,7 +558,43 @@ export interface Stats {
 }
 
 /* ---------------- USTAWIENIA (1:1 z bot.py) ---------------- */
+export interface T100Config {
+  enabled: boolean;
+  experts: number;
+  signal_weight: number;
+  signal_half_life_min: number;
+  market_context_max_age_min: number;
+  signal_required: boolean;
+  score_threshold: number;
+  risk_pct: number;
+  portfolio_risk_pct: number;
+  margin_budget_pct: number;
+  max_positions: number;
+  cooldown_bars: number;
+  stop_atr: number;
+  reward_risk: number;
+  trail_start_r: number;
+  trail_atr: number;
+  break_even_r: number;
+  max_hold_min: number;
+  daily_loss_pct: number;
+  daily_profit_lock_pct: number;
+  daily_giveback_pct: number;
+  spread_atr_max: number;
+  spread_abs_max: number;
+  min_atr: number;
+  shock_atr: number;
+  adaptation: number;
+  trend_threshold: number;
+  range_threshold: number;
+  session_start_utc: number;
+  session_end_utc: number;
+  friday_flat_utc: number;
+}
+
 export interface Settings {
+  /** Autonomous preset policy; enabled is independent of the application mode. */
+  t100: T100Config;
   explicit_pending_until_cancel: boolean;
   lot_base: "Balance" | "Equity" | "MinOfBoth";
   /* --- wejscia --- */

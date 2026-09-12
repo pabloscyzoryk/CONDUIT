@@ -36,6 +36,32 @@ const { ENGINE_TEMPLATES } = load('@/i18n/engineTemplates');
 const { presentEngineText } = load('@/i18n/enginePresentation');
 const { tSilnik } = load('@/i18n/silnik');
 
+test('mode namespaces and passive source quarantine retain counts, history and account scope in PL/EN', () => {
+  const live = readFileSync(resolve(root, '../rust/crates/app/src/live.rs'), 'utf8');
+  for (const literal of ["T-100 source context", "contexts quarantined after an observation gap; pending history retained, new confirmed signals remain usable", "events; affected old contexts require a new complete source version", "Cannot restore the account's active strategy mode:"])
+    assert.ok(live.includes(literal), 'review actual production diagnostic: ' + literal);
+  const pairs = [
+    ['Kontekst źródła T-100', 'T-100 source context'],
+    ['T-100: liczba kontekstów w kwarantannie po luce w obserwacji: 0; historia oczekujących zdarzeń zachowana, nowe potwierdzone sygnały nadal mogą być używane', 'T-100: 0 contexts quarantined after an observation gap; pending history retained, new confirmed signals remain usable'],
+    ['T-100: bierna kolejka kontekstu utraciła 8193 zdarzeń; dotknięte luką stare konteksty wymagają nowej pełnej wersji źródła', 'T-100: passive context queue lost 8193 events; affected old contexts require a new complete source version'],
+    ['Nie można przywrócić aktywnego trybu strategii rachunku: SYNTHETIC_STORE_FAILURE_7', "Cannot restore the account's active strategy mode: SYNTHETIC_STORE_FAILURE_7"],
+  ];
+  for (const [pl, en] of pairs) {
+    i18n.setLanguage('pl'); assert.equal(tSilnik(en), pl);
+    i18n.setLanguage('en'); assert.equal(tSilnik(pl), en);
+  }
+  const policy = readFileSync(resolve(root, '../rust/crates/core/src/t100/policy.rs'), 'utf8');
+  for (const reason of ['invalid_account_day_anchors', 'stale_account_day_anchors']) {
+    assert.ok(policy.includes('"' + reason + '"'), reason);
+    const pl = presentEngineText(reason, 'pl');
+    assert.notEqual(pl, reason); assert.ok(pl.includes(reason), 'machine code remains identifiable');
+    assert.equal(presentEngineText(pl, 'en'), reason);
+    const wrapped = `T-100 REVIEW: ${reason}; new exposure blocked, protection remains active`;
+    const translated = presentEngineText(wrapped, 'pl');
+    assert.ok(translated.includes(pl)); assert.equal(presentEngineText(translated, 'en'), wrapped);
+  }
+});
+
 test('native terminal discovery diagnostics all have reversible presentation translations', () => {
   // Read production literals without importing Python or inspecting any terminal.
   const source = readFileSync(resolve(root, '../rust/crates/mt5/sidecar/terminal_discovery.py'), 'utf8');
@@ -330,4 +356,60 @@ test('entry source telemetry preserves unknown historical counts and is distinct
     i18n.setLanguage(language);
     for (const row of rows) assert.notEqual(i18n.t(row.label), row.label);
   }
+});
+
+
+test('T100 review, confirmed entry and M1 wait retain exact reasons and identifiers in both languages', () => {
+  const source = readFileSync(resolve(root, '../rust/crates/core/src/engine/t100_execution.rs'), 'utf8');
+  const reasons = [...new Set([...source.matchAll(/(?:t100_hold|ok_or)\("([^"{}]+)"\)/g)].map(match => match[1]))];
+  assert.ok(reasons.length >= 10, 'exercise actual production hold reasons');
+  for (const reason of reasons) {
+    const raw = `T-100 REVIEW: ${reason}; new exposure blocked, protection remains active`;
+    const polish = presentEngineText(raw, 'pl');
+    assert.ok(polish.startsWith('T-100 WERYFIKACJA: '), polish);
+    assert.ok(!polish.includes(reason), reason);
+    assert.equal(presentEngineText(polish, 'en'), raw);
+  }
+  const pairs = [
+    ["Konfiguracja T-100 jest nieprawidłowa", "T-100 configuration is invalid"],
+    ["Zmiana konfiguracji T-100 wymaga potwierdzonego braku ekspozycji na rachunku i uzgodnionego stanu decyzji", "T-100 configuration change requires confirmed flat account and reconciled decision state"],
+    ["T-100 HOLD: wymagany tryb AUTO-EA; AUTO nie może użyć tego presetu", "T-100 HOLD: AUTO-EA mode is required; AUTO cannot use this preset"],
+    ['T-100 WEJŚCIE: decyzja 17 potwierdzona w koszyku 4294967000', 'T-100 ENTRY: decision 17 confirmed in basket 4294967000'],
+    ['T-100 HOLD: wysłane wejście oczekuje na dokładne potwierdzenie brokera', 'T-100 HOLD: submitted entry awaits exact broker confirmation'],
+    ['T-100 WERYFIKACJA: niepełny stan decyzji; przed nowymi wejściami przywróć zgodny zapis stanu', 'T-100 REVIEW: incomplete decision state; restore the matching checkpoint before new exposure'],
+    ['T-100 M1: SYNTHETIC_FEED_WAIT; nowe wejścia czekają na pełne świece', 'T-100 M1: SYNTHETIC_FEED_WAIT; new entries await complete candles'],
+    ['Ustawienia T-100: nieznane pole signalX', 'T-100 settings: unknown field signalX'],
+  ];
+  for (const [polish, english] of pairs) {
+    i18n.setLanguage('en'); assert.equal(tSilnik(polish), english);
+    i18n.setLanguage('pl'); assert.equal(tSilnik(english), polish);
+  }
+  const unknown = 'T-100 REVIEW: opaque_vendor_reason_19; new exposure blocked, protection remains active';
+  assert.equal(presentEngineText(unknown, 'pl'), 'T-100 WERYFIKACJA: opaque_vendor_reason_19; nowe wejścia zablokowane, ochrona pozostaje aktywna');
+});
+
+test('actual deferred mode and complete M1 diagnostics preserve protection and session scope', () => {
+  const live = readFileSync(resolve(root, '../rust/crates/app/src/live.rs'), 'utf8');
+  const mode = [...new Set([...live.matchAll(/"((?:Zmiana trybu (?:wymaga|czeka|pochodzi)|Tryb zmienił)[^"{}]+)"/g)].map(m => m[1]))];
+  assert.equal(mode.length, 5);
+  for (const raw of mode) {
+    const translated = presentEngineText(raw, 'en');
+    assert.notEqual(translated, raw);
+    assert.equal(presentEngineText(translated, 'pl'), raw);
+  }
+  const files = ['complete_m1.rs', 'bridge.rs', 'transport.rs'];
+  const reasons = new Set(files.flatMap(file => {
+    const source = readFileSync(resolve(root, '../rust/crates/mt5/src', file), 'utf8');
+    return [...source.matchAll(/"(M1 [^"{}]+)"/g)].map(m => m[1]);
+  }));
+  assert.ok(reasons.size >= 10);
+  for (const reason of reasons) {
+    const en = `T-100 M1: ${reason}; new entries await complete candles`;
+    const pl = presentEngineText(en, 'pl');
+    assert.ok(!pl.includes(reason), reason);
+    assert.equal(presentEngineText(pl, 'en'), en);
+  }
+  // Python machine codes remain verbatim, including codes unknown to this UI.
+  assert.equal(presentEngineText('T-100 M1: history_unavailable; nowe wejścia czekają na pełne świece', 'en'),
+    'T-100 M1: history_unavailable; new entries await complete candles');
 });

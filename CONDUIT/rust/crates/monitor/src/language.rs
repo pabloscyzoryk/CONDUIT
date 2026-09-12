@@ -183,6 +183,15 @@ pub fn label(language: Language, value: &str) -> &str {
         return value;
     }
     match value {
+        "T-100: aktywność ukończonych" => "T-100: completed-run activity",
+        "T-100: rozgrzewka" => "T-100: warmup",
+        "T-100: ocena lidera" => "T-100: leader assessment",
+        "zegar zdarzeń" => "event clock",
+        "zakres mierzony" => "measured range",
+        "zdarzenia eksportu" => "export events",
+        "pełne dane ticków" => "full tick history",
+        "rozgrzewka rynku/SR" => "market/SR warmup",
+        "kapitał startowy" => "starting capital",
         "zysk końcowy" => "net profit",
         "% dodatnich dni rynkowych (equity)" => "% positive market days (equity)",
         "% dodatnich dni z zamknięciami (legacy)" => "% positive days with closes (legacy)",
@@ -275,6 +284,26 @@ pub fn statistic_value(language: Language, key: &str, value: &str) -> String {
         return value.to_owned();
     }
     match key {
+        "T-100: aktywność ukończonych" => value
+            .replace(" z zamknięciami · ", " with closes · ")
+            .replace(" bez zamknięć", " without closes"),
+        "T-100: rozgrzewka" if value == "zimny start · pełne BID M1/M5/M15 · zwykle co najmniej 60 min" =>
+            "cold start · complete BID M1/M5/M15 · usually at least 60 min".into(),
+        "T-100: ocena lidera" if value == "wynik roboczy — aktywność i walidacja oceniane po zakończeniu" =>
+            "provisional result — activity and validation assessed after completion".into(),
+        "zegar zdarzeń" if value == "czas pliku po CLI · offset lub opóźnienie różne między presetami" =>
+            "file time after CLI adjustment · offset or latency differs between presets".into(),
+        "zegar zdarzeń" if value.starts_with("czas wykonania jak ticki · CLI ") => value
+            .replacen("czas wykonania jak ticki · CLI ", "execution time in tick clock · CLI ", 1)
+            .replace(" · opóźnienie ", " · latency "),
+        "zakres mierzony" => value.replace(" (ostatni tick)", " (last tick)"),
+        "zdarzenia eksportu" if value == "brak zdarzeń w mierzonym zakresie" =>
+            "no events in the measured range".into(),
+        "zdarzenia eksportu" => value.replace(" zdarzeń", " events"),
+        "rozgrzewka rynku/SR" if value == "0 h — zimny start" => "0 h — cold start".into(),
+        "rozgrzewka rynku/SR" => value
+            .replace(" h historii · skan ", " h of history · scan ")
+            .replace(" … start · bez handlu", " … start · no trading"),
         "najlepszy z ukończonych" => {
             if let Some(rest) = value.strip_suffix(" gotowych") {
                 if let Some((name, counts)) = rest.rsplit_once(" · ") {
@@ -306,6 +335,33 @@ macro_rules! localized_format {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn t100_clock_and_range_catalog_preserves_counts_offsets_and_time_domain() {
+        let cases = [
+            ("T-100: aktywność ukończonych", "T-100: completed-run activity", "11 z zamknięciami · 0 bez zamknięć", "11 with closes · 0 without closes"),
+            ("T-100: rozgrzewka", "T-100: warmup", "zimny start · pełne BID M1/M5/M15 · zwykle co najmniej 60 min", "cold start · complete BID M1/M5/M15 · usually at least 60 min"),
+            ("T-100: ocena lidera", "T-100: leader assessment", "wynik roboczy — aktywność i walidacja oceniane po zakończeniu", "provisional result — activity and validation assessed after completion"),
+            ("zegar zdarzeń", "event clock", "czas wykonania jak ticki · CLI -60 min · preset +180.000 min · opóźnienie 250 ms", "execution time in tick clock · CLI -60 min · preset +180.000 min · latency 250 ms"),
+            ("zegar zdarzeń", "event clock", "czas pliku po CLI · offset lub opóźnienie różne między presetami", "file time after CLI adjustment · offset or latency differs between presets"),
+            ("zakres mierzony", "measured range", "22.06.2026 00:00 … 05.09.2026 21:59 (ostatni tick)", "22.06.2026 00:00 … 05.09.2026 21:59 (last tick)"),
+            ("zdarzenia eksportu", "export events", "22.06.2026 03:00 … 04.09.2026 17:45 · 123 zdarzeń", "22.06.2026 03:00 … 04.09.2026 17:45 · 123 events"),
+            ("zdarzenia eksportu", "export events", "brak zdarzeń w mierzonym zakresie", "no events in the measured range"),
+            ("rozgrzewka rynku/SR", "market/SR warmup", "0 h — zimny start", "0 h — cold start"),
+            ("rozgrzewka rynku/SR", "market/SR warmup", "72 h historii · skan 11.06.2026 00:00 … start · bez handlu", "72 h of history · scan 11.06.2026 00:00 … start · no trading"),
+            ("pełne dane ticków", "full tick history", "01.06.2026 00:00 … 05.09.2026 21:59", "01.06.2026 00:00 … 05.09.2026 21:59"),
+            ("kapitał startowy", "starting capital", "600 $", "600 $"),
+        ];
+        let producer = include_str!("../../backtest/src/bin/bt.rs");
+        for (pl_key, en_key, pl_value, en_value) in cases {
+            assert!(producer.contains(&format!("\"{pl_key}\"")), "review current producer key: {pl_key}");
+            assert_eq!(label(Language::En, pl_key), en_key);
+            assert_eq!(statistic_value(Language::En, pl_key, pl_value), en_value);
+            assert_eq!(label(Language::Pl, pl_key), pl_key);
+            assert_eq!(statistic_value(Language::Pl, pl_key, pl_value), pl_value);
+        }
+        assert_eq!(statistic_value(Language::En, "custom strategy", "72 h historii · skan custom"), "72 h historii · skan custom");
+        assert_eq!(statistic_value(Language::En, "T-100: rozgrzewka", "vendor custom status"), "vendor custom status");
+    }
     #[test]
     fn current_and_completed_result_envelopes_preserve_preset_names() {
         assert_eq!(

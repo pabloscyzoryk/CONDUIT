@@ -42,6 +42,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 from broker_history import HistoryFailure, HistoryJobs, scope as history_account_scope
+from closed_m1 import ClosedM1, ClosedM1Error
 
 PROTO_VERSION = 1
 SIDECAR_VERSION = "1.0.2"
@@ -291,6 +292,7 @@ class Sidecar(object):
         # Chart metadata only. A first cached quote does not certify a clock.
         self._quote_clocks = {}
         self._quote_clock_account = None
+        self._closed_m1 = ClosedM1()  # opt-in only; OFF performs no history RPC
         self.brak_tickow = 0               # puste odpytania z rzędu (detekcja padu terminala)
         self.ostatnia_odbudowa = 0.0       # kiedy ostatnio wołaliśmy init_terminal()
         self.ostatni_dozor_rodzica = 0.0   # kiedy ostatnio sprawdzalismy proces bota
@@ -457,17 +459,19 @@ class Sidecar(object):
             try:
                 self._ensure_account()
             except BrokerError:
-                return
+                return False
             obj["account"] = self.bound_account
         if self.sock is None:
-            return
+            return False
         line = json.dumps(obj, separators=(",", ":"), default=str) + "\n"
         try:
             self.sock.sendall(line.encode("utf-8"))
             self.last_send = time.time()
+            return True
         except OSError as e:
             log("zapis do Rusta nieudany: %s" % e)
             self.running = False
+            return False
 
     def reply_ok(self, rid, result):
         self.send({"id": rid, "ok": True, "result": result})
@@ -584,6 +588,30 @@ class Sidecar(object):
     def _reset_quote_clock(self):
         self._quote_clocks.clear()
         self._quote_clock_account = None
+        self._closed_m1.reset("session_reset")
+
+    def cmd_t100_bars(self, args):
+        enabled = args.get("enabled")
+        if type(enabled) is not bool:
+            raise BrokerError(ERR_BAD_ARGS, "t100_bars requires boolean enabled")
+        account = None
+        if enabled and not self._closed_m1.enabled:
+            # Failure must not leave a newly enabled feed behind a failed RPC.
+            account = account_key(mt5.account_info())
+        try:
+            changed = self._closed_m1.configure(enabled)
+        except ClosedM1Error:
+            raise BrokerError(ERR_BAD_ARGS, "t100_bars requires boolean enabled") from None
+        if changed and enabled:
+            self._closed_m1.scope = (self.symbol, account)
+            available = int(self.last_tick_key[0]) if self.last_tick_key else 0
+            self.send(self._closed_m1.packet(self.symbol, account, available, error="initializing"))
+        return {"enabled": enabled, "schema": 1}
+
+    def _poll_closed_m1(self, tick):
+        packet = self._closed_m1.poll(mt5, self.symbol, tick, account_key)
+        if packet is not None and self.send(packet) is True:
+            self._closed_m1.delivered(packet)
 
     def _observe_quote_clock(self, symbol, tick):
         """Pair an advancing quote with its observed UTC; never infer a zone.
@@ -614,6 +642,7 @@ class Sidecar(object):
         t = mt5.symbol_info_tick(self.symbol)
         if t is None:
             self._observe_quote_clock(self.symbol, None)
+            self._poll_closed_m1(None)
             # Terminal mógł zniknąć albo zostać zrestartowany pod sidecarem.
             # Uchwyt biblioteki może pozostać pozornie ważny bez nowych ticków,
             # dlatego wykonujemy niezależną kontrolę połączenia.
@@ -621,6 +650,9 @@ class Sidecar(object):
             return
         self.brak_tickow = 0
         self._observe_quote_clock(self.symbol, t)
+        # Deliver completed bars before the corresponding tick callback. Even
+        # an unchanged quote can recover a failed/lagging history query.
+        self._poll_closed_m1(t)
         key = (t.time_msc, t.bid, t.ask)
         if key == self.last_tick_key:
             return

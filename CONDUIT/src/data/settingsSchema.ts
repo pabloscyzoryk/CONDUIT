@@ -212,6 +212,11 @@ const gapTrap = (s: Settings) =>
     : null;
 
 export const SETTINGS_SCHEMA: GroupDef[] = [
+  { id: "t100", title: "T-100 · eksperymentalny", desc: "Autonomiczna polityka wybranego presetu. Włącznik działa niezależnie od trybu aplikacji.",
+    icon: "robot", category: "management", zakres: "preset", fields: [
+      { key: "t100", label: "T-100 — autonomiczne wejścia, wyjścia i kontekst Synergy", type: "text", wide: true,
+        hint: "Eksperymentalna konfiguracja: reguły wejścia, ryzyko, SL/TP, zmienność, kontekst Synergy i sesja UTC." },
+    ] },
   /* ================= WEJSCIA ================= */
   {
     id: "entry",

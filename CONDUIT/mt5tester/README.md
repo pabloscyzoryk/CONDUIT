@@ -4,6 +4,11 @@
 The bridge uses the Rust parser. Matching inputs do not by themselves establish
 matching execution. Compare native deal timestamps, prices, volumes and costs.
 
+XT does not implement the autonomous T-100 policy. The contract rejects an
+enabled T-100 configuration; its disabled nested defaults preserve legacy
+comparisons. Shared Rust Engine/Sim tests and MT5 adapter tests are separate
+evidence and must not be presented as a native XT backtest of T-100.
+
 Use a private, separate portable terminal. The tools require its explicit
 offline marker, disabled chart experts and a dead local proxy. They never
 configure the installed terminal. Both supplied experts refuse live charts.

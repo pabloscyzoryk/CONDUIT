@@ -273,7 +273,8 @@ pub const POLA_RACHUNKU: &[&str] = &[
 
 // day_trail_basis is strategy-owned, like the existing day trail percentages.
 // Profit budget arm/keep/deploy are per-strategy risk axes, like day trail.
-pub const LICZBA_POL_USTAWIEN: usize = 520;
+// Nested t100 is strategy configuration owned by its preset, not account overlay.
+pub const LICZBA_POL_USTAWIEN: usize = 521;
 
 /// Składa ustawienia dla JEDNEGO formatu.
 ///
@@ -353,6 +354,14 @@ pub fn ustawienia_formatu_z_diagnoza(
 #[cfg(test)]
 mod testy {
     use super::*;
+
+    #[test]
+    fn t100_is_preset_strategy_not_account_overlay() {
+        let mut preset=crate::Settings::default();preset.t100.enabled=true;preset.t100.risk_pct=2.5;
+        let mut account=crate::Settings::default();account.t100.risk_pct=0.5;
+        assert!(!POLA_RACHUNKU.contains(&"t100"));
+        assert_eq!(ustawienia_formatu(&preset,&account).t100,preset.t100);
+    }
 
     #[test]
     fn slot_zero_zachowuje_sie_jak_przed_zmiana() {

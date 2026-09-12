@@ -89,6 +89,39 @@ pub const UI_ONLY_KEYS: &[&str] = &[
     "sim_clock_strict",
 ];
 
+/// Validate the complete nested policy, including types and spelling. A typo
+/// must not silently select the old policy or change a sibling parameter.
+fn decode_t100(value: &Value) -> Result<conduit_core::t100::Config, String> {
+    let object = value.as_object().ok_or("T-100 settings: expected an object")?;
+    let defaults = serde_json::to_value(conduit_core::t100::Config::default()).unwrap();
+    for key in object.keys() {
+        if defaults.get(key).is_none() {
+            return Err(format!("T-100 settings: unknown field {key}"));
+        }
+    }
+    let config: conduit_core::t100::Config = serde_json::from_value(value.clone())
+        .map_err(|_| "T-100 settings: invalid field types".to_string())?;
+    if !config.valid() {
+        return Err("T-100 settings: values outside the allowed range".into());
+    }
+    Ok(config)
+}
+
+pub fn validate_t100_document(doc: &Value) -> Result<(), String> {
+    if let Some(value) = doc.get("t100") { decode_t100(value)?; }
+    Ok(())
+}
+
+/// Validate a patch before ANY settings or preset mutation.
+pub fn validate_t100_patch(doc: &Value, patch: &Value) -> Result<(), String> {
+    if patch.get("t100").is_some() {
+        let mut merged = doc.clone();
+        merge_patch(&mut merged, patch);
+        validate_t100_document(&merged)?;
+    }
+    Ok(())
+}
+
 /// Buduje konfigurację silnika z dokumentu panelu.
 ///
 /// Wartości nierozpoznane zostawiają wartość domyślną rdzenia — nigdy nie
@@ -120,6 +153,14 @@ pub fn core_from_ui(doc: &Value) -> Settings {
     // konfiguracji, a nie świadomy wybór użytkownika.
     if PRZETLUMACZONE.iter().any(|k| doc.get(*k).is_some()) {
         return core_from_ui(&preset_to_ui(doc));
+    }
+
+    if let Some(value) = doc.get("t100") {
+        c.t100 = decode_t100(value).unwrap_or_else(|_| conduit_core::t100::Config {
+            // An already corrupt document must remain in T-100 REVIEW, never
+            // fall back to legacy trading. The source document is untouched.
+            enabled: true, experts: 0, ..Default::default()
+        });
     }
 
     // ---------- wielkość pozycji ----------
@@ -2268,6 +2309,7 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         return unmapped_keys(&preset_to_ui(doc));
     }
     const MAPPED: &[&str] = &[
+        "t100",
         "lot_scale_step",
         "entry_offset_dir",
         "custom_entry",
@@ -3373,6 +3415,16 @@ pub fn merge_patch(doc: &mut Value, patch: &Value) {
         return;
     };
     for (k, v) in p {
+        // Only the new nested policy supports partial child patches. Keep the
+        // established shallow semantics for every pre-existing setting.
+        if k == "t100" && v.is_object() {
+            if let Some(current) = d.get_mut(k).and_then(Value::as_object_mut) {
+                for (child, value) in v.as_object().unwrap() {
+                    current.insert(child.clone(), value.clone());
+                }
+                continue;
+            }
+        }
         d.insert(k.clone(), v.clone());
     }
 }
@@ -3380,6 +3432,68 @@ pub fn merge_patch(doc: &mut Value, patch: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t100_nested_roundtrip_preserves_every_field_and_old_defaults() {
+        let default = conduit_core::t100::Config::default();
+        assert!(!core_from_ui(&serde_json::json!({})).t100.enabled);
+        let mut configured = serde_json::to_value(&default).unwrap();
+        for (key, value) in configured.as_object_mut().unwrap() {
+            if key == "enabled" || key == "signal_required" { *value = Value::Bool(true); }
+        }
+        configured["experts"] = serde_json::json!(9);
+        configured["risk_pct"] = serde_json::json!(2.0);
+        configured["portfolio_risk_pct"] = serde_json::json!(7.0);
+        configured["score_threshold"] = serde_json::json!(1.1);
+        configured["session_start_utc"] = serde_json::json!(0);
+        configured["session_end_utc"] = serde_json::json!(24);
+        let mut original = Settings::default();
+        original.t100 = serde_json::from_value(configured).unwrap();
+        let raw = serde_json::to_value(&original).unwrap();
+        let ui = preset_to_ui(&raw);
+        assert_eq!(ui["t100"], raw["t100"]);
+        assert!(!unmapped_keys(&ui).contains(&"t100".to_string()));
+        assert_eq!(core_from_ui(&ui).t100, original.t100);
+        let mut edited = ui.clone();
+        merge_patch(&mut edited, &serde_json::json!({"t100":{"risk_pct":3.0}}));
+        assert_eq!(edited["t100"]["experts"], 9);
+        assert_eq!(edited["t100"]["signal_required"], true);
+        assert_eq!(edited["t100"]["risk_pct"], 3.0);
+        assert_eq!(ui["t100"]["risk_pct"], 2.0);
+    }
+
+    #[test]
+    fn t100_invalid_nested_values_never_fall_back_to_legacy_trading() {
+        for invalid in [serde_json::json!(null), serde_json::json!(true), serde_json::json!([]),
+            serde_json::json!({"enabled":"true"}), serde_json::json!({"risk_pct":true}),
+            serde_json::json!({"max_positions":1.5}), serde_json::json!({"risk_pct":21}),
+            serde_json::json!({"risk_pct":2,"portfolio_risk_pct":1}),
+            serde_json::json!({"session_start_utc":21,"session_end_utc":5}),
+            serde_json::json!({"experts":0}), serde_json::json!({"enable":true})] {
+            let doc = serde_json::json!({"t100":invalid});
+            assert!(validate_t100_document(&doc).is_err(), "accepted {doc}");
+            let mapped = core_from_ui(&doc);
+            assert!(mapped.t100.enabled, "invalid policy fell through to legacy: {doc}");
+            assert!(!mapped.t100.valid(), "invalid policy became usable: {doc}");
+        }
+    }
+
+    #[test]
+    fn t100_patch_validation_is_atomic_and_preserves_zero_semantics() {
+        let doc = serde_json::json!({"t100":{"enabled":true,"risk_pct":2.0,"portfolio_risk_pct":3.0},"lot_max":10});
+        let before = doc.clone();
+        assert!(validate_t100_patch(&doc, &serde_json::json!({"t100":{"risk_pct":4.0}})).is_err());
+        assert!(validate_t100_patch(&doc, &serde_json::json!({"t100":null})).is_err());
+        assert_eq!(doc, before);
+        let patch = serde_json::json!({"t100":{"daily_profit_lock_pct":0.0,"break_even_r":0.0,"cooldown_bars":0,"signal_weight":0.0}});
+        assert!(validate_t100_patch(&doc, &patch).is_ok());
+        let mut changed = doc.clone(); merge_patch(&mut changed, &patch);
+        let mapped = core_from_ui(&changed);
+        assert_eq!(mapped.t100.risk_pct, 2.0);
+        assert_eq!(mapped.t100.daily_profit_lock_pct, 0.0);
+        assert_eq!(mapped.t100.signal_weight, 0.0);
+        assert_eq!(changed["lot_max"], 10);
+    }
 
     #[test]
     fn explicit_pending_validity_is_a_real_ui_control_and_roundtrips() {
