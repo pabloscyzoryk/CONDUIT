@@ -61,7 +61,7 @@ fn legacy()->ClosedTrade{ClosedTrade{ticket:1,side:Side::Buy,volume:0.07,open_pr
     let ids:std::collections::HashSet<_>=b.history.iter().map(|t|t.cost_receipt.as_ref().unwrap().key.deal_id).collect();assert_eq!(ids.len(),3);
 }
 #[test]fn pending_fill_entry_commission_is_in_closed_receipt(){
-    let mut b=sim();b.place_pending(PendingReq{kind:PendingKind::BuyLimit,price:3999.0,volume:0.07,sl:None,tp:None,basket:None,level:0,is_toucher:false,is_topup:false,comment:"p".into()}).unwrap();
+    let mut b=sim();b.place_pending(PendingReq{kind:PendingKind::BuyLimit,price:3999.0,volume:0.07,sl:None,tp:None,basket:None,level:0,is_toucher:false,is_topup:false,no_market_fallback:false,comment:"p".into()}).unwrap();
     b.on_quote(q(T+1,3998.8));assert_eq!(b.positions().len(),1);let t=b.positions()[0].ticket;
     b.mark(q(T+2,4001.0));b.close_position(t,CloseReason::Manual).unwrap();near(b.history[0].commission,-0.49);near(b.history[0].profit,b.balance-1000.0);
 }

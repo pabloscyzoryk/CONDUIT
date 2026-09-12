@@ -195,7 +195,7 @@ mod tests {
             basket:Some(basket),level:0,is_toucher:false,comment:"synthetic existing exposure".into()};
         let pending=PendingReq{kind:PendingKind::BuyLimit,volume:0.01,price:3990.0,
             sl:Some(3980.0),tp:Some(4010.0),basket:Some(basket),level:1,
-            is_toucher:false,is_topup:false,comment:"synthetic existing pending".into()};
+            is_toucher:false,is_topup:false,no_market_fallback:false,comment:"synthetic existing pending".into()};
         let ticket=b.inner.open_market(market.clone()).unwrap();
         let order=b.inner.place_pending(pending.clone()).unwrap();
         let calls=b.calls;

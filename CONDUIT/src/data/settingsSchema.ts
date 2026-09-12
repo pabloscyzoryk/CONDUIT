@@ -155,6 +155,17 @@ export const ZNACZENIE_ZERA: Partial<Record<SettingKey, ZnaczenieZera>> = {
   konto_dzwignia: "automat",
   kredyt_reczny: "automat",
   lot_scale_step: "automat",
+  lot_growth_basket_risk_pct: "wylaczone",
+  lot_growth_equity_stress_strength: "wylaczone",
+  lot_growth_portfolio_load_strength: "wylaczone",
+  lot_growth_direction_load_strength: "wylaczone",
+  lot_growth_basket_count_strength: "wylaczone",
+  lot_growth_spread_stress_strength: "wylaczone",
+  lot_growth_tp1_deficit_strength: "wylaczone",
+  lot_growth_stop_width_strength: "wylaczone",
+  lot_growth_age_decay_strength: "wylaczone",
+  lot_growth_rearm_decay_strength: "wylaczone",
+  lot_growth_day_dd_strength: "wylaczone",
   entry_units_limit: "automat",
   market_entry_units: "automat",
   market_hybrid_now_units: "automat",
@@ -211,12 +222,100 @@ const gapTrap = (s: Settings) =>
     ? "Luka ≥ próg aktywacji: SL wyląduje na BE i oddasz CAŁY zysk (realny przypadek: próg 10, luka 12 → +$11 poszło na zero)."
     : null;
 
+/** Display validation only. Loading and rendering never repair imported values. */
+export function lotGrowthIssue(s: Settings): "mode" | "allocation" | "base" | "curve" | "strength" | "engine" | null {
+  if (!["Off", "Power", "ThresholdLinear", "GeometricSteps"].includes(s.lot_growth_mode)) return "mode";
+  if (!["Uniform", "EqualSLRisk", "Depth", "EqualSLRiskDepth", "ExposureAwareRisk"].includes(s.lot_growth_allocation)) return "allocation";
+  if (s.lot_growth_mode === "Off") return null;
+  const positive = (n: number) => Number.isFinite(n) && n > 0;
+  if (!Number.isFinite(s.lot_growth_reference_lot) || s.lot_growth_reference_lot < 0.01
+    || !positive(s.lot_growth_reference_balance) || !Number.isFinite(s.lot_growth_basket_risk_pct)
+    || s.lot_growth_basket_risk_pct < 0 || s.lot_growth_basket_risk_pct > 100) return "base";
+  if ((s.lot_growth_mode === "Power" && (!positive(s.lot_growth_power) || s.lot_growth_power > 1))
+    || (s.lot_growth_mode === "ThresholdLinear" && (!Number.isFinite(s.lot_growth_rate_pct) || s.lot_growth_rate_pct < 0))
+    || (s.lot_growth_mode === "GeometricSteps" && (!Number.isFinite(s.lot_growth_capital_multiple)
+      || s.lot_growth_capital_multiple <= 1 || !Number.isFinite(s.lot_growth_lot_multiple) || s.lot_growth_lot_multiple < 1))) return "curve";
+  const strengths = [s.lot_growth_equity_stress_strength, s.lot_growth_portfolio_load_strength,
+    s.lot_growth_direction_load_strength, s.lot_growth_basket_count_strength, s.lot_growth_spread_stress_strength,
+    s.lot_growth_tp1_deficit_strength, s.lot_growth_stop_width_strength, s.lot_growth_age_decay_strength,
+    s.lot_growth_rearm_decay_strength, s.lot_growth_day_dd_strength];
+  if (strengths.some(n => !Number.isFinite(n) || n < 0 || n > 2)) return "strength";
+  if (s.t100.enabled) return "engine";
+  return null;
+}
+
+const lotGrowthWarnings = {
+  mode: "Nieznany tryb krzywej lota. Wybierz obsługiwaną wartość; import nie jest automatycznie naprawiany.",
+  allocation: "Nieznany przydział lota. Wybierz obsługiwaną wartość; import nie jest automatycznie naprawiany.",
+  base: "Wymagane: lot bazowy ≥ 0.01, kapitał odniesienia > 0 i budżet koszyka od 0 do 100%. Wartości muszą być skończone.",
+  curve: "Nieprawidłowe parametry aktywnej krzywej: potęga (0, 1], tempo ≥ 0 albo mnożnik kapitału > 1 i lota ≥ 1.",
+  strength: "Każda siła tłumienia musi być skończoną liczbą od 0 do 2. Nieprawidłowa konfiguracja blokuje nowe wejścia.",
+  engine: "Krzywe lota GOD-X7 nie są obsługiwane przez T-100. Ta kombinacja blokuje nowe wejścia.",
+};
+const lotGrowthOn = (s: Settings) => s.lot_growth_mode !== "Off";
+
 export const SETTINGS_SCHEMA: GroupDef[] = [
   { id: "t100", title: "T-100 · eksperymentalny", desc: "Autonomiczna polityka wybranego presetu. Włącznik działa niezależnie od trybu aplikacji.",
     icon: "robot", category: "management", zakres: "preset", fields: [
       { key: "t100", label: "T-100 — autonomiczne wejścia, wyjścia i kontekst Synergy", type: "text", wide: true,
         hint: "Eksperymentalna konfiguracja: reguły wejścia, ryzyko, SL/TP, zmienność, kontekst Synergy i sesja UTC." },
     ] },
+  {
+    id: "lotgrowth", title: "Krzywa lota i przydział pozycji", icon: "chart", category: "management", zakres: "preset",
+    desc: "Opcjonalne wyliczanie lota każdej pozycji wejściowej. Przydział i tłumienie skalują nadwyżkę ponad legalne minimum pozycji m: m + (wolumen−m) × mnożnik. Nie podnoszą wolumenu mniejszego od m. Reguły sygnałów, SL/TP i liczba jednostek pozostają bez zmian; dotychczasowe limity nadal działają. Nie gwarantuje zysku ani ograniczenia DD.",
+    fields: [
+      { key: "lot_growth_mode", label: "KRZYWA LOTA", type: "select", wide: true,
+        hint: "Off zachowuje dotychczasowe ustawienia lota GOD-X7. Włączona krzywa zastępuje nominalny lot stały/procentowy i stare lot-scaling, bez kasowania ich konfiguracji. Kapitał C pochodzi z wybranej podstawy lota. Wolumen końcowy jest zaokrąglany w dół do kroku brokera; poniżej minimum (często 0.01 lota) nowe zlecenie może zostać odrzucone.",
+        options: [{ value: "Off", label: "Wyłączona — dotychczasowy lot" }, { value: "Power", label: "Potęgowa" },
+          { value: "ThresholdLinear", label: "Liniowa ponad próg" }, { value: "GeometricSteps", label: "Schodki geometryczne" }],
+        warn: s => { const issue = lotGrowthIssue(s); return issue ? lotGrowthWarnings[issue] : null; } },
+      { key: "lot_growth_reference_lot", label: "Lot bazowy L0 — każda pozycja", type: "num", min: 0.01, step: 0.01, unit: "lot", when: lotGrowthOn,
+        hint: "Nominalny lot przed przydziałem i pozostałymi mnożnikami. Przy C ≤ C0 krzywa pozostaje na L0; nie jest to dolna gwarancja końcowego wolumenu." },
+      { key: "lot_growth_reference_balance", label: "Kapitał odniesienia C0", type: "num", min: 0, step: 100, unit: "$", when: lotGrowthOn,
+        hint: "Dodatnia kotwica krzywej, niezależna od depozytu początkowego. C to bieżąca podstawa lota według ustawień rachunku." },
+      { key: "lot_growth_power", label: "Potęga wzrostu p", type: "num", min: 0, max: 1, step: 0.05, when: s => s.lot_growth_mode === "Power",
+        hint: "L0 × max(1, C/C0)^p. Wymagane 0 < p ≤ 1. Potęga poniżej 1 spowalnia wzrost lota względem kapitału." },
+      { key: "lot_growth_rate_pct", label: "Tempo ponad próg", type: "num", min: 0, step: 0.05, when: s => s.lot_growth_mode === "ThresholdLinear",
+        hint: "L0 + max(0, C−C0) × tempo/10000. Np. tempo 0.35 dodaje 0.035 lota na każde $1000 nad C0. To współczynnik lota, nie procent ryzyka do SL. 0 = brak przyrostu ponad L0." },
+      { key: "lot_growth_capital_multiple", label: "Mnożnik kapitału na schodek", type: "num", min: 1, step: 0.25, when: s => s.lot_growth_mode === "GeometricSteps",
+        hint: "Wymagane > 1. Liczba schodków = floor(log(max(1, C/C0)) / log(mnożnika kapitału))." },
+      { key: "lot_growth_lot_multiple", label: "Mnożnik lota na schodek", type: "num", min: 1, step: 0.1, when: s => s.lot_growth_mode === "GeometricSteps",
+        hint: "Lot = L0 × mnożnik lota^liczba schodków. 1 utrzymuje L0. Przekroczenie progu zmienia lot skokowo." },
+      { key: "lot_growth_allocation", label: "PRZYDZIAŁ LOTA KAŻDEJ POZYCJI", type: "select", wide: true, when: lotGrowthOn,
+        hint: "Mnożnik [0.5, 1.5] skaluje nadwyżkę lota każdej pozycji ponad minimum m, nie dzieli jednego lota między warstwy. m uwzględnia minimum strategii i brokera oraz krok wolumenu. Minimalnej pozycji nie da się dalej zmniejszyć bez pominięcia wejścia. Odległości liczone są do efektywnego SL, odniesienie to środek zaakceptowanej strefy. Głębiej = niżej dla BUY, wyżej dla SELL. Brak odpowiedniej geometrii daje jawny przydział równy; nieprawidłowe dane blokują wejście.",
+        options: [{ value: "Uniform", label: "Równy — mnożnik 1" }, { value: "EqualSLRisk", label: "Według odległości do SL" },
+          { value: "Depth", label: "Według głębokości w strefie" }, { value: "EqualSLRiskDepth", label: "Odległość do SL i głębokość" },
+          { value: "ExposureAwareRisk", label: "Odległość do SL i obciążenie koszyka" }] },
+      { key: "lot_growth_basket_risk_pct", label: "Dodatkowy budżet ryzyka koszyka (0 = wyłączony)", type: "num", min: 0, max: 100, step: 0.5, unit: "%", when: lotGrowthOn,
+        hint: "Przed nowym zleceniem ogranicza łączne ryzyko koszyka do tego % equity: pozycje od bieżącej ceny do SL, pendingi od wejścia do SL. Może zmniejszyć lub odrzucić nowy wolumen, także jeśli nie wystarcza budżetu na minimum. Nie zamyka istniejących pozycji i nie jest ciągłym limitem DD. 0 wyłącza tylko ten dodatkowy budżet." },
+    ],
+  },
+  {
+    id: "lotcontext", title: "Tłumienie lota według bieżącego stanu", icon: "sliders", category: "management", zakres: "preset",
+    desc: "Działa tylko przy włączonej krzywej lota. Każda siła 0–2: 0 wyłącza oś, większa wartość mocniej zmniejsza nadwyżkę lota ponad legalne minimum pozycji. Oś daje max(0.25, 1/(1 + siła × obciążenie)); stosowany jest najmniejszy mnożnik nadwyżki, nie iloczyn. Minimum pozostaje, chyba że końcowy budżet lub normalizacja odrzuci wejście. Brak wymaganego pomiaru blokuje nowe wejście. Nie gwarantuje DD.",
+    fields: [
+      { key: "lot_growth_equity_stress_strength", label: "Strata otwarta: equity wobec salda", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = max(0, 1−equity/saldo) / 0.10. Przy equity 10% poniżej salda i sile 1 mnożnik wynosi 0.5. Otwarty zysk nie zwiększa lota." },
+      { key: "lot_growth_portfolio_load_strength", label: "Ryzyko do SL całego portfela", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = bieżące ryzyko portfela do SL / (equity × 0.20). Przy ryzyku 20% equity i sile 1 mnożnik wynosi 0.5. To zmiana lota, nie nowy limit ryzyka." },
+      { key: "lot_growth_direction_load_strength", label: "Ryzyko do SL w tym samym kierunku", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = ryzyko do SL pozycji i zleceń w kierunku nowego wejścia / (equity × 0.10). Przy 10% equity i sile 1 mnożnik wynosi 0.5." },
+      { key: "lot_growth_basket_count_strength", label: "Liczba aktywnych koszyków", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = max(0, liczba aktywnych koszyków−1) / 3. Cztery koszyki i siła 1 dają mnożnik 0.5. Nie zmienia limitu liczby koszyków." },
+      { key: "lot_growth_spread_stress_strength", label: "Spread wobec odległości do SL", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = spread / (odległość wejście–SL × 0.05). Spread równy 5% odległości do SL i siła 1 dają mnożnik 0.5. Nie jest to dodatkowy filtr sygnałów." },
+      { key: "lot_growth_tp1_deficit_strength", label: "Niedobór relacji TP1 do SL", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = max(0, 1−podpisana odległość wejście–TP1 / odległość wejście–SL). TP1 z zaakceptowanego sygnału, bez przyszłych trafień. Relacja co najmniej 1 nie tłumi lota." },
+      { key: "lot_growth_stop_width_strength", label: "Odległość SL wobec szerokości strefy", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = max(0, odległość wejście–SL / szerokość zaakceptowanej strefy−1). Odległość równa dwóm szerokościom strefy i siła 1 dają mnożnik 0.5. Zerowa lub nieznana szerokość nie jest zerowym ryzykiem." },
+      { key: "lot_growth_age_decay_strength", label: "Wiek koszyka", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = czas od utworzenia koszyka / 24 h. Po dobie i przy sile 1 mnożnik wynosi 0.5. Nie wygasza sygnału i nie zmienia ważności zleceń." },
+      { key: "lot_growth_rearm_decay_strength", label: "Liczba zakończonych uzbrojeń", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = liczba już zakończonych partii rearm / 2. Dwie partie i siła 1 dają mnożnik 0.5. Nie zmienia zgody na rearm ani jego limitu." },
+      { key: "lot_growth_day_dd_strength", label: "Spadek equity od początku dnia", type: "num", min: 0, max: 2, step: 0.25, when: lotGrowthOn,
+        hint: "Obciążenie = max(0, 1−equity/equity początku dnia) / 0.10. Spadek o 10% i siła 1 dają mnożnik 0.5. To baza dnia, nie późniejszy szczyt; nie zamyka pozycji ani nie wprowadza całodziennej blokady." },
+    ],
+  },
   /* ================= WEJSCIA ================= */
   {
     id: "entry",

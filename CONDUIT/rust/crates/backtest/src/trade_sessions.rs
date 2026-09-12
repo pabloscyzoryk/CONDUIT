@@ -124,7 +124,7 @@ mod tests {
         let sell=b.open_market(request(Side::Sell,Some(4078.0),None)).unwrap();
         let buy=b.open_market(request(Side::Buy,None,Some(4078.0))).unwrap();
         let pending=|kind,price| PendingReq{kind,price,volume:0.01,sl:None,tp:None,basket:None,level:0,
-            is_toucher:false,is_topup:false,comment:"native-session".into()};
+            is_toucher:false,is_topup:false,no_market_fallback:false,comment:"native-session".into()};
         b.place_pending(pending(PendingKind::BuyStop,4078.0)).unwrap();
         b.place_pending(pending(PendingKind::SellLimit,4078.0)).unwrap();
         let idle=b.place_pending(pending(PendingKind::BuyLimit,4000.0)).unwrap();

@@ -610,6 +610,7 @@ impl AiRuntime {
                     // liczy się do LICZBY sztuk na szczeblu, nie tylko do
                     // wolumenu.
                     is_topup: false,
+                    no_market_fallback: false,
                 };
                 if let Ok(t) = b.place_pending(req) {
                     self.acts.pendings_added += 1;
@@ -733,6 +734,7 @@ impl AiRuntime {
                 // liczy się do LICZBY sztuk na szczeblu, nie tylko do
                 // wolumenu.
                 is_topup: false,
+                no_market_fallback: false,
             };
             match b.place_pending(req) {
                 Ok(t) => {

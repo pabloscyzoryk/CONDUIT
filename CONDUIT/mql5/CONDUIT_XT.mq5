@@ -30,6 +30,29 @@ input double  In_LotMaxZSalda      = 0.0;      // lot_max_z_salda (podstawa/X = 
 input bool    In_OdliczKredyt      = false;    // odlicz_kredyt
 input double  In_KredytReczny      = 0.0;      // kredyt_reczny (emulacja CREDIT w testerze)
 
+// --- opt-in entry lot growth; Off preserves the legacy path ---
+input int     In_LotGrowthMode = 0; // 0=Off 1=Power 2=ThresholdLinear 3=GeometricSteps
+input double  In_LotGrowthReferenceLot = 0.01;
+input double  In_LotGrowthReferenceBalance = 1000.0;
+input double  In_LotGrowthPower = 0.7;
+input double  In_LotGrowthRatePct = 0.35;
+input double  In_LotGrowthCapitalMultiple = 2.0;
+input double  In_LotGrowthLotMultiple = 1.5;
+input double  In_LotGrowthBasketRiskPct = 0.0;
+
+input int     In_LotGrowthAllocation = 0; // 0=Uniform 1=EqualSLRisk 2=Depth 3=EqualSLRiskDepth 4=ExposureAwareRisk
+
+input double In_LotGrowthEquityStressStrength = 0.0;
+input double In_LotGrowthPortfolioLoadStrength = 0.0;
+input double In_LotGrowthDirectionLoadStrength = 0.0;
+input double In_LotGrowthBasketCountStrength = 0.0;
+input double In_LotGrowthSpreadStressStrength = 0.0;
+input double In_LotGrowthTp1DeficitStrength = 0.0;
+input double In_LotGrowthStopWidthStrength = 0.0;
+input double In_LotGrowthAgeDecayStrength = 0.0;
+input double In_LotGrowthRearmDecayStrength = 0.0;
+input double In_LotGrowthDayDdStrength = 0.0;
+
 // --- strefa ---
 input int     In_ZoneOffsetMode    = 0;        // 0=None 1=Price 2=Directional
 input double  In_EntryHiOffset     = 0.0;
@@ -914,6 +937,15 @@ bool LimitPxIsValid(int side, double p)
   { return side == 0 ? (p <= g_ask - g_stops) : (p >= g_bid + g_stops); }
 bool StopPxIsValid(int side, double p)
   { return side == 0 ? (p >= g_ask + g_stops) : (p <= g_bid - g_stops); }
+// Exact post-normalization pending-price contract shared with Broker/SimBroker.
+bool PendingPxIsValid(int typ, double price)
+  {
+   if(typ==ORDER_TYPE_BUY_LIMIT) return LimitPxIsValid(0,price);
+   if(typ==ORDER_TYPE_SELL_LIMIT) return LimitPxIsValid(1,price);
+   if(typ==ORDER_TYPE_BUY_STOP) return StopPxIsValid(0,price);
+   if(typ==ORDER_TYPE_SELL_STOP) return StopPxIsValid(1,price);
+   return false;
+  }
 double ClampLimitPx(int side, double p)
   { return side == 0 ? MathMin(p, g_ask - g_stops) : MathMax(p, g_bid + g_stops); }
 
@@ -1526,6 +1558,12 @@ double SufitLota()
 // clamp KAŻDEGO zlecenia (wagi R:R mnożą lot bazowy per szczebel) — engine.rs:1481
 double WolumenZlecenia(double v)
   {
+   if(GrowthEnabled())
+     {
+      if(!MathIsValidNumber(v) || !PbPositive(In_LotMin) || !MathIsValidNumber(In_LotMax) || In_LotMax<0.0
+         || !MathIsValidNumber(In_LotMaxZSalda) || In_LotMaxZSalda<0.0) return 0.0;
+      return MathMin(MathMax(v,0.0),SufitLota());
+     }
    double dol = (In_LotMin > 0.0) ? In_LotMin : 0.01;
    double gora = SufitLota();
    if(dol > gora) { double t = dol; dol = gora; gora = t; }
@@ -1535,6 +1573,13 @@ double WolumenZlecenia(double v)
 double LotSize()
   {
    double podst = PodstawaLota();
+   if(GrowthEnabled())
+     {
+      double raw=GrowthNominal(podst);
+      if(raw<=0.0) return 0.0;
+      if(g_rezim_miekki && In_RegimeSoftLotMult != 1.0) raw*=In_RegimeSoftLotMult;
+      return WolumenZlecenia(MathMax(raw,In_LotMin));
+     }
    double pct = KapF(In_LotPercent, In_LotPercentSmall, In_LotPercentSmallM);
    double lot = In_LotModePercent ? (podst * pct / 100.0 / 100.0) : In_LotFixed;
    if(In_LotScaleStep > 0.0)
@@ -2322,6 +2367,389 @@ bool ProfitBudgetLimit(int bi, int side, double entry, double sl, double request
    return false;
   }
 
+// Opt-in sizing. Off does not read new exposure state or change legacy rounding.
+bool GrowthEnabled() { return In_LotGrowthMode != 0; }
+bool GrowthValidate()
+  {
+   if(!GrowthEnabled()) return true;
+   double strengths[];GrowthStrengths(strengths);
+   for(int i=0;i<10;i++)if(!MathIsValidNumber(strengths[i])||strengths[i]<0.0||strengths[i]>2.0)return false;
+   if(In_LotGrowthMode < 1 || In_LotGrowthMode > 3 || In_LotGrowthAllocation < 0 || In_LotGrowthAllocation > 4
+      || !MathIsValidNumber(In_LotGrowthReferenceLot) || In_LotGrowthReferenceLot < 0.01
+      || !PbPositive(In_LotGrowthReferenceBalance) || !MathIsValidNumber(In_LotGrowthBasketRiskPct)
+      || In_LotGrowthBasketRiskPct < 0.0 || In_LotGrowthBasketRiskPct > 100.0) return false;
+   if(In_LotGrowthMode == 1) return PbPositive(In_LotGrowthPower) && In_LotGrowthPower <= 1.0;
+   if(In_LotGrowthMode == 2) return MathIsValidNumber(In_LotGrowthRatePct) && In_LotGrowthRatePct >= 0.0;
+   return MathIsValidNumber(In_LotGrowthCapitalMultiple) && In_LotGrowthCapitalMultiple > 1.0
+      && MathIsValidNumber(In_LotGrowthLotMultiple) && In_LotGrowthLotMultiple >= 1.0;
+  }
+double GrowthNominalFor(int mode,double capital,double ref_lot,double ref_balance,
+                        double power,double rate,double capital_multiple,double lot_multiple)
+  {
+   if(!PbPositive(capital)) return 0.0;
+   double ratio = MathMax(1.0,capital/ref_balance), lot = 0.0;
+   if(mode == 1) lot = ref_lot*MathPow(ratio,power);
+   else if(mode == 2) lot = ref_lot+MathMax(0.0,capital-ref_balance)*rate/10000.0;
+   else if(mode == 3)
+     {
+      double exponent=MathLog(ratio)/MathLog(capital_multiple),nearest=MathRound(exponent);
+      double tolerance=8.0*2.2204460492503131e-16*MathMax(MathAbs(exponent),1.0);
+      double steps=MathAbs(exponent-nearest)<=tolerance ? nearest : MathFloor(exponent);
+      lot=ref_lot*MathPow(lot_multiple,steps);
+     }
+   return PbPositive(lot) ? lot : 0.0;
+  }
+double GrowthNominal(double capital)
+  {
+   if(!GrowthValidate()) return 0.0;
+   return GrowthNominalFor(In_LotGrowthMode,capital,In_LotGrowthReferenceLot,In_LotGrowthReferenceBalance,
+       In_LotGrowthPower,In_LotGrowthRatePct,In_LotGrowthCapitalMultiple,In_LotGrowthLotMultiple);
+  }
+bool GrowthReject(int bi,string error)
+  {
+   g_rej_budget++;
+   if(In_Diag && g_handle_diag != INVALID_HANDLE)
+      FileWrite(g_handle_diag,"LOT_GROWTH_HOLD",(string)g_now,bi>=0 && bi<g_nb ? (string)g_b[bi].id : "0",error);
+   return false;
+  }
+// One unresolved send blocks further exposure account-wide. A missing row is
+// not a rejection receipt. Exact known ticket/owner adoption can clear it.
+bool g_growth_unknown = false;
+ulong g_growth_unknown_ticket = 0;
+int g_growth_unknown_basket = -1;
+int g_growth_unknown_side = -1;
+string g_growth_unknown_comment = "";
+bool GrowthReady(int bi)
+  {
+   if(!GrowthEnabled()) return true;
+   if(!GrowthValidate()) return GrowthReject(bi,"InvalidSettings");
+   if(g_growth_unknown && g_growth_unknown_ticket > 0)
+     {
+      ulong t = g_growth_unknown_ticket;
+      if(PositionSelectByTicket(t) && PositionGetString(POSITION_SYMBOL)==_Symbol
+         && PositionGetInteger(POSITION_MAGIC)==In_Magic
+         && PositionGetString(POSITION_COMMENT)==g_growth_unknown_comment
+         && (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 0 : 1)==g_growth_unknown_side
+         && ExitOwner(t,(ulong)PositionGetInteger(POSITION_IDENTIFIER),PositionGetString(POSITION_COMMENT))==g_growth_unknown_basket)
+            g_growth_unknown=false;
+      else if(OrderSelect(t) && OrderGetString(ORDER_SYMBOL)==_Symbol && OrderGetInteger(ORDER_MAGIC)==In_Magic
+         && OrderGetString(ORDER_COMMENT)==g_growth_unknown_comment
+         && ExitOwner(t,0,OrderGetString(ORDER_COMMENT))==g_growth_unknown_basket)
+        {
+         long typ=OrderGetInteger(ORDER_TYPE);
+         int side=(typ==ORDER_TYPE_BUY_LIMIT || typ==ORDER_TYPE_BUY_STOP || typ==ORDER_TYPE_BUY_STOP_LIMIT) ? 0 : 1;
+         if(side==g_growth_unknown_side) g_growth_unknown=false;
+        }
+     }
+   return !g_growth_unknown || GrowthReject(bi,"UnconfirmedExposure; exact order/position adoption or explicit review required");
+  }
+void GrowthAccepted(int bi,MqlTradeRequest &r,MqlTradeResult &res)
+  {
+   if(!GrowthEnabled())return;
+   g_growth_unknown=true;g_growth_unknown_ticket=res.order;g_growth_unknown_basket=bi;
+   g_growth_unknown_side=g_b[bi].side;g_growth_unknown_comment=r.comment;
+   // Use the same exact identity proof for an accepted ACK and a later retry.
+   GrowthReady(bi);
+  }
+void GrowthRememberUnknown(int bi,MqlTradeRequest &r,MqlTradeResult &res)
+  {
+   if(!GrowthEnabled()) return;
+   // Explicit broker refusals never become an assumed accepted order.
+   if(res.retcode!=TRADE_RETCODE_TIMEOUT && res.retcode!=TRADE_RETCODE_CONNECTION
+      && res.retcode!=TRADE_RETCODE_ERROR && res.retcode!=TRADE_RETCODE_DONE_PARTIAL && res.retcode!=0) return;
+   g_growth_unknown=true; g_growth_unknown_ticket=res.order; g_growth_unknown_basket=bi;
+   g_growth_unknown_side=g_b[bi].side; g_growth_unknown_comment=r.comment;
+   GrowthReject(bi,"UnconfirmedExposure");
+  }
+bool GrowthBasketDownside(int bi,double &used,string &error)
+  {
+   used=0.0; error="";
+   if(bi<0 || bi>=g_nb) {error="UnknownBasket";return false;}
+   if(!PbPositive(g_bid) || !PbPositive(g_ask) || g_ask<g_bid) {error="InvalidQuote";return false;}
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong t=PositionGetTicket(i);
+      if(t==0) {error="InvalidExposure";return false;}
+      if(PositionGetInteger(POSITION_MAGIC)!=In_Magic) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) {error="InvalidQuote";return false;}
+      int owner=ExitOwner(t,(ulong)PositionGetInteger(POSITION_IDENTIFIER),PositionGetString(POSITION_COMMENT));
+      if(owner<0) {error="UnknownBasket";return false;}
+      if(owner!=bi) continue;
+      double sl=PositionGetDouble(POSITION_SL),v=PositionGetDouble(POSITION_VOLUME);
+      if(sl==0.0) {int ip=PsIdx(t);if(ip>=0) sl=g_ps_vsl[ip];}
+      if(!PbPositive(sl)) {error="MissingStop";return false;}
+      if(!PbPositive(v)) {error="InvalidExposure";return false;}
+      int side=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 0 : 1;
+      used+=MathMax((ExitPx(side)-sl)*SideSign(side),0.0)*XAU_CONTRACT*v;
+     }
+   for(int i=OrdersTotal()-1;i>=0;i--)
+     {
+      ulong t=OrderGetTicket(i);
+      if(t==0) {error="InvalidExposure";return false;}
+      if(OrderGetInteger(ORDER_MAGIC)!=In_Magic) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) {error="InvalidQuote";return false;}
+      int owner=ExitOwner(t,0,OrderGetString(ORDER_COMMENT));
+      if(owner<0) {error="UnknownBasket";return false;}
+      if(owner!=bi) continue;
+      double sl=OrderGetDouble(ORDER_SL),entry=OrderGetDouble(ORDER_PRICE_OPEN),v=OrderGetDouble(ORDER_VOLUME_CURRENT);
+      if(!PbPositive(sl)) {error="MissingStop";return false;}
+      if(!PbPositive(entry) || !PbPositive(v)) {error="InvalidExposure";return false;}
+      long typ=OrderGetInteger(ORDER_TYPE); int side=-1;
+      if(typ==ORDER_TYPE_BUY_LIMIT || typ==ORDER_TYPE_BUY_STOP || typ==ORDER_TYPE_BUY_STOP_LIMIT) side=0;
+      if(typ==ORDER_TYPE_SELL_LIMIT || typ==ORDER_TYPE_SELL_STOP || typ==ORDER_TYPE_SELL_STOP_LIMIT) side=1;
+      if(side<0) {error="InvalidExposure";return false;}
+      used+=MathMax((entry-sl)*SideSign(side),0.0)*XAU_CONTRACT*v;
+     }
+   if(!MathIsValidNumber(used)) {error="InvalidExposure";return false;}
+   return true;
+  }
+bool GrowthWeightFor(int allocation,int level,int side,double entry,double sl,bool has_sl,
+                     double lo,double hi,bool has_zone,double used,double capacity,double &weight,string &fallback)
+  {
+   weight=1.0;fallback="";
+   if(allocation==0) return true;
+   if(level<0) {fallback="SpecialEntry";return true;}
+   if(!has_zone) {fallback="MissingZone";return true;}
+   if(!PbPositive(lo) || !PbPositive(hi) || lo>hi) return false;
+   if(!has_sl) {fallback="MissingStop";return true;}
+   if(!PbPositive(sl) || !PbPositive(entry)) return false;
+   double d=(entry-sl)*SideSign(side), ref=(lo+(hi-lo)*0.5-sl)*SideSign(side);
+   if(d<=0.0) {fallback="NonAdverseStop";return true;}
+   if(ref<=0.0) {fallback="ZeroReferenceRisk";return true;}
+   double depth=hi==lo ? 0.5 : (side==0 ? (hi-entry)/(hi-lo) : (entry-lo)/(hi-lo));
+   depth=MathMax(0.0,MathMin(1.0,depth));
+   if(allocation==1) weight=ref/d;
+   else if(allocation==2) weight=0.5+depth;
+   else if(allocation==3) weight=ref/d*(0.75+0.5*depth);
+   else if(allocation==4)
+     {
+      if(capacity==0.0) {fallback="ZeroReferenceRisk";return true;}
+      if(!PbPositive(capacity) || !MathIsValidNumber(used) || used<0.0) return false;
+      weight=ref/d/MathSqrt(1.0+used/capacity);
+     }
+   else return false;
+   if(!PbPositive(weight)) return false;
+   weight=MathMax(0.5,MathMin(1.5,weight));return true;
+  }
+bool GrowthLegalMinimum(double &minimum)
+  {
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   double broker_min=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   if(!PbPositive(step)||!PbPositive(broker_min)||!PbPositive(In_LotMin))return false;
+   double units=ProfitBudgetUnits(MathMax(broker_min,In_LotMin),step,true);
+   if(units<1.0)return false;
+   minimum=units*step;
+   return ProfitBudgetFloorVolume(minimum,minimum);
+  }
+double GrowthSurplus(double requested,double minimum,double factor)
+  {return factor==1.0 || requested<=minimum ? requested : minimum+(requested-minimum)*factor;}
+bool GrowthAllocate(int bi,int level,int side,double entry,double sl,bool has_sl,double requested,
+                    bool already_allocated,double &volume)
+  {
+   volume=requested;
+   if(!GrowthEnabled()) return true;
+   if(!GrowthReady(bi)) return false;
+   if(already_allocated) return true;
+   if(!PbPositive(requested)) return GrowthReject(bi,"InvalidVolume");
+   entry=NormPx(entry); if(has_sl) sl=NormPx(sl);
+   if(!PbPositive(entry)) return GrowthReject(bi,"InvalidQuote");
+   bool has_zone=bi>=0 && bi<g_nb;
+   double lo=has_zone ? g_b[bi].entry_lo : 0.0,hi=has_zone ? g_b[bi].entry_hi : 0.0;
+   double used=0.0,capacity=0.0,weight;string error,fallback;
+   // Exposure lookup is lazy: special/unusable geometry must retain the same
+   // explicit Uniform fallback as core, without demanding irrelevant state.
+   bool needs_exposure=In_LotGrowthAllocation==4 && level>=0 && has_zone && PbPositive(lo) && PbPositive(hi)
+      && lo<=hi && has_sl && PbPositive(sl) && (entry-sl)*SideSign(side)>0.0
+      && (lo+(hi-lo)*0.5-sl)*SideSign(side)>0.0;
+   if(needs_exposure)
+     {
+      double eq=AccountInfoDouble(ACCOUNT_EQUITY);
+      if(!PbPositive(eq)) return GrowthReject(bi,"InvalidAccount");
+      if(!MathIsValidNumber(In_RiskPerBasketPct) || In_RiskPerBasketPct<0.0) return GrowthReject(bi,"InvalidSettings");
+      capacity=eq*In_RiskPerBasketPct/100.0;
+      if(capacity!=0.0 && !GrowthBasketDownside(bi,used,error)) return GrowthReject(bi,error);
+     }
+   if(!GrowthWeightFor(In_LotGrowthAllocation,level,side,entry,sl,has_sl,lo,hi,has_zone,used,capacity,weight,fallback))
+      return GrowthReject(bi,"InvalidExposure");
+   if(fallback!="" && In_Diag && g_handle_diag!=INVALID_HANDLE)
+      FileWrite(g_handle_diag,"LOT_GROWTH_UNIFORM_FALLBACK",(string)g_now,(string)g_b[bi].id,fallback);
+   volume=requested;
+   if(weight!=1.0)
+     {
+      double minimum;
+      if(!GrowthLegalMinimum(minimum))return GrowthReject(bi,"InvalidVolume");
+      volume=GrowthSurplus(requested,minimum,weight);
+     }
+   if(!PbPositive(volume))return GrowthReject(bi,"InvalidVolume");
+   return GrowthContextVolume(bi,side,entry,sl,has_sl,volume);
+  }
+// Field order and scale are literal mirrors of core::lot_context.
+void GrowthStrengths(double &s[])
+  {
+   ArrayResize(s,10);
+   s[0]=In_LotGrowthEquityStressStrength;s[1]=In_LotGrowthPortfolioLoadStrength;
+   s[2]=In_LotGrowthDirectionLoadStrength;s[3]=In_LotGrowthBasketCountStrength;
+   s[4]=In_LotGrowthSpreadStressStrength;s[5]=In_LotGrowthTp1DeficitStrength;
+   s[6]=In_LotGrowthStopWidthStrength;s[7]=In_LotGrowthAgeDecayStrength;
+   s[8]=In_LotGrowthRearmDecayStrength;s[9]=In_LotGrowthDayDdStrength;
+  }
+bool GrowthContextValue(double &c[],bool &known[],int i,bool positive,bool nonnegative)
+  {return known[i] && MathIsValidNumber(c[i]) && (!positive || c[i]>0.0) && (!nonnegative || c[i]>=0.0);}
+bool GrowthContextEvaluate(double &s[],double &c[],bool &known[],double &mult,double &factors[],int &dominant,int &error_axis)
+  {
+   mult=1.0;dominant=-1;error_axis=-1;ArrayResize(factors,10);ArrayInitialize(factors,1.0);
+   for(int i=0;i<10;i++)
+     {
+      error_axis=i;
+      if(!MathIsValidNumber(s[i]) || s[i]<0.0 || s[i]>2.0) return false;
+      if(s[i]==0.0) continue;
+      double stress=0.0;
+      if(i==0)
+        {if(!GrowthContextValue(c,known,0,true,false)||!GrowthContextValue(c,known,1,true,false))return false;
+         stress=MathMax(0.0,1.0-c[0]/c[1])/0.10;}
+      if(i==1 || i==2)
+        {if(!GrowthContextValue(c,known,0,true,false)||!GrowthContextValue(c,known,i+1,false,true))return false;
+         stress=c[i+1]/(c[0]*(i==1 ? 0.20 : 0.10));}
+      if(i==3)
+        {if(!GrowthContextValue(c,known,4,false,true))return false;stress=MathMax(0.0,c[4]-1.0)/3.0;}
+      if(i==4)
+        {if(!GrowthContextValue(c,known,5,false,true)||!GrowthContextValue(c,known,6,true,false))return false;
+         stress=c[5]/(c[6]*0.05);}
+      if(i==5)
+        {if(!GrowthContextValue(c,known,7,false,false)||!GrowthContextValue(c,known,6,true,false))return false;
+         stress=MathMax(0.0,1.0-c[7]/c[6]);}
+      if(i==6)
+        {if(!GrowthContextValue(c,known,6,true,false)||!GrowthContextValue(c,known,8,true,false))return false;
+         stress=MathMax(0.0,c[6]/c[8]-1.0);}
+      if(i==7)
+        {if(!GrowthContextValue(c,known,9,false,true))return false;stress=c[9]/86400.0;}
+      if(i==8)
+        {if(!GrowthContextValue(c,known,10,false,true))return false;stress=c[10]/2.0;}
+      if(i==9)
+        {if(!GrowthContextValue(c,known,0,true,false)||!GrowthContextValue(c,known,11,true,false))return false;
+         stress=MathMax(0.0,1.0-c[0]/c[11])/0.10;}
+      double scaled=stress*s[i];
+      if(!MathIsValidNumber(stress)||stress<0.0||!MathIsValidNumber(scaled))return false;
+      factors[i]=MathMax(0.25,1.0/(1.0+scaled));
+      if(factors[i]<mult){mult=factors[i];dominant=i;}
+     }
+   error_axis=-1;return true;
+  }
+void GrowthContextExposureRow(int owner,int row_side,double price,double sl,double volume,int side,
+                              double &s[],bool &owners[],bool &identity_ok,bool &total_ok,bool &same_ok,double &total,double &same)
+  {
+   if(owner<0 || owner>=MAXB)identity_ok=false;else owners[owner]=true;
+   if(s[1]==0.0 && (s[2]==0.0 || row_side!=side))return;
+   if(!PbPositive(price)||!PbPositive(sl)||!PbPositive(volume))
+     {total_ok=false;if(row_side==side)same_ok=false;return;}
+   double risk=MathMax((price-sl)*SideSign(row_side),0.0)*XAU_CONTRACT*volume;
+   if(!MathIsValidNumber(risk)){total_ok=false;if(row_side==side)same_ok=false;return;}
+   total+=risk;if(row_side==side)same+=risk;
+  }
+void GrowthCollectContext(int bi,int side,double entry,double sl,bool has_sl,double &s[],double &c[],bool &known[])
+  {
+   ArrayResize(c,12);ArrayInitialize(c,0.0);ArrayResize(known,12);ArrayInitialize(known,false);
+   if(s[0]!=0.0||s[1]!=0.0||s[2]!=0.0||s[9]!=0.0)
+     {c[0]=AccountInfoDouble(ACCOUNT_EQUITY);c[1]=AccountInfoDouble(ACCOUNT_BALANCE);known[0]=true;known[1]=true;}
+   bool quote_ok=PbPositive(g_bid)&&PbPositive(g_ask)&&g_ask>=g_bid;
+   if(s[4]!=0.0&&quote_ok){c[5]=g_ask-g_bid;known[5]=true;}
+   entry=NormPx(entry);if(has_sl)sl=NormPx(sl);
+   if((s[4]!=0.0||s[5]!=0.0||s[6]!=0.0)&&PbPositive(entry)&&has_sl&&PbPositive(sl))
+     {c[6]=(entry-sl)*SideSign(side);known[6]=true;}
+   if(bi>=0&&bi<g_nb)
+     {
+      if(PbPositive(g_b[bi].entry_lo)&&PbPositive(g_b[bi].entry_hi)&&g_b[bi].entry_hi>=g_b[bi].entry_lo)
+        {c[8]=g_b[bi].entry_hi-g_b[bi].entry_lo;known[8]=true;}
+      if(PbPositive(entry)&&g_b[bi].ntp>0&&PbPositive(g_b[bi].tps[0]))
+        {c[7]=(NormPx(g_b[bi].tps[0])-entry)*SideSign(side);known[7]=true;}
+      if(g_b[bi].created_ts<=g_now){c[9]=(double)(g_now-g_b[bi].created_ts)/1000.0;known[9]=true;}
+      c[10]=(double)g_b[bi].rearms;known[10]=true;
+     }
+   if(s[9]!=0.0&&g_day==DayOf(g_now)){c[11]=g_day_start_eq;known[11]=true;}
+   if(s[1]==0.0&&s[2]==0.0&&s[3]==0.0)return;
+   bool owners[MAXB];ArrayInitialize(owners,false);
+   bool identity_ok=true,total_ok=quote_ok,same_ok=quote_ok;
+   double total=0.0,same=0.0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong t=PositionGetTicket(i);if(t==0){identity_ok=false;continue;}
+      if(PositionGetInteger(POSITION_MAGIC)!=In_Magic)continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol){identity_ok=false;continue;}
+      int owner=ExitOwner(t,(ulong)PositionGetInteger(POSITION_IDENTIFIER),PositionGetString(POSITION_COMMENT));
+      int row_side=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 0 : 1;
+      double stop=PositionGetDouble(POSITION_SL);if(stop==0.0){int ip=PsIdx(t);if(ip>=0)stop=g_ps_vsl[ip];}
+      GrowthContextExposureRow(owner,row_side,ExitPx(row_side),stop,PositionGetDouble(POSITION_VOLUME),side,
+         s,owners,identity_ok,total_ok,same_ok,total,same);
+     }
+   for(int i=OrdersTotal()-1;i>=0;i--)
+     {
+      ulong t=OrderGetTicket(i);if(t==0){identity_ok=false;continue;}
+      if(OrderGetInteger(ORDER_MAGIC)!=In_Magic)continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol){identity_ok=false;continue;}
+      int owner=ExitOwner(t,0,OrderGetString(ORDER_COMMENT));long typ=OrderGetInteger(ORDER_TYPE);int row_side=-1;
+      if(typ==ORDER_TYPE_BUY_LIMIT||typ==ORDER_TYPE_BUY_STOP||typ==ORDER_TYPE_BUY_STOP_LIMIT)row_side=0;
+      if(typ==ORDER_TYPE_SELL_LIMIT||typ==ORDER_TYPE_SELL_STOP||typ==ORDER_TYPE_SELL_STOP_LIMIT)row_side=1;
+      if(row_side<0){identity_ok=false;continue;}
+      GrowthContextExposureRow(owner,row_side,OrderGetDouble(ORDER_PRICE_OPEN),OrderGetDouble(ORDER_SL),OrderGetDouble(ORDER_VOLUME_CURRENT),side,
+         s,owners,identity_ok,total_ok,same_ok,total,same);
+     }
+   if(identity_ok)
+     {
+      for(int i=0;i<MAXB;i++)if(owners[i])c[4]+=1.0;known[4]=true;
+      if(total_ok&&MathIsValidNumber(total)){c[2]=total;known[2]=true;}
+      if(same_ok&&MathIsValidNumber(same)){c[3]=same;known[3]=true;}
+     }
+  }
+bool GrowthContextVolume(int bi,int side,double entry,double sl,bool has_sl,double &volume)
+  {
+   double s[];GrowthStrengths(s);bool active=false;
+   for(int i=0;i<10;i++)if(s[i]!=0.0)active=true;
+   if(!active)return true; // zero strengths require no extra observation
+   double c[],factors[],mult;bool known[];int dominant,error_axis;
+   GrowthCollectContext(bi,side,entry,sl,has_sl,s,c,known);
+   if(!GrowthContextEvaluate(s,c,known,mult,factors,dominant,error_axis))return GrowthReject(bi,"LotContext::UnknownOrInvalidInput::"+IntegerToString(error_axis));
+   if(In_Diag&&g_handle_diag!=INVALID_HANDLE)
+      FileWrite(g_handle_diag,"LOT_CONTEXT",(string)g_now,(string)g_b[bi].id,DoubleToString(volume,16),DoubleToString(mult,16),IntegerToString(dominant));
+   if(mult!=1.0)
+     {
+      double minimum;if(!GrowthLegalMinimum(minimum))return GrowthReject(bi,"InvalidVolume");
+      volume=GrowthSurplus(volume,minimum,mult);
+     }
+   return PbPositive(volume)||GrowthReject(bi,"InvalidVolume");
+  }
+
+bool GrowthBudgetLimit(int bi,int side,double entry,double sl,double &volume)
+  {
+   if(!GrowthEnabled()) return true;
+   if(!GrowthReady(bi)) return false;
+   if(In_LotGrowthBasketRiskPct==0.0) return true;
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(!PbPositive(equity)) return GrowthReject(bi,"InvalidAccount");
+   double cap=equity*In_LotGrowthBasketRiskPct/100.0,used;string error;
+   if(!PbPositive(cap)) return GrowthReject(bi,"InvalidAccount");
+   if(!GrowthBasketDownside(bi,used,error)) return GrowthReject(bi,error);
+   double remaining=MathMax(cap-used,0.0);
+   if(remaining<=0.0) return GrowthReject(bi,"Exhausted");
+   if(!PbPositive(sl)) return GrowthReject(bi,"MissingStop");
+   if(!PbPositive(entry) || (entry-sl)*SideSign(side)<=0.0) return GrowthReject(bi,"InvalidNewStop");
+   double per_lot=(entry-sl)*SideSign(side)*XAU_CONTRACT;
+   if(!ProfitBudgetFloorVolume(MathMin(volume,remaining/per_lot),volume)
+      || per_lot*volume>remaining+16.0*2.2204460492503131e-16*MathMax(remaining,1.0)) return GrowthReject(bi,"Exhausted");
+   return true;
+  }
+
+// Only representation noise in a proportionally scaled plan is tolerated.
+// Final order-volume floors and monetary reservation checks remain unchanged.
+bool PlanRiskExceedsFor(bool growth,double risk,double cap)
+  {
+   if(!growth)return risk>cap;
+   if(!MathIsValidNumber(risk)||!MathIsValidNumber(cap))return true;
+   double scale=MathMax(MathMax(MathAbs(risk),MathAbs(cap)),1.0);
+   return risk>cap && risk-cap>32.0*2.2204460492503131e-16*scale;
+  }
+bool PlanRiskExceeds(double risk,double cap)
+  {return PlanRiskExceedsFor(GrowthEnabled(),risk,cap);}
+
 void CapBasketRisk(int bi)
   {
    double pct = RiskPerBasketEff();
@@ -2346,20 +2774,20 @@ void CapBasketRisk(int bi)
    if(cap <= 0.0) { g_b[bi].nlv = 0; return; }
    if(cap >= 1e17) return;   // oba limity efektywnie bez ograniczenia
    double now = PlanRisk(bi);
-   if(now <= cap) return;
+   if(GrowthEnabled() ? !PlanRiskExceeds(now,cap) : now<=cap) return;
    // 1) proporcjonalne ścięcie wolumenów
    double factor = cap / now;
    for(int i = 0; i < g_b[bi].nlv; i++)
       g_b[bi].lv_vol[i] = WolumenZlecenia(MathMax(g_b[bi].lv_vol[i] * factor, In_LotMin));
    now = PlanRisk(bi);
    // 2) odrzucanie NAJPŁYTSZYCH poziomów (ostatnich w kolejności)
-   while(now > cap && g_b[bi].nlv > 1)
+   while(PlanRiskExceeds(now,cap) && g_b[bi].nlv > 1)
      {
       g_b[bi].nlv--;
       now = PlanRisk(bi);
      }
    // 3) nawet jeden poziom przy minimalnym locie się nie mieści
-   if(now > cap) g_b[bi].nlv = 0;
+   if(PlanRiskExceeds(now,cap)) g_b[bi].nlv = 0;
   }
 
 void PlanGrid(int bi, int units_mult_num = 1, int units_mult_den = 1)
@@ -2577,10 +3005,11 @@ bool BrokerSl(int side, double sl, bool has_sl, double &out)
   }
 
 bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
-                 double tp, bool has_tp, string kom, ulong &ticket)
+                 double tp, bool has_tp, string kom, ulong &ticket, bool already_allocated=false)
   {
    if(!ExitRiskAllowed(bi) || SourceWithdrawn(bi)) return false;
    if(EntryReviewBlocked(bi)) return false;
+   if(!GrowthReady(bi)) return false;
    MqlTradeRequest  r; MqlTradeResult res;
    ZeroMemory(r); ZeroMemory(res);
    r.action       = TRADE_ACTION_DEAL;
@@ -2597,11 +3026,19 @@ bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
    // rejected by the broker, never converted silently into a naked order.
    if(hbsl) r.sl = NormPx(bsl);
    if(has_tp) r.tp = NormPx(tp);
-   if(!ProfitBudgetLimit(bi, g_b[bi].side, r.price, r.sl, vol, r.volume)) return false;
+   if(GrowthEnabled())
+     {
+      if(!GrowthAllocate(bi,lvl,g_b[bi].side,r.price,r.sl,hbsl,vol,already_allocated,r.volume)) return false;
+      if(!ProfitBudgetFloorVolume(r.volume,r.volume)) return GrowthReject(bi,"InvalidVolume");
+      if(!ProfitBudgetLimit(bi,g_b[bi].side,r.price,r.sl,r.volume,r.volume)) return false;
+      if(!GrowthBudgetLimit(bi,g_b[bi].side,r.price,r.sl,r.volume)) return false;
+     }
+   else if(!ProfitBudgetLimit(bi, g_b[bi].side, r.price, r.sl, vol, r.volume)) return false;
    AuditOpenRequest(r.volume);
    if(!OrderSend(r, res) ||
       (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED))
      {
+      GrowthRememberUnknown(bi,r,res);
       g_rej_broker++; g_rej_place++;
       ZliczOdrzucenie((int)res.retcode);
       if(In_Diag)
@@ -2612,6 +3049,7 @@ bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
                    res.comment);
       return false;
      }
+   GrowthAccepted(bi,r,res);
    ticket = res.order;
    g_open_accepted_max_volume = MathMax(g_open_accepted_max_volume, r.volume);
    // wirtualny SL dla wejść rynkowych
@@ -2621,10 +3059,11 @@ bool WyslijRynek(int bi, int lvl, double vol, double sl, bool has_sl,
   }
 
 bool WyslijLimit(int bi, double price, double vol, double sl, bool has_sl,
-                 double tp, bool has_tp, string kom, int typ, ulong &ticket)
+                 double tp, bool has_tp, string kom, int typ, ulong &ticket, bool already_allocated=false, int lvl=-1)
   {
    if(!ExitRiskAllowed(bi) || SourceWithdrawn(bi)) return false;
    if(EntryReviewBlocked(bi)) return false;
+   if(!GrowthReady(bi)) return false;
    MqlTradeRequest  r; MqlTradeResult res;
    ZeroMemory(r); ZeroMemory(res);
    r.action       = TRADE_ACTION_PENDING;
@@ -2632,18 +3071,30 @@ bool WyslijLimit(int bi, double price, double vol, double sl, bool has_sl,
    r.volume       = NormVol(vol);
    r.type         = (ENUM_ORDER_TYPE)typ;
    r.price        = NormPx(price);
+   // This volume was sized for the normalized pending price. Never let
+   // broker-specific marketable-pending handling bypass that decision.
+   if(GrowthEnabled() && !PendingPxIsValid(typ,r.price)) return GrowthReject(bi,"InvalidPrice");
    r.magic        = In_Magic;
    r.comment      = kom;
    r.type_time    = ORDER_TIME_GTC;
    r.type_filling = g_fill_pending;
    double bsl; bool hbsl = BrokerSl(g_b[bi].side, sl, has_sl, bsl);
+   if(GrowthEnabled() && already_allocated) {bsl=sl;hbsl=has_sl;}
    if(hbsl) r.sl = NormPx(bsl);
    if(has_tp) r.tp = NormPx(tp);
-   if(!ProfitBudgetLimit(bi, g_b[bi].side, r.price, r.sl, vol, r.volume)) return false;
+   if(GrowthEnabled())
+     {
+      if(!GrowthAllocate(bi,lvl,g_b[bi].side,r.price,r.sl,hbsl,vol,already_allocated,r.volume)) return false;
+      if(!ProfitBudgetFloorVolume(r.volume,r.volume)) return GrowthReject(bi,"InvalidVolume");
+      if(!ProfitBudgetLimit(bi,g_b[bi].side,r.price,r.sl,r.volume,r.volume)) return false;
+      if(!GrowthBudgetLimit(bi,g_b[bi].side,r.price,r.sl,r.volume)) return false;
+     }
+   else if(!ProfitBudgetLimit(bi, g_b[bi].side, r.price, r.sl, vol, r.volume)) return false;
    AuditOpenRequest(r.volume);
    if(!OrderSend(r, res) ||
       (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED))
      {
+      GrowthRememberUnknown(bi,r,res);
       g_rej_broker++; g_rej_place++;
       ZliczOdrzucenie((int)res.retcode);
       if(In_Diag)
@@ -2654,6 +3105,7 @@ bool WyslijLimit(int bi, double price, double vol, double sl, bool has_sl,
                    res.comment);
       return false;
      }
+   GrowthAccepted(bi,r,res);
    ticket = res.order;
    g_open_accepted_max_volume = MathMax(g_open_accepted_max_volume, r.volume);
    if(In_ConfirmedExitRetry) ZapiszWlasciciela(ticket, bi);
@@ -2899,7 +3351,7 @@ int PlaceGrid(int bi, bool tylko_brakujace = false, int max_szczebli = 0,
               }
             ok = WyslijLimit(bi, px, g_b[bi].lv_vol[i], g_b[bi].sl, g_b[bi].has_sl,
                              g_b[bi].lv_tp[i], g_b[bi].lv_has_tp[i], kom,
-                             typ, tk);
+                             typ, tk, false, i);
             if(ok && g_b[bi].npend < MAXTK)
               { g_b[bi].pend[g_b[bi].npend] = tk; g_b[bi].pend_lv[g_b[bi].npend] = i;
                 g_b[bi].pend_top[g_b[bi].npend] = false; g_b[bi].npend++; }
@@ -2913,7 +3365,7 @@ int PlaceGrid(int bi, bool tylko_brakujace = false, int max_szczebli = 0,
   }
 
 // Wymiana wolumenu pendingu: cancel+replace (MT5 nie zna modyfikacji wolumenu)
-bool PodmienWolumen(int bi, int idx, double nowy_vol)
+bool PodmienWolumen(int bi, int idx, double nowy_vol, bool already_allocated=false)
   {
    if(idx < 0 || idx >= g_b[bi].npend) return false;
    ulong t = g_b[bi].pend[idx];
@@ -2925,7 +3377,7 @@ bool PodmienWolumen(int bi, int idx, double nowy_vol)
    string kom = OrderGetString(ORDER_COMMENT);
    int    lv  = g_b[bi].pend_lv[idx];
    double stary = OrderGetDouble(ORDER_VOLUME_CURRENT);
-   if(MathAbs(nowy_vol - stary) < 0.005) return false;
+   if(MathAbs(nowy_vol - stary) < (GrowthEnabled() ? SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP)*0.5 : 0.005)) return false;
 
    MqlTradeRequest r; MqlTradeResult res;
    ZeroMemory(r); ZeroMemory(res);
@@ -2942,7 +3394,7 @@ bool PodmienWolumen(int bi, int idx, double nowy_vol)
    g_b[bi].npend--;
 
    ulong tk = 0;
-   if(!WyslijLimit(bi, px, nowy_vol, sl, sl > 0.0, tp, tp > 0.0, kom, typ, tk))
+   if(!WyslijLimit(bi, px, nowy_vol, sl, sl > 0.0, tp, tp > 0.0, kom, typ, tk, already_allocated, lv))
       return false;   // szczebel zostaje pusty — tak samo zachowuje sie silnik
    if(g_b[bi].npend < MAXTK)
      {
@@ -3006,6 +3458,29 @@ void RelotPendings()
       if(g_b[bi].state == ST_DONE || !ExitRiskAllowed(bi) || g_b[bi].npend == 0) continue;
       if(EntryReviewBlocked(bi)) continue;
 
+      // Growth uses the same fresh shape-qualified plan as core relot.
+      // A temporary copy preserves fills, counters and strategy memory.
+      double growth_plan[MAXLV]; ArrayInitialize(growth_plan,0.0); bool growth_plan_ok=false;
+      if(GrowthEnabled())
+        {
+         Basket saved=g_b[bi];
+         PlanGrid(bi);
+         growth_plan_ok=g_b[bi].nlv>0;
+         int common=(int)MathMin(g_b[bi].nlv,saved.nlv);
+         double old_min=DBL_MAX,old_max=0.0,new_min=DBL_MAX,new_max=0.0;
+         for(int j=0;j<g_b[bi].nlv;j++)
+           {
+            growth_plan[j]=g_b[bi].lv_vol[j];
+            if(j>=common) continue;
+            if(saved.lv_vol[j]>0.0) {old_min=MathMin(old_min,saved.lv_vol[j]);old_max=MathMax(old_max,saved.lv_vol[j]);}
+            if(growth_plan[j]>0.0) {new_min=MathMin(new_min,growth_plan[j]);new_max=MathMax(new_max,growth_plan[j]);}
+           }
+         double old_ratio=old_min==DBL_MAX ? 1.0 : old_max/old_min;
+         double new_ratio=new_min==DBL_MAX ? 1.0 : new_max/new_min;
+         if(common>=2 && old_ratio>1.05 && new_ratio<=1.001) growth_plan_ok=false;
+         g_b[bi]=saved;
+        }
+      double delta_epsilon=GrowthEnabled() ? MathAbs(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP))*0.5 : 0.005;
       for(int lv = 0; lv < g_b[bi].nlv; lv++)
         {
          int    sztuki = 0;
@@ -3024,7 +3499,18 @@ void RelotPendings()
          if(sztuki < 1) sztuki = 1;
 
          double cel_szczebla;
-         if(In_RelotWgPlanu)
+         if(GrowthEnabled())
+           {
+            if(In_RelotWgPlanu && !growth_plan_ok) continue;
+            cel_szczebla=sztuki*(In_RelotWgPlanu ? growth_plan[lv] : cel);
+            if(!OrderSelect(g_b[bi].pend[i_baza])) continue;
+            double px=OrderGetDouble(ORDER_PRICE_OPEN), sl=OrderGetDouble(ORDER_SL);
+            double per_order=cel_szczebla/(double)sztuki;
+            if(!GrowthAllocate(bi,lv,g_b[bi].side,px,sl,sl>0.0,per_order,false,per_order)) continue;
+            if(!ProfitBudgetFloorVolume(per_order,per_order)) {GrowthReject(bi,"InvalidVolume");continue;}
+            cel_szczebla=per_order*(double)sztuki;
+           }
+         else if(In_RelotWgPlanu)
            {
             double baza_planu = (g_b[bi].lot_planu > 0.0) ? g_b[bi].lot_planu : cel;
             double waga = g_b[bi].lv_vol[lv] / baza_planu;
@@ -3033,9 +3519,9 @@ void RelotPendings()
          else
             cel_szczebla = MathRound(sztuki * cel * 100.0) / 100.0;
 
-         suma = MathRound(suma * 100.0) / 100.0;
+         if(!GrowthEnabled()) suma = MathRound(suma * 100.0) / 100.0;
          double roznica = cel_szczebla - suma;
-         if(MathAbs(roznica) < 0.005) continue;
+         if(MathAbs(roznica) < delta_epsilon) continue;
 
          if(roznica > 0.0)
            {
@@ -3055,7 +3541,7 @@ void RelotPendings()
                // lot_min, SUFIT lot_max) — bez tego przeciekal ogranicznik
                // („najwieksza pozycja miala 27,10 lota przy lot_max=10")
                if(WyslijLimit(bi, px, WolumenZlecenia(roznica), sl, sl > 0.0,
-                              tp, tp > 0.0, kom, typ, tk))
+                              tp, tp > 0.0, kom, typ, tk, GrowthEnabled(), lv))
                  {
                   if(g_b[bi].npend < MAXTK)
                     {
@@ -3070,8 +3556,8 @@ void RelotPendings()
               }
             else
               {
-               double jednostka = MathMax(cel_szczebla / (double)sztuki, 0.01);
-               if(PodmienWolumen(bi, i_baza, WolumenZlecenia(jednostka))) g_relot_ok++;
+               double jednostka = GrowthEnabled() ? cel_szczebla/(double)sztuki : MathMax(cel_szczebla / (double)sztuki, 0.01);
+               if(PodmienWolumen(bi, i_baza, WolumenZlecenia(jednostka), GrowthEnabled())) g_relot_ok++;
                else g_relot_odmowy++;
               }
            }
@@ -3083,7 +3569,7 @@ void RelotPendings()
             // engine.rs:6745-6806: w JEDNYM przebiegu zdejmij tyle dokladek,
             // ile trzeba, a reszte nadmiaru zdejmij z BAZY (vol - nadmiar).
             double nadmiar = -roznica;
-            while(nadmiar >= 0.005)
+            while(nadmiar >= delta_epsilon)
               {
                int it = -1;
                for(int k = 0; k < g_b[bi].npend; k++)
@@ -3094,7 +3580,7 @@ void RelotPendings()
                if(UsunPending(bi, it)) { g_relot_ok++; nadmiar -= v_top; }
                else { g_relot_odmowy++; break; }
               }
-            if(nadmiar >= 0.005)
+            if(nadmiar >= delta_epsilon)
               {
                // odszukaj biezaca baze (indeksy mogly sie przesunac)
                int ib = -1;
@@ -3103,8 +3589,8 @@ void RelotPendings()
                if(ib >= 0 && OrderSelect(g_b[bi].pend[ib]))
                  {
                   double v_bazy = OrderGetDouble(ORDER_VOLUME_CURRENT);
-                  double nowy = WolumenZlecenia(MathMax(v_bazy - nadmiar, 0.01));
-                  if(PodmienWolumen(bi, ib, nowy)) g_relot_ok++;
+                  double nowy = WolumenZlecenia(GrowthEnabled() ? v_bazy-nadmiar : MathMax(v_bazy - nadmiar, 0.01));
+                  if(PodmienWolumen(bi, ib, nowy, GrowthEnabled())) g_relot_ok++;
                   else g_relot_odmowy++;
                  }
               }
@@ -4497,7 +4983,7 @@ void HandleTpHit(int bi, int index)
          double ostatni = g_b[bi].tps[g_b[bi].ntp - 1];
          if(LimitPxIsValid(g_b[bi].side, px)
             && WyslijLimit(bi, px, vol, g_b[bi].sl, g_b[bi].has_sl, ostatni, true,
-                           "B" + IntegerToString(g_b[bi].id), typ, tk))
+                           "B" + IntegerToString(g_b[bi].id), typ, tk, false, -3))
            {
             if(g_b[bi].npend < MAXTK)
               { g_b[bi].pend[g_b[bi].npend] = tk; g_b[bi].pend_lv[g_b[bi].npend] = -3;
@@ -5627,7 +6113,7 @@ void FastAddonSweep()
       // Match the Rust caller: cap AFTER the addon multiplier, before broker rounding.
       double vol = MathMax(LotSize() * MathMax(In_FastAddonLotMult, 0.0), In_LotMin);
       if(In_LotMax > 0.0) vol = MathMin(vol, In_LotMax);
-      vol = RoundLot(vol);
+      if(!GrowthEnabled()) vol = RoundLot(vol);
       double tp_ost = (g_b[bi].ntp > 0) ? g_b[bi].tps[g_b[bi].ntp - 1] : 0.0;
       // A locally invalid target keeps the slot but starts the configured
       // cooldown, matching the source-backed retry policy in Rust.
@@ -7443,9 +7929,200 @@ void StrategyRealizedScenarioTick()
    ExitTestFinish(true,"CONFIRMED_PRICE_PLUS_SWAP_STRATEGY_BASIS_WITH_ACTUAL_CASH_PRESERVED");
   }
 
+// These fixtures are reachable only through the existing tester-only gate.
+void LotGrowthMathScenarioTick()
+  {
+   if(g_test_exit_stage!=0)return;g_test_exit_stage=1;
+   if(!ExitTestRequire(GrowthEnabled(),"growth math fixture requires ON"))return;
+   if(!ExitTestRequire(MathAbs(GrowthNominalFor(1,4000,.01,1000,.5,.35,2,1.5)-.02)<1e-15,"Power formula"))return;
+   if(!ExitTestRequire(MathAbs(GrowthNominalFor(2,2000,.01,1000,.7,.35,2,1.5)-.045)<1e-15,"ThresholdLinear formula"))return;
+   if(!ExitTestRequire(MathAbs(GrowthNominalFor(3,4000,.01,1000,.7,.35,2,1.5)-.0225)<1e-15,"GeometricSteps formula"))return;
+   double multiples[]={1.5,2.0,2.5,3.0,4.0},anchors[]={300,600,1000,1234.5};
+   for(int a=0;a<ArraySize(anchors);a++)for(int m=0;m<ArraySize(multiples);m++)for(int n=1;n<=12;n++)
+     {
+      double boundary=anchors[a]*MathPow(multiples[m],n),expected=.01*MathPow(1.5,n);
+      double actual=GrowthNominalFor(3,boundary,.01,anchors[a],.7,.35,multiples[m],1.5);
+      double below=GrowthNominalFor(3,boundary-.01,.01,anchors[a],.7,.35,multiples[m],1.5);
+      if(!ExitTestRequire(MathAbs(actual-expected)<=1e-12*MathMax(1.0,expected)
+         && MathAbs(below-expected/1.5)<=1e-12*MathMax(1.0,expected),"geometric exact boundary/real lower capital"))return;
+     }
+   if(!ExitTestRequire(GrowthSurplus(.01,.01,.25)==.01 && GrowthSurplus(.005,.01,1.5)==.005
+      && GrowthSurplus(.037,.01,1.0)==.037 && MathAbs(GrowthSurplus(.03,.01,.5)-.02)<1e-15,"SURPLUS minimum/passthrough"))return;
+   double w;string fallback;
+   for(int a=0;a<5;a++)
+     {
+      if(!ExitTestRequire(GrowthWeightFor(a,-2,0,100,90,true,100,110,true,0,100,w,fallback)
+         && w==1.0,"special leg Uniform fallback"))return;
+     }
+   if(!ExitTestRequire(GrowthWeightFor(1,0,0,100,90,true,100,110,true,0,100,w,fallback)&&w==1.5,"EqualSLRisk BUY"))return;
+   if(!ExitTestRequire(GrowthWeightFor(2,0,1,110,120,true,100,110,true,0,100,w,fallback)&&w==1.5,"Depth SELL"))return;
+   if(!ExitTestRequire(GrowthWeightFor(3,0,0,110,90,true,100,110,true,0,100,w,fallback)&&w==.5625,"EqualSLRiskDepth"))return;
+   if(!ExitTestRequire(GrowthWeightFor(4,0,0,105,90,true,100,110,true,300,100,w,fallback)&&w==.5,"ExposureAwareRisk"))return;
+   double c[]={900,1000,180,90,4,.5,10,0,5,86400,2,1000};bool known[12];ArrayInitialize(known,true);
+   double s[],f[],mult;ArrayResize(s,10);int dominant,error_axis;
+   for(int axis=0;axis<10;axis++)
+     {
+      ArrayInitialize(s,0.0);s[axis]=1.0;
+      if(!ExitTestRequire(GrowthContextEvaluate(s,c,known,mult,f,dominant,error_axis)&&MathAbs(mult-.5)<1e-14&&dominant==axis,"independent context unit-stress"))return;
+     }
+   ArrayInitialize(s,1.0);
+   if(!ExitTestRequire(GrowthContextEvaluate(s,c,known,mult,f,dominant,error_axis)&&MathAbs(mult-.5)<1e-14,"context MIN must not multiply penalties"))return;
+   known[7]=false;
+   if(!ExitTestRequire(!GrowthContextEvaluate(s,c,known,mult,f,dominant,error_axis)&&error_axis==5,"unknown active input must HOLD"))return;
+   ArrayInitialize(s,0.0);ArrayInitialize(known,false);
+   if(!ExitTestRequire(GrowthContextEvaluate(s,c,known,mult,f,dominant,error_axis)&&mult==1.0,"OFF requires no observations"))return;
+   double volume;
+   if(!ExitTestRequire(ProfitBudgetFloorVolume(.015,volume)&&MathAbs(volume-.01)<1e-12
+       && !ProfitBudgetFloorVolume(.005,volume),"floor .015/.005 contract"))return;
+   if(!ExitTestRequire(!PlanRiskExceedsFor(true,54.048000000000009,54.048000000000002)
+      && PlanRiskExceedsFor(false,54.048000000000009,54.048000000000002)
+      && PlanRiskExceedsFor(true,54.058,54.048),"plan ULP boundary versus real over-budget and OFF"))return;
+   ExitTestFinish(true,"LOT_GROWTH_FORMULA_ALLOCATION_CONTEXT_SURPLUS");
+  }
+void LotGrowthSendScenarioTick()
+  {
+   if(g_test_exit_stage!=0 || HourOf(g_now)<2)return;g_test_exit_stage=1;
+   double s[];GrowthStrengths(s);bool context_off=true;for(int i=0;i<10;i++)if(s[i]!=0.0)context_off=false;
+   if(!ExitTestRequire(GrowthEnabled()&&In_LotGrowthAllocation==2&&In_LotGrowthBasketRiskPct==0.0&&context_off,"send fixture requires Depth/zero context/budget"))return;
+   if(!ExitTestRequire(PositionsTotal()==0&&OrdersTotal()==0,"empty account required"))return;
+   g_nb=1;ExitTestBasket(0);g_b[0].side=0;
+   double entry=NormPx(g_bid-20.0),stop=NormPx(entry-20.0);
+   g_b[0].entry_lo=entry;g_b[0].entry_hi=entry+4.0;g_b[0].zone_lo=entry;g_b[0].zone_hi=entry+4.0;
+   g_b[0].sl=stop;g_b[0].has_sl=true;g_b[0].state=ST_PENDING;
+   ulong ticket=0;
+   if(!ExitTestRequire(WyslijLimit(0,entry,.03,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,ticket,false,0)
+       && OrderSelect(ticket)&&MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT)-.04)<1e-12,"send weighted .03 to .04"))return;
+   g_b[0].pend[0]=ticket;g_b[0].pend_lv[0]=0;g_b[0].npend=1;
+   double target=.05;
+   if(!ExitTestRequire(GrowthAllocate(0,0,0,entry,stop,true,target,false,target)&&ProfitBudgetFloorVolume(target,target)
+       && MathAbs(target-.07)<1e-12,"full relot target allocated once"))return;
+   double delta=target-OrderGetDouble(ORDER_VOLUME_CURRENT);ulong topup=0;
+   if(!ExitTestRequire(WyslijLimit(0,entry,delta,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,topup,true,0)
+       && OrderSelect(topup)&&MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT)-.03)<1e-12,"topup delta must not be weighted twice"))return;
+   g_b[0].pend[1]=topup;g_b[0].pend_lv[1]=0;g_b[0].pend_top[1]=true;g_b[0].npend=2;
+   ulong minimum=0;
+   if(!ExitTestRequire(WyslijLimit(0,entry,.01,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,minimum,false,0)
+       && OrderSelect(minimum)&&MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT)-.01)<1e-12,"minimum remains .01"))return;
+   ulong refused=0;int before=OrdersTotal();
+   if(!ExitTestRequire(!WyslijLimit(0,entry,.005,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,refused,false,0)
+       && OrdersTotal()==before,"below minimum must never be promoted"))return;
+   // Synthetic unknown receipt tests exercise the production barrier without
+   // inducing a real broker/network failure or removing acknowledged orders.
+   g_growth_unknown=true;g_growth_unknown_ticket=0;g_growth_unknown_basket=0;g_growth_unknown_side=0;g_growth_unknown_comment="B1";
+   if(!ExitTestRequire(!WyslijLimit(0,entry,.01,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,refused,false,0)
+       && OrdersTotal()==before,"unknown order must block account new risk"))return;
+   g_growth_unknown_ticket=ticket;
+   if(!ExitTestRequire(GrowthReady(0)&&!g_growth_unknown,"exact known order adoption clears barrier"))return;
+   MqlTradeRequest req;MqlTradeResult res;ZeroMemory(req);ZeroMemory(res);res.retcode=TRADE_RETCODE_INVALID_STOPS;
+   GrowthRememberUnknown(0,req,res);
+   if(!ExitTestRequire(!g_growth_unknown,"definite rejection must remain definite"))return;
+   ExitTestFinish(true,"LOT_GROWTH_NATIVE_SEND_TARGET_DELTA_ACK");
+  }
+void LotGrowthPlanFloorScenarioTick()
+  {
+   if(g_test_exit_stage!=0 || HourOf(g_now)<2)return;g_test_exit_stage=1;
+   if(!ExitTestRequire(GrowthEnabled()&&In_RiskPerBasketPct==20.0
+      && MathAbs(AccountInfoDouble(ACCOUNT_EQUITY)-100.0)<1e-10,"plan fixture requires $100, basket risk20%"))return;
+   g_nb=1;ExitTestBasket(0);g_b[0].side=0;g_b[0].has_sl=true;g_b[0].sl=NormPx(g_bid-30.0);
+   g_b[0].nlv=2;
+   for(int i=0;i<2;i++)
+     {g_b[0].lv_price[i]=g_b[0].sl+10.0*(i+1);g_b[0].lv_vol[i]=.01;g_b[0].lv_units[i]=1;}
+   if(!ExitTestRequire(MathAbs(PlanRisk(0)-30.0)<1e-9,"initial 2-leg risk must be30"))return;
+   CapBasketRisk(0);
+   if(!ExitTestRequire(g_b[0].nlv==1&&g_b[0].lv_vol[0]==.01&&MathAbs(PlanRisk(0)-10.0)<1e-9,
+      "plan scale preserves minimum then prunes shallow leg"))return;
+   ExitTestFinish(true,"LOT_GROWTH_PLAN_MINIMUM_THEN_RISK_PRUNE");
+  }
+void LotGrowthStrictBudgetScenarioTick()
+  {
+   if(g_test_exit_stage!=0 || HourOf(g_now)<2)return;g_test_exit_stage=1;
+   if(!ExitTestRequire(GrowthEnabled()&&In_LotGrowthBasketRiskPct==.05,"strict budget fixture requires .05%"))return;
+   g_nb=1;ExitTestBasket(0);g_b[0].side=0;
+   double entry=NormPx(g_bid-20),stop=NormPx(entry-10);ulong ticket;
+   int before=OrdersTotal();
+   if(!ExitTestRequire(!WyslijLimit(0,entry,.01,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,ticket,false,0)
+      && OrdersTotal()==before,"true cash budget below min must reject"))return;
+   ExitTestFinish(true,"LOT_GROWTH_FINAL_CASH_BUDGET_NEVER_PROMOTES_MINIMUM");
+  }
+void LotGrowthStressScenarioTick()
+  {
+   if(g_test_exit_stage!=0 || HourOf(g_now)<2)return;g_test_exit_stage=1;
+   double s[];GrowthStrengths(s);bool correct=true;for(int i=0;i<10;i++)if(s[i]!=(i==7 ? 1.0 : 0.0))correct=false;
+   if(!ExitTestRequire(GrowthEnabled()&&In_LotGrowthAllocation==0&&In_LotGrowthBasketRiskPct==0.0&&correct,"stress fixture requires age=1 only, Uniform"))return;
+   if(!ExitTestRequire(PositionsTotal()==0&&OrdersTotal()==0,"empty stress fixture account"))return;
+   g_nb=1;ExitTestBasket(0);g_b[0].created_ts=g_now-86400000;
+   double entry=NormPx(g_bid-20.0),stop=NormPx(entry-20.0);ulong ticket;
+   if(!ExitTestRequire(WyslijLimit(0,entry,.03,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,ticket,false,0)
+      && OrderSelect(ticket)&&MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT)-.02)<1e-12,"causal age halves only surplus"))return;
+   if(!ExitTestRequire(WyslijLimit(0,entry,.01,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,ticket,false,0)
+      && OrderSelect(ticket)&&MathAbs(OrderGetDouble(ORDER_VOLUME_CURRENT)-.01)<1e-12,"causal stress preserves legal minimum"))return;
+   g_b[0].created_ts=g_now+1;int before=OrdersTotal();
+   if(!ExitTestRequire(!WyslijLimit(0,entry,.03,stop,true,0,false,"B1",ORDER_TYPE_BUY_LIMIT,ticket,false,0)
+      && OrdersTotal()==before,"future/unknown age is HOLD"))return;
+   ExitTestFinish(true,"LOT_GROWTH_NATIVE_CAUSAL_STRESS_SURPLUS");
+  }
+
+void LotGrowthPendingPriceScenarioTick()
+  {
+   if(g_test_exit_stage!=0 || HourOf(g_now)<2)return;g_test_exit_stage=1;
+   if(!ExitTestRequire(GrowthEnabled() && In_LotGrowthAllocation==0 && In_LotGrowthBasketRiskPct==0.0,
+      "pending fixture requires Growth ON Uniform and zero new budget"))return;
+   if(!ExitTestRequire(PositionsTotal()==0 && OrdersTotal()==0,"empty pending-price fixture account"))return;
+   int kinds[]={ORDER_TYPE_BUY_LIMIT,ORDER_TYPE_SELL_LIMIT,ORDER_TYPE_BUY_STOP,ORDER_TYPE_SELL_STOP};
+   double saved_bid=g_bid,saved_ask=g_ask,saved_stops=g_stops;
+   // Exact boundary, too-close, crossed and normalization tests use the same
+   // production predicate; restore the real quote before any broker request.
+   g_bid=100.0;g_ask=102.0;
+   bool exact=true;int checks=0;
+   for(int st=0;st<2;st++)
+     {
+      g_stops=st==0 ? 0.0 : .25;
+      double bounds[]={g_ask-g_stops,g_bid+g_stops,g_ask+g_stops,g_bid-g_stops};
+      for(int i=0;i<4;i++)
+        {
+         double inward=(i==0 || i==3) ? 1.0 : -1.0;
+         exact=exact && PendingPxIsValid(kinds[i],NormPx(bounds[i]));checks++;
+         exact=exact && PendingPxIsValid(kinds[i],NormPx(bounds[i]+inward*.004));checks++;
+         exact=exact && !PendingPxIsValid(kinds[i],NormPx(bounds[i]+inward*.006));checks++;
+         exact=exact && PendingPxIsValid(kinds[i],NormPx(bounds[i]-inward*.006));checks++;
+        }
+     }
+   g_bid=saved_bid;g_ask=saved_ask;g_stops=saved_stops;
+   if(!ExitTestRequire(exact && checks==32,"four-kind exact/normalized price boundaries"))return;
+   g_nb=4;
+   for(int i=0;i<4;i++)
+     {
+      ExitTestBasket(i);g_b[i].side=(i==0 || i==2) ? 0 : 1;
+      g_b[i].state=ST_PENDING;g_b[i].has_sl=false;
+      double boundary=(i==0 ? g_ask-g_stops : i==1 ? g_bid+g_stops : i==2 ? g_ask+g_stops : g_bid-g_stops);
+      double inward=(i==0 || i==3) ? 1.0 : -1.0;
+      double crossed=NormPx(boundary+inward*(g_stops+1.0));
+      ulong ticket=0;long requests=g_open_request_count;int orders=OrdersTotal();
+      if(!ExitTestRequire(!WyslijLimit(i,crossed,.01,0,false,0,false,"B"+IntegerToString(i+1),kinds[i],ticket,false,-2)
+         && g_open_request_count==requests && OrdersTotal()==orders && PositionsTotal()==0,
+         "crossed price reached native OrderSend or changed exposure"))return;
+      double valid=NormPx(boundary-inward*20.0);
+      if(!ExitTestRequire(WyslijLimit(i,valid,.01,0,false,0,false,"B"+IntegerToString(i+1),kinds[i],ticket,false,-2)
+         && g_open_request_count==requests+1 && OrderSelect(ticket)
+         && OrderGetInteger(ORDER_TYPE)==kinds[i] && OrderGetDouble(ORDER_PRICE_OPEN)==valid
+         && OrderGetDouble(ORDER_VOLUME_CURRENT)==.01 && PositionsTotal()==0,
+         "valid price did not remain an exact pending order"))return;
+      g_b[i].pend[0]=ticket;g_b[i].pend_lv[0]=-2;g_b[i].npend=1;
+     }
+   if(!ExitTestRequire(OrdersTotal()==4 && PositionsTotal()==0,"four legal pending orders expected"))return;
+   PrintFormat("CEXIT_TEST_EVENT|pending_price_guard|boundary_checks=%d|blocked=4|sent=4|positions=0",checks);
+   ExitTestFinish(true,"LOT_GROWTH_FOUR_PENDING_KINDS_NORMALIZED_PRICE_NO_MARKET_FALLBACK");
+  }
+
 void ExitFaultScenarioTick()
   {
    if(!MQLInfoInteger(MQL_TESTER) || In_TestExitScenario == 0 || g_test_exit_finished) return;
+   if(In_TestExitScenario == 27) { LotGrowthPendingPriceScenarioTick(); return; }
+   if(In_TestExitScenario == 25) { LotGrowthPlanFloorScenarioTick(); return; }
+   if(In_TestExitScenario == 26) { LotGrowthStrictBudgetScenarioTick(); return; }
+   if(In_TestExitScenario == 22) { LotGrowthMathScenarioTick(); return; }
+   if(In_TestExitScenario == 23) { LotGrowthSendScenarioTick(); return; }
+   if(In_TestExitScenario == 24) { LotGrowthStressScenarioTick(); return; }
    if(In_TestExitScenario == 9) { KnownSpecialLevelScenarioTick(); return; }
    if(In_TestExitScenario == 10) { ProfitBudgetScenarioTick(); return; }
    if(In_TestExitScenario == 13) { PortfolioBudgetScenarioTick(); return; }
@@ -7556,7 +8233,8 @@ int OnInit()
      }
    if(!TestSppTargetPlanReset()) return INIT_FAILED;
    if(!TestBeRetargetContract()) return INIT_FAILED;
-   if(In_TestExitScenario < 0 || In_TestExitScenario > 21) return INIT_PARAMETERS_INCORRECT;
+   if(!GrowthValidate()) return INIT_PARAMETERS_INCORRECT;
+   if(In_TestExitScenario < 0 || In_TestExitScenario > 27) return INIT_PARAMETERS_INCORRECT;
    if(In_TestExitScenario > 0
       && (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       return INIT_PARAMETERS_INCORRECT;

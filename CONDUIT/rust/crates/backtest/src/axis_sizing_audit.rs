@@ -432,7 +432,10 @@ fn v2_broker_cap_is_not_disabled_by_user_zero_and_minimum_does_not_raise_request
 
 #[test]
 fn v2_all_production_engine_open_calls_use_the_final_boundary() {
-    let src=include_str!("../../core/src/engine.rs").split("#[cfg(test)]").next().unwrap();
+    // An external #[path] test-module declaration may precede production code.
+    // Stop at the first inline test module, not at that early attribute.
+    let source=include_str!("../../core/src/engine.rs").replace("\r\n","\n");
+    let src=source.split("#[cfg(test)]\nmod ").next().unwrap();
     assert_eq!(src.matches("b.open_market(").count(),1,"only the guarded wrapper may call Broker");
     assert_eq!(src.matches("b.place_pending(").count(),1,"only the guarded wrapper may call Broker");
     assert!(!src.contains("b.open_market(OrderReq {"));
@@ -454,7 +457,7 @@ fn v2_sim_boundary_rejects_illegal_market_and_pending_without_mutation() {
     let mut b=SimBroker::z_ustawien(1000.0,&c);b.on_quote(quote(T0,4012.0));
     for vol in [0.0,-0.01,f64::NAN,f64::INFINITY,0.015,100.01] {
         let market=OrderReq{side:Side::Buy,volume:vol,sl:None,tp:None,basket:None,level:0,is_toucher:false,comment:String::new()};
-        let pending=PendingReq{kind:PendingKind::BuyLimit,volume:vol,price:4005.0,sl:None,tp:None,basket:None,level:0,is_toucher:false,is_topup:false,comment:String::new()};
+        let pending=PendingReq{kind:PendingKind::BuyLimit,volume:vol,price:4005.0,sl:None,tp:None,basket:None,level:0,is_toucher:false,is_topup:false,no_market_fallback:false,comment:String::new()};
         assert_eq!(b.open_market(market),Err(BrokerError::InvalidVolume));
         assert_eq!(b.place_pending(pending),Err(BrokerError::InvalidVolume));
         assert!(b.positions().is_empty()&&b.pendings().is_empty());near(b.balance,1000.0);

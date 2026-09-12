@@ -182,7 +182,7 @@ fn physical_dedup_counts_margin_once_preserves_swap_and_does_not_block_explicit_
         broker.place_pending(PendingReq {
             kind: PendingKind::BuyStop, volume: 0.01, price: 4000.0,
             sl: Some(3990.0), tp: None, basket: Some(2), level: 1,
-            is_toucher: false, is_topup: false, comment: "after-EOD".into(),
+            is_toucher: false, is_topup: false,no_market_fallback:false, comment: "after-EOD".into(),
         }).unwrap();
         assert_eq!(broker.market_instead_of_limit, 0, "zero stops makes this a real pending");
         assert_eq!(broker.on_tape_quote(current, 11), (if enabled { 0 } else { 1 }, 0));

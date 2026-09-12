@@ -459,6 +459,16 @@ impl Mt5Bridge {
         comment::encode(&self.tag, basket, level, toucher, note)
     }
 
+    fn pending_comment(&mut self, r: &PendingReq) -> BResult<String> {
+        if !r.is_topup { return Ok(self.ordered_comment(r.basket,r.level,r.is_toucher,&r.comment)); }
+        let previous = *self.local_order_sequences.get(&r.basket).unwrap_or(&0);
+        let sequence = previous.checked_add(1).ok_or(BrokerError::Rejected)?;
+        let text = comment::encode_ordered_with_topup(&self.tag,r.basket,r.level,r.is_toucher,
+            true,sequence,&r.comment).ok_or(BrokerError::Rejected)?;
+        self.local_order_sequences.insert(r.basket,sequence);
+        Ok(text)
+    }
+
     fn order_position_snapshot(&mut self, raw: &mut [RawPosition], only_new: bool) {
         for row in raw.iter_mut() {
             if !self.is_ours(row.magic, &row.symbol) { continue; }
@@ -1350,7 +1360,7 @@ impl Mt5Bridge {
                 frozen: old.map(|o| o.frozen).unwrap_or(false),
                 is_toucher: old.map(|o| o.is_toucher).unwrap_or(tg.is_toucher),
                 comment: r.comment.clone(),
-                is_topup: false,
+                is_topup: old.is_some_and(|o| o.is_topup) || tg.is_topup,
             });
         }
         self.pendings = fresh;
@@ -1461,7 +1471,7 @@ impl Mt5Bridge {
                 frozen: false,
                 is_toucher: tg.is_toucher,
                 comment: r.comment.clone(),
-                is_topup: false,
+                is_topup: tg.is_topup,
             });
             rep.pendings += 1;
         }
@@ -1727,6 +1737,20 @@ impl Mt5Bridge {
                 Ok(v) => {
                     self.operation_response("response_received", Some(&v), v.get("retcode").and_then(Value::as_i64), Outcome::Acknowledged);
                     return Ok(v);
+                }
+                Err(CallError::Broker(e)) if errors::is_execution_unknown(e.code) => {
+                    // These are broker/SDK responses about an unresolved send,
+                    // not proof that no order was accepted. Never retry OPEN.
+                    self.operation_response("remote_execution_unknown",None,Some(e.code),Outcome::TransportUnknown);
+                    self.last_trade_outcome_unknown = true;
+                    self.unknown_sends += 1;
+                    self.last_state = Instant::now() - self.state_interval;
+                    if self.tr.config().close_receipt_reconcile
+                        && matches!(cmd,"place_pending"|"close_position"|"close_partial"|"cancel_pending") {
+                        self.receipt_fault(format!("nieznany wynik {cmd}: retcode={}; wymagane potwierdzenie wykonania przed nowymi wejściami",e.code));
+                    }
+                    warn!(cmd,code=e.code,name=errors::name(e.code),"MT5: wynik wykonania NIEZNANY; bez ponowienia");
+                    return Err(BrokerError::Rejected);
                 }
                 // NOT_INITIALIZED can be raised by the sidecar's account
                 // recheck AFTER order_send. Preserve the old unknown-outcome
@@ -2168,6 +2192,12 @@ impl Broker for Mt5Bridge {
             }
         };
         if crossed {
+            // This request was sized for its normalized pending price. A
+            // last-moment market conversion would bypass that risk decision.
+            // Legacy requests retain the existing fallback explicitly.
+            if r.no_market_fallback {
+                return Err(BrokerError::InvalidPrice);
+            }
             self.market_instead_of_limit += 1;
             return self.open_market(OrderReq {
                 side,
@@ -2181,7 +2211,7 @@ impl Broker for Mt5Bridge {
             });
         }
 
-        let cm = self.ordered_comment(r.basket, r.level, r.is_toucher, &r.comment);
+        let cm = self.pending_comment(&r)?;
         let args = json!({
             "symbol": self.sym.symbol,
             "kind": pending_kind_code(r.kind),
@@ -2214,7 +2244,7 @@ impl Broker for Mt5Bridge {
             frozen: false,
             is_toucher: r.is_toucher,
             comment: cm,
-            is_topup: false,
+            is_topup: r.is_topup,
         });
         Ok(res.order)
     }

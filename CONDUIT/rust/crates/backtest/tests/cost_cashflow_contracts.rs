@@ -43,7 +43,7 @@ fn legacy_pending_commission_is_charged_only_on_fill_but_never_allocated_to_clos
     b.on_quote(q(T, 101.0));
     b.place_pending(PendingReq { kind: PendingKind::BuyLimit, volume: 0.07,
         price: 100.0, sl: None, tp: None, basket: Some(1), level: 0,
-        is_toucher: false, is_topup: false, comment: "COST-CONTRACT".into() }).unwrap();
+        is_toucher: false, is_topup: false,no_market_fallback:false, comment: "COST-CONTRACT".into() }).unwrap();
     near(b.account().balance, 1000.0);
     b.on_quote(q(T + 1000, 99.7));
     assert_eq!(b.positions().len(), 1);

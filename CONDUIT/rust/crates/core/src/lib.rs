@@ -32,6 +32,8 @@ pub mod telegram_ingress;
 pub mod types;
 pub mod volume_contract;
 pub mod profit_budget;
+pub mod lot_growth;
+pub mod lot_context;
 /// Arytmetyka wielu silników na jednym rachunku: rozłączne numery koszyków,
 /// obciążenie pozostałych silników i podział ustawień na rachunkowe i handlowe.
 /// Właściciel: zespół ROUTING.

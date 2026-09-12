@@ -889,6 +889,9 @@ pub struct Stats {
     /// jest nieodróżnialne od „(a) nie miał czego kasować".
     #[serde(default)]
     pub expo_niedosyt: u32,
+    /// Neutral sizing observations/fallbacks, never counted as rejected orders.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lot_sizing_diagnostics: std::collections::BTreeMap<String,u64>,
     pub balance: f64,
     #[serde(default)]
     pub credit: f64,
@@ -938,6 +941,7 @@ impl Stats {
             expo_lotow: 0.0,
             expo_poz_domkniete: 0,
             expo_niedosyt: 0,
+            lot_sizing_diagnostics: std::collections::BTreeMap::new(),
             balance,
             credit: 0.0,
             equity: balance,

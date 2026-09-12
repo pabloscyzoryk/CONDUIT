@@ -107,6 +107,10 @@ pub fn classify(code: i64) -> BrokerError {
 /// `INVALID_FILL` jest ponawialny, ale w sposób szczególny: sidecar sam
 /// przełącza tryb wypełnienia i próbuje jeszcze raz, więc do Rusta zwykle
 /// w ogóle nie dolatuje.
+pub fn is_execution_unknown(code: i64) -> bool {
+    matches!(code,retcode::TIMEOUT | retcode::CONNECTION | retcode::ERROR)
+}
+
 pub fn is_retryable(code: i64) -> bool {
     use retcode as r;
     matches!(
@@ -114,9 +118,7 @@ pub fn is_retryable(code: i64) -> bool {
         r::REQUOTE
             | r::PRICE_CHANGED
             | r::PRICE_OFF
-            | r::TIMEOUT
             | r::TOO_MANY_REQUESTS
-            | r::CONNECTION
             | r::ORDER_CHANGED
             | r::INVALID_FILL
             | r::FROZEN
@@ -250,7 +252,10 @@ mod tests {
         assert!(is_retryable(retcode::REQUOTE));
         assert!(is_retryable(retcode::PRICE_CHANGED));
         assert!(is_retryable(retcode::PRICE_OFF));
-        assert!(is_retryable(retcode::TIMEOUT));
+        for code in [retcode::TIMEOUT,retcode::CONNECTION,retcode::ERROR] {
+            assert!(is_execution_unknown(code));
+            assert!(!is_retryable(code));
+        }
         assert!(!is_retryable(retcode::INVALID_STOPS));
         assert!(!is_retryable(retcode::NO_MONEY));
         assert!(!is_retryable(retcode::MARKET_CLOSED));

@@ -85,7 +85,7 @@ fn cache_and_wire_share_broker_precision_for_all_four_price_operations() {
 
     let pending = fixture.bridge.place_pending(PendingReq { kind:PendingKind::BuyLimit,
         price:2095.126, volume:0.01, sl:Some(2085.126), tp:Some(2115.124), basket:Some(2),
-        level:0, is_toucher:false, is_topup:false, comment:"synthetic".into() }).unwrap();
+        level:0, is_toucher:false, is_topup:false,no_market_fallback:false, comment:"synthetic".into() }).unwrap();
     let order = &fixture.bridge.pendings()[0];
     assert_eq!((order.price, order.sl, order.tp), (2095.13, Some(2085.13), Some(2115.12)));
     fixture.bridge.modify_pending(pending, 2096.126, Some(2086.126), Some(2116.124)).unwrap();

@@ -36,6 +36,25 @@ const { ENGINE_TEMPLATES } = load('@/i18n/engineTemplates');
 const { presentEngineText } = load('@/i18n/enginePresentation');
 const { tSilnik } = load('@/i18n/silnik');
 
+test('lot growth and causal context holds preserve exact reason codes in PL/EN, observations are not rejections', () => {
+  const sources = ['../rust/crates/core/src/engine.rs', '../rust/crates/core/src/engine/lot_context_execution.rs']
+    .map(p => readFileSync(resolve(root, p), 'utf8')).join('\n');
+  for (const title of ['LOT GROWTH HOLD', 'LOT CONTEXT HOLD']) {
+    assert.ok(sources.includes(`${title}: {reason:?}; new order withheld`));
+    const reason = 'MissingOrInvalidInput { axis: 4, field: "stop_distance" }';
+    const raw = `${title}: ${reason}; new order withheld`;
+    i18n.setLanguage('pl'); const pl = tSilnik(raw);
+    assert.notEqual(pl, raw); assert.ok(pl.includes(reason)); assert.ok(pl.endsWith('nowe zlecenie wstrzymane'));
+    i18n.setLanguage('en'); assert.equal(tSilnik(pl), raw);
+  }
+  const observation = 'LOT CONTEXT: causal pre-send sizing observation';
+  assert.ok(sources.includes(observation));
+  i18n.setLanguage('pl'); const pl = tSilnik(observation);
+  assert.equal(pl, 'KONTEKST LOTA: obserwacja wielkości pozycji przed wysłaniem zlecenia');
+  assert.doesNotMatch(pl, /BLOKADA|odrzucone|wstrzymane/);
+  i18n.setLanguage('en'); assert.equal(tSilnik(pl), observation);
+});
+
 test('equity floor wording allows old pending fills and conditional recovery; percent lot is not SL risk', () => {
   const source = readFileSync(resolve(root, '../rust/crates/core/src/settings.rs'), 'utf8');
   const literal = source.match(/"(`equity_floor_pct = \{\}`[^"\n]*(?:\\\r?\n[^"\n]*)*)"/);
@@ -220,6 +239,33 @@ test('execution confirmation messages distinguish temporary waiting from review 
   ]) {
     assert.equal(presentEngineText(pl, 'en'), en);
     assert.equal(presentEngineText(en, 'pl'), pl);
+  }
+});
+
+test('unknown broker outcomes preserve command, retcode and transport detail in both languages', () => {
+  const source = readFileSync(resolve(root, '../rust/crates/mt5/src/bridge.rs'), 'utf8').split('#[cfg(test)]')[0];
+  const literals = [...source.matchAll(/receipt_fault\(format!\("(nieznany wynik[^"\n]+)"/g)].map(m => m[1]);
+  assert.equal(literals.length, 3, 'cover all current production unknown-outcome variants');
+  for (const command of ['place_pending', 'close_position', 'close_partial', 'cancel_pending']) {
+    for (const [suffix, english] of [
+      ['retcode=10011; wymagane potwierdzenie wykonania przed nowymi wejściami',
+        'retcode=10011; execution confirmation required before new entries'],
+      ['timeout po wysłaniu; odczyt stanu nie zastępuje potwierdzenia wykonania',
+        'timeout after dispatch; a state read does not replace execution confirmation'],
+      ['bridge disconnected: EOF (10031); wymagane potwierdzenie wykonania przed nowymi wejściami',
+        'bridge disconnected: EOF (10031); execution confirmation required before new entries'],
+    ]) {
+      const pl = `nieznany wynik ${command}: ${suffix}`;
+      const en = `unknown outcome of ${command}: ${english}`;
+      assert.equal(presentEngineText(pl, 'en'), en);
+      assert.equal(presentEngineText(en, 'pl'), pl);
+    }
+  }
+  for (const literal of literals) {
+    const raw = literal.replace('{cmd}', 'close_partial').replace('{}', '10012').replace('{e}', 'EOF');
+    const english = presentEngineText(raw, 'en');
+    assert.ok(english.startsWith('unknown outcome of close_partial: '), raw);
+    assert.equal(presentEngineText(english, 'pl'), raw);
   }
 });
 

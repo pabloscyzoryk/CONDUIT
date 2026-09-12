@@ -5704,6 +5704,7 @@ fn wykonaj_panel(
                             is_toucher: false,
                             comment: "panel".into(),
                             is_topup: false,
+                            no_market_fallback: false,
                         })
                         .map(|t| format!("wystawiono {rodzaj:?} #{t} · {volume} lot @ {p:.2}"))
                         .map_err(|e| format!("{rodzaj:?} @ {p:.2}: {}", opis_bledu(e)))

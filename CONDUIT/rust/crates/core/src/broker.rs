@@ -77,8 +77,15 @@ pub struct PendingReq {
     pub is_toucher: bool,
     /// patrz `PendingOrder::is_topup`
     pub is_topup: bool,
+    /// The caller sized this request at its pending price. An adapter must
+    /// reject a crossed request instead of opening at an unpriced market entry.
+    /// Absent in legacy traces and false requests to preserve their exact wire shape.
+    #[serde(default, skip_serializing_if = "pending_fallback_allowed")]
+    pub no_market_fallback: bool,
     pub comment: String,
 }
+
+fn pending_fallback_allowed(no_market_fallback: &bool) -> bool { !*no_market_fallback }
 
 pub trait Broker {
     /// Authoritative closed BID M1 bars after the caller's decision cursor.

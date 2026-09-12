@@ -1160,6 +1160,7 @@ pub fn run_with_progress(
                     // nie doby. Bez przeniesienia zrzut pokazywałby wyłącznie
                     // ostatni dzień — a ten bywa pusty.
                     let odrz = std::mem::take(&mut engine.odrzuty);
+                    let sizing_diagnostics = std::mem::take(&mut engine.stats.lot_sizing_diagnostics);
                     // Rejestr odrzuconych WEJŚĆ (Pakiet E3) jedzie tą samą
                     // drogą i z tego samego powodu: wycena filtrów ma dotyczyć
                     // całego przebiegu, nie ostatniej doby.
@@ -1238,6 +1239,7 @@ pub fn run_with_progress(
                     engine.tryb_auto_ea = auto_ea;
                     if let Some(saved)=t100.as_ref() {let _=engine.restore_t100_checkpoint(Some(saved));}
                     engine.odrzuty = odrz;
+                    engine.stats.lot_sizing_diagnostics = sizing_diagnostics;
                     engine.odrzucone_wejscia = odrz_w;
                     engine.stats.relot_up_zdarzen = rl.0;
                     engine.stats.relot_down_zdarzen = rl.1;
@@ -2077,6 +2079,9 @@ pub fn run_with_progress(
         for (k, v) in s.engine.odrzuty.iter() {
             *metrics.odrzuty.entry(k.clone()).or_insert(0) += *v;
         }
+        for (key, count) in &s.engine.stats.lot_sizing_diagnostics {
+            *metrics.lot_sizing_diagnostics.entry(key.clone()).or_insert(0) += count;
+        }
         metrics.relot_up_zdarzen += s.engine.stats.relot_up_zdarzen;
         metrics.relot_down_zdarzen += s.engine.stats.relot_down_zdarzen;
         metrics.relot_up_lotow += s.engine.stats.relot_up_lotow;
@@ -2786,6 +2791,7 @@ fn przelacz_szczebel(
                 let entry_sources=engine.export_entry_source_memory();
                 let hist = engine.market_history();
                 let odrz = std::mem::take(&mut engine.odrzuty);
+                let sizing_diagnostics = std::mem::take(&mut engine.stats.lot_sizing_diagnostics);
                 // …i rejestr odrzuconych wejść (Pakiet E3) — patrz bliźniacze
                 // miejsce w resecie dobowym wyżej.
                 let odrz_w = std::mem::take(&mut engine.odrzucone_wejscia);
@@ -2839,6 +2845,7 @@ fn przelacz_szczebel(
                 engine.tryb_auto_ea = auto_ea;
                 if let Some(saved)=t100.as_ref() {let _=engine.restore_t100_checkpoint(Some(saved));}
                 engine.odrzuty = odrz;
+                engine.stats.lot_sizing_diagnostics = sizing_diagnostics;
                 engine.odrzucone_wejscia = odrz_w;
                 engine.stats.relot_up_zdarzen = rl.0;
                 engine.stats.relot_down_zdarzen = rl.1;

@@ -15,6 +15,16 @@
 
 import type { Settings } from "@/types";
 import type { GrupaEn } from "./schema";
+import { lotGrowthIssue } from "@/data/settingsSchema";
+
+const lotGrowthWarningsEn = {
+  mode: "Unknown lot curve mode. Select a supported value; imported settings are not repaired automatically.",
+  allocation: "Unknown lot allocation. Select a supported value; imported settings are not repaired automatically.",
+  base: "Required: base lot ≥ 0.01, reference capital > 0 and basket budget between 0 and 100%. Values must be finite.",
+  curve: "Invalid active curve parameters: power (0, 1], rate ≥ 0, or capital multiple > 1 and lot multiple ≥ 1.",
+  strength: "Each attenuation strength must be a finite number from 0 to 2. Invalid configuration blocks new entries.",
+  engine: "GOD-X7 lot curves are not supported by T-100. This combination blocks new entries.",
+};
 
 const gapTrapEn = (s: Settings) =>
   s.trail_mode === "gap" && s.runner_trail && s.runner_trail_gap >= s.runner_trail_start
@@ -22,6 +32,42 @@ const gapTrapEn = (s: Settings) =>
     : null;
 
 export const SCHEMA_EN: Record<string, GrupaEn> = {
+  lotgrowth: {
+    title: "Lot curve and position allocation",
+    desc: "Optional lot sizing for each entry position. Allocation and attenuation scale the surplus above the legal position minimum m: m + (volume−m) × multiplier. They never raise a volume below m. Signal rules, SL/TP and unit counts stay unchanged; existing limits still apply. It guarantees neither profit nor a drawdown limit.",
+    fields: {
+      lot_growth_mode: { label: "LOT CURVE",
+        hint: "Off preserves the existing GOD-X7 lot settings. An enabled curve replaces the nominal fixed/percentage lot and legacy lot-scaling without erasing their configuration. Capital C uses the selected lot capital basis. Final volume is floored to the broker step; below the minimum (often 0.01 lots), a new order may be rejected.",
+        options: { Off: "Off — existing lot sizing", Power: "Power curve", ThresholdLinear: "Linear above a threshold", GeometricSteps: "Geometric steps" },
+        warn: s => { const issue = lotGrowthIssue(s); return issue ? lotGrowthWarningsEn[issue] : null; } },
+      lot_growth_reference_lot: { label: "Base lot L0 — each position", hint: "Nominal lot before allocation and other multipliers. For C ≤ C0, the curve stays at L0; this is not a guaranteed minimum final volume." },
+      lot_growth_reference_balance: { label: "Reference capital C0", hint: "Positive curve anchor, independent of the initial deposit. C is the current lot capital basis selected in the account settings." },
+      lot_growth_power: { label: "Growth power p", hint: "L0 × max(1, C/C0)^p. Requires 0 < p ≤ 1. A power below 1 slows lot growth relative to capital." },
+      lot_growth_rate_pct: { label: "Rate above the threshold", hint: "L0 + max(0, C−C0) × rate/10000. For example, rate 0.35 adds 0.035 lots per $1000 above C0. This is a lot coefficient, not a percentage of SL risk. 0 means no increase above L0." },
+      lot_growth_capital_multiple: { label: "Capital multiple per step", hint: "Must exceed 1. Number of steps = floor(log(max(1, C/C0)) / log(capital multiple))." },
+      lot_growth_lot_multiple: { label: "Lot multiple per step", hint: "Lot = L0 × lot multiple^number of steps. 1 keeps L0. Crossing a threshold changes the lot in a discrete step." },
+      lot_growth_allocation: { label: "LOT ALLOCATION FOR EACH POSITION",
+        hint: "A multiplier in [0.5, 1.5] scales each position's lot surplus above minimum m; one lot is not divided across layers. m includes strategy and broker minima and the volume step. A minimum position cannot be reduced further without skipping entry. Distances use the effective SL and the accepted zone midpoint as reference. Deeper means lower for BUY and higher for SELL. Inapplicable geometry gives an explicit Uniform fallback; invalid data blocks entry.",
+        options: { Uniform: "Uniform — multiplier 1", EqualSLRisk: "By distance to SL", Depth: "By depth within the zone", EqualSLRiskDepth: "SL distance and depth", ExposureAwareRisk: "SL distance and basket load" } },
+      lot_growth_basket_risk_pct: { label: "Additional basket risk budget (0 = off)", hint: "Before a new order, caps total basket risk at this percentage of equity: positions from current price to SL, pending orders from entry to SL. May reduce or reject new volume, including when the budget cannot cover the minimum. It does not close existing positions and is not a continuous DD limit. 0 disables only this additional budget." },
+    },
+  },
+  lotcontext: {
+    title: "Lot attenuation from current conditions",
+    desc: "Applies only with an enabled lot curve. Each strength is 0–2: 0 disables its axis; larger values reduce the lot surplus above the legal position minimum more. Each axis gives max(0.25, 1/(1 + strength × stress)); the smallest surplus multiplier applies, not their product. The minimum remains unless a final budget or normalization rejects entry. A missing required observation blocks a new entry. This is not a DD guarantee.",
+    fields: {
+      lot_growth_equity_stress_strength: { label: "Floating loss: equity versus balance", hint: "Stress = max(0, 1−equity/balance) / 0.10. Equity 10% below balance at strength 1 gives multiplier 0.5. Floating profit does not increase the lot." },
+      lot_growth_portfolio_load_strength: { label: "Portfolio risk to SL", hint: "Stress = current portfolio risk to SL / (equity × 0.20). Risk of 20% of equity at strength 1 gives multiplier 0.5. This adjusts the lot; it is not a new risk limit." },
+      lot_growth_direction_load_strength: { label: "Risk to SL in the same direction", hint: "Stress = risk to SL of positions and orders in the new entry direction / (equity × 0.10). At 10% of equity and strength 1, the multiplier is 0.5." },
+      lot_growth_basket_count_strength: { label: "Active basket count", hint: "Stress = max(0, active baskets−1) / 3. Four baskets at strength 1 give multiplier 0.5. This does not change the basket count limit." },
+      lot_growth_spread_stress_strength: { label: "Spread relative to SL distance", hint: "Stress = spread / (entry-to-SL distance × 0.05). Spread equal to 5% of SL distance at strength 1 gives multiplier 0.5. This is not an additional signal filter." },
+      lot_growth_tp1_deficit_strength: { label: "TP1 reward-to-SL deficit", hint: "Stress = max(0, 1−signed entry-to-TP1 distance / entry-to-SL distance). Uses TP1 from the accepted signal, without future hits. A ratio of at least 1 does not reduce the lot." },
+      lot_growth_stop_width_strength: { label: "SL distance relative to zone width", hint: "Stress = max(0, entry-to-SL distance / accepted zone width−1). A distance of two zone widths at strength 1 gives multiplier 0.5. Zero or unknown width is not zero risk." },
+      lot_growth_age_decay_strength: { label: "Basket age", hint: "Stress = time since basket creation / 24 hours. After one day at strength 1, the multiplier is 0.5. This does not expire the signal or change order validity." },
+      lot_growth_rearm_decay_strength: { label: "Completed rearm count", hint: "Stress = already completed rearm batches / 2. Two batches at strength 1 give multiplier 0.5. This does not change rearm permission or its limit." },
+      lot_growth_day_dd_strength: { label: "Equity decline from day start", hint: "Stress = max(0, 1−equity/day-start equity) / 0.10. A 10% decline at strength 1 gives multiplier 0.5. Uses the day anchor, not a later peak; it neither closes positions nor adds a full-day lockout." },
+    },
+  },
   t100: { title: "T-100 · experimental", desc: "Autonomous policy for the selected preset. Its enable switch applies independently of application mode.", fields: {
     t100: { label: "T-100 — autonomous entries, exits and Synergy context", hint: "Experimental configuration: entry rules, risk, SL/TP, volatility, Synergy context and UTC session." },
   } },

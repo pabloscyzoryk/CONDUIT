@@ -15,6 +15,29 @@ from pathlib import Path
 
 from mapping import MAP, ENUMY, MOST_ONLY, BROKER_SPEC_FIELDS
 
+LOT_GROWTH_DEFAULTS = {
+    "lot_growth_allocation": "Uniform",
+    "lot_growth_equity_stress_strength": 0.0,
+    "lot_growth_portfolio_load_strength": 0.0,
+    "lot_growth_direction_load_strength": 0.0,
+    "lot_growth_basket_count_strength": 0.0,
+    "lot_growth_spread_stress_strength": 0.0,
+    "lot_growth_tp1_deficit_strength": 0.0,
+    "lot_growth_stop_width_strength": 0.0,
+    "lot_growth_age_decay_strength": 0.0,
+    "lot_growth_rearm_decay_strength": 0.0,
+    "lot_growth_day_dd_strength": 0.0,
+
+    "lot_growth_mode": "Off",
+    "lot_growth_reference_lot": 0.01,
+    "lot_growth_reference_balance": 1000.0,
+    "lot_growth_power": 0.7,
+    "lot_growth_rate_pct": 0.35,
+    "lot_growth_capital_multiple": 2.0,
+    "lot_growth_lot_multiple": 1.5,
+    "lot_growth_basket_risk_pct": 0.0,
+}
+
 RUNTIME = {
     "mt5_autostart", "mt5_watchdog", "mt5_terminal_path", "mt5_retry_attempts",
     "mt5_retry_delay_s", "mt5_restart_after", "mt5_health_interval_s",
@@ -194,6 +217,11 @@ def validate_bridge_capacity(bridge: Path, settings: dict, source: str) -> dict:
 def build(defaults: dict, explicit: dict, source: str, bridge: str,
           available_inputs: set[str] | None = None) -> tuple[dict, dict]:
     settings = {**defaults, **explicit}
+    old_lot_growth = not any(name.startswith("lot_growth_") for name in settings)
+    if old_lot_growth:
+        # An old binary cannot turn on a newly introduced execution axis.
+        # A partially supplied group is deliberately not completed this way.
+        settings.update(LOT_GROWTH_DEFAULTS)
     available = available_inputs if available_inputs is not None else set(re.findall(r"^\s*input\s+\w+\s+(In_\w+)", source, re.M))
     parameters = {"In_Plik": bridge, "In_Magic": 770077,
                   "In_MostRequireSchema2": True, "In_ResetTpOnTargetEdit": True}
@@ -222,15 +250,39 @@ def build(defaults: dict, explicit: dict, source: str, bridge: str,
         if convert is bool and not isinstance(value, bool):
             errors.append({"field": name, "reason": "boolean_type_required"})
             continue
+        if name.startswith("lot_growth_") and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            errors.append({"field": name, "reason": "finite_numeric_type_required"})
+            continue
         parameters[target] = convert(value)
-        states[name] = "mapped"
+        states[name] = ("older_binary_feature_absent_disabled_in_ea"
+                        if old_lot_growth and name.startswith("lot_growth_") else "mapped")
     for name, (target, values) in ENUMY.items():
         value = settings.get(name)
-        if target not in available or value not in values:
+        if target not in available or not isinstance(value, str) or value not in values:
             errors.append({"field": name, "reason": "missing_or_unsupported_enum"})
             continue
         parameters[target] = values[value]
-        states[name] = "mapped"
+        states[name] = ("older_binary_feature_absent_disabled_in_ea"
+                        if old_lot_growth and name.startswith("lot_growth_") else "mapped")
+
+    if settings.get("lot_growth_mode") != "Off":
+        domains = {"lot_growth_reference_lot": lambda v: v >= .01,
+                   "lot_growth_reference_balance": lambda v: v > 0,
+                   "lot_growth_basket_risk_pct": lambda v: 0 <= v <= 100}
+        if settings.get("lot_growth_mode") == "Power":
+            domains["lot_growth_power"] = lambda v: 0 < v <= 1
+        elif settings.get("lot_growth_mode") == "ThresholdLinear":
+            domains["lot_growth_rate_pct"] = lambda v: v >= 0
+        elif settings.get("lot_growth_mode") == "GeometricSteps":
+            domains.update({"lot_growth_capital_multiple": lambda v: v > 1,
+                            "lot_growth_lot_multiple": lambda v: v >= 1})
+        domains.update({name: lambda v: 0 <= v <= 2 for name in LOT_GROWTH_DEFAULTS if name.endswith("_strength")})
+        for name, check in domains.items():
+            value = settings.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and not check(value):
+                errors.append({"field": name, "reason": "invalid_active_lot_growth_domain"})
 
     for name, value in settings.items():
         if name in states:

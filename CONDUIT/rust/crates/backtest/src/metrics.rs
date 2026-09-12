@@ -341,6 +341,9 @@ pub struct Metrics {
     pub rejected_pending_stops: u64,
     /// ile razy bramka wejść odrzuciła sygnał, wg kodu powodu
     pub odrzuty: std::collections::BTreeMap<String, u64>,
+    /// Neutral sizing observations, separate from actual rejected submissions.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lot_sizing_diagnostics: std::collections::BTreeMap<String, u64>,
 
     pub relot_up_zdarzen: u32,
     /// ile razy szczebel był ZA DUŻY i relot go zmniejszył

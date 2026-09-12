@@ -274,7 +274,8 @@ pub const POLA_RACHUNKU: &[&str] = &[
 // day_trail_basis is strategy-owned, like the existing day trail percentages.
 // Profit budget arm/keep/deploy are per-strategy risk axes, like day trail.
 // Nested t100 is strategy configuration owned by its preset, not account overlay.
-pub const LICZBA_POL_USTAWIEN: usize = 521;
+// The 19 lot-growth/allocation/context fields belong to the strategy preset.
+pub const LICZBA_POL_USTAWIEN: usize = 540;
 
 /// Składa ustawienia dla JEDNEGO formatu.
 ///
@@ -361,6 +362,21 @@ mod testy {
         let mut account=crate::Settings::default();account.t100.risk_pct=0.5;
         assert!(!POLA_RACHUNKU.contains(&"t100"));
         assert_eq!(ustawienia_formatu(&preset,&account).t100,preset.t100);
+    }
+
+    #[test]
+    fn lot_growth_allocation_and_context_are_preset_owned() {
+        let mut preset=crate::Settings::default();
+        preset.lot_growth_mode=crate::lot_growth::LotGrowthMode::Power;
+        preset.lot_growth_allocation=crate::lot_growth::LotGrowthAllocation::Depth;
+        preset.lot_growth_day_dd_strength=1.5;
+        let account=crate::Settings::default();
+        let merged=ustawienia_formatu(&preset,&account);
+        for key in serde_json::to_value(&preset).unwrap().as_object().unwrap().keys()
+            .filter(|key|key.starts_with("lot_growth_")) {
+            assert!(!POLA_RACHUNKU.contains(&key.as_str()));
+            assert_eq!(serde_json::to_value(&merged).unwrap()[key],serde_json::to_value(&preset).unwrap()[key]);
+        }
     }
 
     #[test]

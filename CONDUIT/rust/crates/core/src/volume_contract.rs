@@ -87,6 +87,19 @@ pub fn volume_epsilon(value:f64,step:f64)->f64 {
     16.0*f64::EPSILON*value.abs().max(step.abs()).max(1.0)
 }
 
+/// First legal broker step satisfying both minimums. This describes the
+/// lattice; it never promotes a requested or budget-limited order to that lot.
+pub fn minimum_legal_open_volume(spec:VolumeSpec,limits:StrategyVolumeLimits)->Result<f64,VolumeError> {
+    spec.validate()?;
+    let (user_min,user_max)=limits.bounds()?;
+    let low=units(user_min.max(spec.minimum),spec.step,true)?;
+    let high=units(user_max.min(spec.maximum),spec.step,false)?;
+    if low<1.0 || low>high {return Err(VolumeError::ConflictingBounds);}
+    let volume=low*spec.step;
+    if !positive(volume) {return Err(VolumeError::UnrepresentableUnits);}
+    Ok(volume)
+}
+
 /// Normalize an opening request, after every strategy multiplier.
 /// Never increases requested volume or any cap except roundoff tolerance.
 pub fn normalize_open_volume(requested:f64, spec:VolumeSpec, limits:StrategyVolumeLimits)

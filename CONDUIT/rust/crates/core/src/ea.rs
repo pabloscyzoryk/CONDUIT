@@ -3368,6 +3368,13 @@ impl EaRdzen {
         opis: &str,
         r: &mut Rachuba,
     ) {
+        if crate::lot_growth::enabled(cfg) {
+            // This direct EA-BETA sender bypasses Engine's basket allocation.
+            // Keep exits active, but never claim support for a mixed mode.
+            eprintln!("[EA-BETA][LOT GROWTH HOLD] unsupported combination; new entry rejected");
+            r.odmowa_brokera(&mut self.bilans,&mut self.bilans_decyzji);
+            return;
+        }
         if self.continuation_entry_hold {
             r.odmowa_brokera(&mut self.bilans,&mut self.bilans_decyzji);
             return;
@@ -3484,6 +3491,7 @@ impl EaRdzen {
                     level,
                     is_toucher: false,
                     is_topup: false,
+                    no_market_fallback: false,
                     comment: opis.to_string(),
                 }) {
                     Ok(_) => r.ok += 1,
@@ -5315,6 +5323,16 @@ mod testy {
 mod profit_budget_send_tests {
     use super::*;
     use crate::profit_budget::tests::{broker,cfg,anchor};
+    #[test]
+    fn lot_growth_ea_beta_direct_sender_is_fail_closed() {
+        for limit in [None,Some(3990.0)] {
+            let mut c=cfg();c.lot_growth_mode=crate::lot_growth::LotGrowthMode::Power;
+            let mut b=broker();let q=b.quote();let mut ea=EaRdzen::default();
+            let mut r=Rachuba::default();
+            ea.zloz_wejscie(&c,&mut b,&q,0.0,Side::Buy,0.01,limit,Some(3980.0),None,0,"synthetic",&mut r);
+            assert_eq!(b.sends,0);assert_eq!(r.blad,1);
+        }
+    }
     #[test]
     fn profit_budget_ea_beta_market_and_pending_sends_use_shared_reserve() {
         for limit in [None,Some(3990.0)] {

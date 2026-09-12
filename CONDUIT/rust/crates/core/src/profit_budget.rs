@@ -123,10 +123,12 @@ pub(crate) mod tests {
         pub q:Quote,pub equity:f64,pub positions:Vec<Position>,pub pendings:Vec<PendingOrder>,
         pub hidden_positions:Vec<Position>,pub hidden_pendings:Vec<PendingOrder>,
         pub minimum:f64,pub step:f64,pub maximum:f64,pub sends:usize,pub price_digits:Option<i32>,
+        pub authoritative_cancel:bool,pub barrier:crate::broker::ReceiptBarrier,
     }
     pub(crate) fn broker()->TestBroker {TestBroker {q:Quote{ts:1_700_000_000_000,bid:4000.0,ask:4000.2},
         equity:700.0,positions:vec![],pendings:vec![],hidden_positions:vec![],hidden_pendings:vec![],
-        minimum:0.01,step:0.01,maximum:100.0,sends:0,price_digits:None}}
+        minimum:0.01,step:0.01,maximum:100.0,sends:0,price_digits:None,
+        authoritative_cancel:false,barrier:crate::broker::ReceiptBarrier::Clear}}
     pub(crate) fn cfg()->Settings {Settings{profit_budget_arm_pct:10.0,profit_budget_keep_pct:50.0,
         profit_budget_deploy_pct:100.0,max_portfolio_risk_pct:0.0,lot_min:0.01,lot_max:0.0,
         risk_per_basket_pct:0.0,..Settings::default()}}
@@ -142,6 +144,8 @@ pub(crate) mod tests {
             basket:Some(id),level:0,frozen:false,is_toucher:false,is_topup:false,comment:String::new()}
     }
     impl Broker for TestBroker {
+        fn pending_cancel_snapshot_authoritative(&self)->bool{self.authoritative_cancel}
+        fn receipt_barrier(&self)->crate::broker::ReceiptBarrier{self.barrier}
         fn quote(&self)->Quote{self.q}
         fn account(&self)->Account{Account{balance:self.equity,equity:self.equity,margin:0.0,
             free_margin:self.equity,leverage:500,credit:0.0}}
@@ -164,7 +168,7 @@ pub(crate) mod tests {
         fn place_pending(&mut self,r:PendingReq)->BResult<Ticket>{
             self.sends+=1;let ticket=self.sends as u64;
             let mut p=pending(r.basket.unwrap_or(0),r.kind.side(),r.price,r.sl,r.volume);
-            p.ticket=ticket;p.kind=r.kind;p.basket=r.basket;p.level=r.level;p.tp=r.tp;
+            p.ticket=ticket;p.kind=r.kind;p.basket=r.basket;p.level=r.level;p.tp=r.tp;p.is_topup=r.is_topup;
             self.pendings.push(p);Ok(ticket)
         }
         fn modify_position(&mut self,t:Ticket,sl:Option<Px>,tp:Option<Px>)->BResult<()>{

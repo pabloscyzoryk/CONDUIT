@@ -114,6 +114,12 @@ impl Engine {
         let mut legal=HashMap::new();
         for g in plan {
             if g.volume<=0.0 {continue;}
+            if crate::lot_growth::enabled(&self.cfg) {
+                // Keep the raw target: allocation needs the final market or
+                // clamped pending entry and must precede broker rounding.
+                legal.insert(g.level,(g.volume,g.base_units));
+                continue;
+            }
             match self.relot_legal_volume(b,g.volume) {
                 Ok(v)=>{legal.insert(g.level,(v,g.base_units));}
                 Err(VolumeError::BelowMinimum)=>{}
@@ -131,6 +137,9 @@ impl Engine {
     /// top-up. Reserve the aggregate deficit BEFORE sync plans another order.
     pub(super) fn relot_sync_addition_budget<B: Broker>(&self,b:&B,id:u32,g:&GridLevel,
         want:usize,have:usize)->(usize,f64) {
+        // Growth weights need the actual final entry price. Its target/delta
+        // calculation therefore happens at the send point, after price clamps.
+        if crate::lot_growth::enabled(&self.cfg) {return (want,g.volume);}
         let extra=want.saturating_sub(have);
         if extra==0 {return (want,g.volume);}
         let pending:f64=b.pendings().iter().filter(|p|p.basket==Some(id)&&p.level==g.level)
@@ -152,8 +161,9 @@ impl Engine {
         if b.close_receipts_pending() || self.basket_exit_pending(id) { return false; }
         let req = PendingReq { kind: proto.kind, volume, price: proto.price, sl: proto.sl,
             tp: proto.tp, basket: Some(id), level: proto.level, is_toucher: proto.is_toucher,
-            is_topup: topup, comment: proto.comment.clone() };
-        match self.place_pending_order(b, req) {
+            is_topup: topup,
+            no_market_fallback: false, comment: proto.comment.clone() };
+        match self.place_pending_order_allocated(b, req, true) {
             Ok(t) => {
                 if let Some(bk) = self.basket_mut(id) { bk.pendings.push(t); }
                 self.stats.relot_udane += 1; true
@@ -234,7 +244,13 @@ impl Engine {
                 let goal=plan.as_ref().and_then(|p|p.iter().find(|g|g.level==level));
                 let complete_level_target=if let Some(g)=goal {
                     if g.volume<=0.0 {0.0} else {
-                        match self.relot_legal_volume(b,g.volume) {
+                        let raw=if crate::lot_growth::enabled(&self.cfg) {
+                            match self.growth_allocated_volume(b,Some(id),level,orders[0].kind.side(),
+                                orders[0].price,orders[0].sl,g.volume,false) {
+                                Ok(v)=>v,Err(_)=>{self.relot_note(id,ts,"AllocationTargetUnknown");continue;}
+                            }
+                        } else {g.volume};
+                        match self.relot_legal_volume(b,raw) {
                             Ok(v)=>v*self.scaled_units(g.base_units,ts) as f64,
                             Err(VolumeError::BelowMinimum)=>0.0,
                             Err(_)=>{self.relot_note(id,ts,"InvalidTargetVolume");continue;}

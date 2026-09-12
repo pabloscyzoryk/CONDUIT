@@ -1117,7 +1117,8 @@ impl Broker for SimBroker {
         // je minął, albo leży bliżej ceny niż `stops_level`. Drugiego warunku
         // przez długi czas tu nie było i to jest dokładnie ta różnica, przez
         // którą backtest pokazywał wejście, a żywy broker zwracał `10015`.
-        // Siatką ratunkową jest wejście po rynku — tak samo jak w moście.
+        // Starsze żądania zachowują wejście po rynku. Żądanie wycenione dla
+        // pendingu może zabronić tej zamiany — tak samo jak w moście.
         let crossed = match r.kind {
             PendingKind::BuyLimit | PendingKind::SellLimit => {
                 !limit_price_is_valid(side, r.price, &self.q, self.stops_level)
@@ -1127,6 +1128,9 @@ impl Broker for SimBroker {
             }
         };
         if crossed {
+            if r.no_market_fallback {
+                return Err(BrokerError::InvalidPrice);
+            }
             self.market_instead_of_limit += 1;
             return self.open_market(OrderReq {
                 side,
@@ -1444,7 +1448,84 @@ mod tests {
             is_toucher: false,
             comment: String::new(),
             is_topup: false,
+            no_market_fallback: false,
         }
+    }
+
+    fn assert_sized_pending_boundary(kind: PendingKind, prices: [(f64, bool); 4]) {
+        fn broker() -> SimBroker {
+            let mut b = SimBroker::new(1000.0, 0.25, 7.0);
+            b.price_digits = Some(2);
+            b.on_quote(Quote { ts: 1_700_000_000_000, bid: 4000.0, ask: 4000.25 });
+            b
+        }
+        for no_market_fallback in [false, true] {
+            for (price, valid) in prices {
+                let mut b = broker();
+                let before = serde_json::to_value(b.account()).unwrap();
+                let request = PendingReq {
+                    kind, price, volume: 0.03, sl: None, tp: None,
+                    basket: Some(7), level: 2, is_toucher: false, is_topup: true,
+                    no_market_fallback, comment: "synthetic-priced-pending".into(),
+                };
+                let result = b.place_pending(request.clone());
+                if valid {
+                    let ticket = result.expect("valid pending must remain accepted for both flag states");
+                    assert_eq!(b.pendings.len(), 1);
+                    assert!(b.positions.is_empty());
+                    assert_eq!(b.market_instead_of_limit, 0);
+                    let p = &b.pendings[0];
+                    assert_eq!((p.ticket,p.kind,p.price,p.volume,p.basket,p.level,p.is_topup),
+                               (ticket,kind,price,0.03,Some(7),2,true));
+                    assert_eq!(serde_json::to_value(b.account()).unwrap(), before);
+                } else if no_market_fallback {
+                    assert_eq!(result, Err(BrokerError::InvalidPrice), "kind={kind:?} price={price}");
+                    assert!(b.positions.is_empty() && b.pendings.is_empty() && b.history.is_empty());
+                    assert_eq!(b.market_instead_of_limit, 0, "refusal is not a market substitution");
+                    assert_eq!(b.rejected_stops, 0);
+                    assert_eq!(b.rejected_pending_stops, 0);
+                    assert_eq!(b.spread_paid_usd, 0.0);
+                    assert_eq!(serde_json::to_value(b.account()).unwrap(), before,
+                               "a local price refusal must not charge costs or margin");
+                } else {
+                    // The legacy branch remains exactly the direct market path,
+                    // including execution price, ticket, commission and margin.
+                    let mut direct = broker();
+                    let expected = direct.open_market(OrderReq {
+                        side: kind.side(), volume: request.volume, sl: request.sl, tp: request.tp,
+                        basket: request.basket, level: request.level, is_toucher: request.is_toucher,
+                        comment: request.comment,
+                    });
+                    assert_eq!(result, expected);
+                    assert!(result.is_ok() && b.pendings.is_empty());
+                    assert_eq!(b.market_instead_of_limit, 1);
+                    assert_eq!(serde_json::to_value(&b.positions).unwrap(), serde_json::to_value(&direct.positions).unwrap());
+                    assert_eq!(serde_json::to_value(b.account()).unwrap(), serde_json::to_value(direct.account()).unwrap());
+                    assert_eq!(b.spread_paid_usd, direct.spread_paid_usd);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sized_pending_boundary_buy_limit() {
+        assert_sized_pending_boundary(PendingKind::BuyLimit,
+            [(3999.0,true),(4000.0,true),(4000.01,false),(4001.0,false)]);
+    }
+    #[test]
+    fn sized_pending_boundary_sell_limit() {
+        assert_sized_pending_boundary(PendingKind::SellLimit,
+            [(4001.0,true),(4000.25,true),(4000.24,false),(3999.0,false)]);
+    }
+    #[test]
+    fn sized_pending_boundary_buy_stop() {
+        assert_sized_pending_boundary(PendingKind::BuyStop,
+            [(4001.0,true),(4000.5,true),(4000.49,false),(3999.0,false)]);
+    }
+    #[test]
+    fn sized_pending_boundary_sell_stop() {
+        assert_sized_pending_boundary(PendingKind::SellStop,
+            [(3999.0,true),(3999.75,true),(3999.76,false),(4001.0,false)]);
     }
 
     #[test]
@@ -1599,6 +1680,7 @@ mod tests {
                 is_toucher: false,
                 comment: String::new(),
                 is_topup: false,
+                no_market_fallback: false,
             })
             .expect("limit powinien zostać przyjęty");
         assert!(b.pendings.iter().any(|p| p.ticket == t));
@@ -1690,6 +1772,7 @@ mod tests {
                 is_toucher: false,
                 comment: String::new(),
                 is_topup: false,
+                no_market_fallback: false,
             })
             .unwrap();
         let p = b.find_position(t).expect("powinna powstać pozycja rynkowa");
@@ -1716,6 +1799,7 @@ mod tests {
             is_toucher: false,
             comment: String::new(),
             is_topup: false,
+            no_market_fallback: false,
         })
         .unwrap();
         assert_eq!(b.pendings().len(), 1);
@@ -2152,6 +2236,7 @@ mod tests {
             level: 0,
             is_toucher: false,
             is_topup: false,
+            no_market_fallback: false,
             comment: String::new(),
         })
         .unwrap();
@@ -2248,6 +2333,7 @@ mod tests {
             is_toucher: false,
             comment: String::new(),
             is_topup: false,
+            no_market_fallback: false,
         })
         .unwrap();
         // luka: rynek przeskakuje z 4010 na 3990, czyli daleko pod limit
@@ -2276,6 +2362,7 @@ mod tests {
             is_toucher: false,
             comment: String::new(),
             is_topup: false,
+            no_market_fallback: false,
         })
         .unwrap();
         b.on_quote(q(3999.80, 0.20));
@@ -2331,6 +2418,7 @@ mod tests {
                 is_toucher: false,
                 comment: String::new(),
                 is_topup: false,
+                no_market_fallback: false,
             })
             .unwrap();
         }
@@ -2367,6 +2455,7 @@ mod tests {
                 is_toucher: false,
                 comment: String::new(),
                 is_topup: false,
+                no_market_fallback: false,
             })
             .unwrap();
         }

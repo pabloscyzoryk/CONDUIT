@@ -140,3 +140,38 @@ effective settings must remain explicit and identical in both systems.
 - Matching closed trades alone does not prove matching pending state,
   restart behavior or all broker failure paths. Preserve separate evidence
   for these contracts and do not label a one-day comparison universal parity.
+
+### Optional entry lot sizing
+
+`lot_growth_mode=Off` retains the legacy sizing path. Power, ThresholdLinear
+and GeometricSteps replace only the nominal entry lot; they use the configured
+capital basis and retain existing strategy multipliers, signal selection,
+SL/TP management and entry/exit guards. Geometric step boundaries snap only
+floating-point quotient noise within eight machine epsilons before flooring.
+
+Five allocations use the current accepted entry zone and effective broker SL.
+Special entries or unusable reference geometry explicitly fall back to Uniform.
+Ten optional causal stress axes use current account/exposure, accepted geometry,
+basket age, completed rearms and the current broker-day anchor. Strength zero
+does not require additional observations. Enabled missing data blocks the new
+order; factors use their minimum, never their product.
+
+Both allocation and stress affect only volume above the first legal broker and
+strategy minimum: `minimum + (requested - minimum) * factor`. Requests already
+below that minimum are never promoted. Relot applies this to each complete
+target leg before subtracting acknowledged exposure; a delta is not weighted
+again. Final order volume is floored to the broker step after all multipliers.
+The optional `lot_growth_basket_risk_pct` then limits remaining marked-to-SL
+risk of the same basket; zero disables this additional budget. Existing account
+and portfolio guards remain independent. Unknown sends retain an account-wide
+new-entry hold until exact acknowledged order/position adoption; this is not
+proof of every asynchronous live failure path.
+
+The mapping rejects active T-100, EA-BETA and the currently unsupported native
+`pending_relot_reconcile_target` mode. Tester-only scenarios 22, 23 and 24 cover
+formula/normalization witnesses, actual allocated sends with target/delta and
+receipt barriers, and causal stress applied only to surplus. Their explicit
+Scenarios 25 and 26 separately verify minimum-preserving initial-plan pruning
+and refusal when the final cash-risk budget cannot fund one legal lot. The
+parameter contract and observed test receipts must accompany any claim of
+native parity; declaring these inputs alone is not such evidence.

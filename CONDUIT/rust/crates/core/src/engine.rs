@@ -16,6 +16,13 @@ pub use t100_execution::T100Checkpoint;
 #[path = "relot_reconcile.rs"]
 mod relot_reconcile;
 
+#[cfg(test)]
+#[path = "lot_growth_engine_tests.rs"]
+mod lot_growth_engine_tests;
+
+#[path = "engine/lot_context_execution.rs"]
+mod lot_context_execution;
+
 #[path = "rearm_reconcile.rs"]
 mod rearm_reconcile;
 pub use rearm_reconcile::RearmReconcileState;
@@ -1536,7 +1543,7 @@ impl Engine {
 
     #[inline]
     fn wolumen_zlecenia(&self, v: f64) -> f64 {
-        if self.cfg.order_volume_contract_v2 {
+        if self.strict_open_volume() {
             return match self.volume_limits().bounds() {
                 Ok((_, maximum)) if v.is_finite() && v > 0.0 => v.min(maximum),
                 _ => 0.0,
@@ -1566,8 +1573,12 @@ impl Engine {
         }
     }
 
+    fn strict_open_volume(&self) -> bool {
+        self.cfg.order_volume_contract_v2 || crate::lot_growth::enabled(&self.cfg)
+    }
+
     fn final_open_volume<B: Broker>(&mut self, b: &B, requested: f64) -> BResult<f64> {
-        if !self.cfg.order_volume_contract_v2 {
+        if !self.strict_open_volume() {
             return Ok(requested);
         }
         let spec = crate::volume_contract::VolumeSpec {
@@ -1648,7 +1659,65 @@ impl Engine {
         }
     }
 
-    fn open_market_order<B: Broker>(&mut self, b: &mut B, mut r: OrderReq) -> BResult<Ticket> {
+    fn growth_error<B: Broker>(&mut self, b:&B, reason:crate::lot_growth::GrowthError) -> BrokerError {
+        *self.odrzuty.entry(format!("LotGrowth::{reason:?}")).or_insert(0)+=1;
+        self.log(b.quote().ts,1,format!("LOT GROWTH HOLD: {reason:?}; new order withheld"));
+        BrokerError::Rejected
+    }
+
+    /// A relot target is allocated before subtracting existing exposure. Its
+    /// resulting delta/replacement bypasses allocation only, never final caps.
+    fn growth_allocated_volume<B: Broker>(&mut self,b:&B,basket:Option<u32>,level:i32,
+        side:Side,entry:Px,sl:Option<Px>,requested:f64,already_allocated:bool)->BResult<f64> {
+        if !crate::lot_growth::enabled(&self.cfg) {return Ok(requested);}
+        if self.ea.beta().is_some() {
+            return Err(self.growth_error(b,crate::lot_growth::GrowthError::UnsupportedEngine));
+        }
+        if let Err(reason)=crate::lot_growth::ready(&self.cfg,b) {return Err(self.growth_error(b,reason));}
+        if already_allocated {return Ok(requested);}
+        let zone=basket.and_then(|id|self.basket(id)).map(|bk|(bk.entry_lo,bk.entry_hi));
+        match crate::lot_growth::allocate(&self.cfg,b,basket,level,side,entry,sl,zone,requested) {
+            Ok((volume,fallback))=>{
+                if let Some(reason)=fallback {
+                    *self.stats.lot_sizing_diagnostics.entry(format!("LotGrowth::UniformFallback::{reason:?}")).or_insert(0)+=1;
+                }
+                self.growth_context_volume(b,basket,side,entry,sl,volume)
+            }
+            Err(reason)=>Err(self.growth_error(b,reason)),
+        }
+    }
+
+    fn growth_budget_volume<B: Broker>(&mut self,b:&B,basket:Option<u32>,side:Side,
+        entry:Px,sl:Option<Px>,requested:f64)->BResult<f64> {
+        match crate::lot_growth::limit(&self.cfg,b,basket,side,entry,sl,requested) {
+            Ok(v)=>Ok(v),Err(reason)=>Err(self.growth_error(b,reason)),
+        }
+    }
+
+    fn growth_sync_volume<B: Broker>(&mut self,b:&B,id:u32,level:i32,side:Side,
+        entry:Px,sl:Option<Px>,raw:f64,want:usize,remaining_slots:usize)->BResult<(f64,bool)> {
+        if !crate::lot_growth::enabled(&self.cfg) || !self.cfg.pending_relot_reconcile_target {
+            return Ok((raw,false));
+        }
+        let weighted=self.growth_allocated_volume(b,Some(id),level,side,entry,sl,raw,false)?;
+        let per_order=self.final_open_volume(b,weighted)?;
+        let positions:f64=b.positions().iter().chain(b.ukryte_pozycje())
+            .filter(|p|p.basket==Some(id)&&p.level==level).map(|p|p.volume).sum();
+        let pending:f64=b.pendings().iter().chain(b.ukryte_zlecenia())
+            .filter(|p|p.basket==Some(id)&&p.level==level).map(|p|p.volume).sum();
+        if !positions.is_finite() || !pending.is_finite() || positions<0.0 || pending<0.0 {
+            return Err(self.growth_error(b,crate::lot_growth::GrowthError::InvalidExposure));
+        }
+        let remaining=(per_order*want as f64-positions-pending).max(0.0);
+        Ok((per_order.min(remaining/remaining_slots.max(1) as f64),true))
+    }
+
+    fn open_market_order<B: Broker>(&mut self, b: &mut B, r: OrderReq) -> BResult<Ticket> {
+        self.open_market_order_allocated(b,r,false)
+    }
+
+    fn open_market_order_allocated<B: Broker>(&mut self, b: &mut B, mut r: OrderReq,
+        already_allocated:bool) -> BResult<Ticket> {
         if self.rearm_confirmation_pending() { return Err(BrokerError::Rejected); }
         if self.continuation_entry_blocked() {
             return Err(BrokerError::Rejected);
@@ -1666,13 +1735,20 @@ impl Engine {
             }
             return Err(BrokerError::Rejected);
         }
+        r.volume = self.growth_allocated_volume(b,r.basket,r.level,r.side,b.quote().entry(r.side),r.sl,r.volume,already_allocated)?;
         r.volume = self.final_open_volume(b, r.volume)?;
         r.volume = self.profit_budget_volume(b,r.basket,r.side,b.quote().entry(r.side),r.sl,r.volume)?;
+        r.volume = self.growth_budget_volume(b,r.basket,r.side,b.quote().entry(r.side),r.sl,r.volume)?;
         self.order_submission_sequence=self.order_submission_sequence.wrapping_add(1);
         b.open_market(r)
     }
 
-    fn place_pending_order<B: Broker>(&mut self, b: &mut B, mut r: PendingReq) -> BResult<Ticket> {
+    fn place_pending_order<B: Broker>(&mut self, b: &mut B, r: PendingReq) -> BResult<Ticket> {
+        self.place_pending_order_allocated(b,r,false)
+    }
+
+    fn place_pending_order_allocated<B: Broker>(&mut self, b: &mut B, mut r: PendingReq,
+        already_allocated:bool) -> BResult<Ticket> {
         if self.rearm_confirmation_pending() { return Err(BrokerError::Rejected); }
         if self.continuation_entry_blocked() {
             return Err(BrokerError::Rejected);
@@ -1690,8 +1766,11 @@ impl Engine {
             }
             return Err(BrokerError::Rejected);
         }
+        r.volume = self.growth_allocated_volume(b,r.basket,r.level,r.kind.side(),r.price,r.sl,r.volume,already_allocated)?;
         r.volume = self.final_open_volume(b, r.volume)?;
         r.volume = self.profit_budget_volume(b,r.basket,r.kind.side(),r.price,r.sl,r.volume)?;
+        r.volume = self.growth_budget_volume(b,r.basket,r.kind.side(),r.price,r.sl,r.volume)?;
+        r.no_market_fallback |= crate::lot_growth::enabled(&self.cfg);
         self.order_submission_sequence=self.order_submission_sequence.wrapping_add(1);
         b.place_pending(r)
     }
@@ -1704,12 +1783,15 @@ impl Engine {
     pub fn lot_size(&self, balance: f64) -> f64 {
         let c = &self.cfg;
         let pct = self.kap_f(c.lot_percent, c.lot_percent_small, c.lot_percent_small_mult);
-        let mut lot = if c.lot_mode_percent {
+        let growth=crate::lot_growth::enabled(c);
+        let mut lot = if growth {
+            match crate::lot_growth::nominal(c,balance) {Ok(v)=>v,Err(_)=>return 0.0}
+        } else if c.lot_mode_percent {
             balance * pct / 100.0 / 100.0
         } else {
             c.lot_fixed
         };
-        if c.lot_scale_step > 0.0 {
+        if !growth && c.lot_scale_step > 0.0 {
             let steps = (balance / c.lot_scale_step).floor().max(1.0);
             lot = lot.max(0.01 * steps);
         }
@@ -1722,10 +1804,10 @@ impl Engine {
         if self.slhit_miekki && c.slhit_pause_lot_mult > 0.0 {
             lot *= c.slhit_pause_lot_mult;
         }
-        if c.order_volume_contract_v2 {
+        if self.strict_open_volume() {
             return match self.volume_limits().bounds() {
                 Ok((minimum, maximum)) if lot.is_finite() && lot > 0.0 => {
-                    lot.max(minimum).min(maximum)
+                    if growth {lot.min(maximum)} else {lot.max(minimum).min(maximum)}
                 }
                 _ => 0.0,
             };
@@ -4154,15 +4236,21 @@ impl Engine {
             (g.price - slv).abs() * XAU_CONTRACT * g.volume * g.base_units.max(1) as f64
         };
         let total = |ls: &Vec<GridLevel>| ls.iter().map(risk_of).sum::<f64>();
+        let growth = crate::lot_growth::enabled(&self.cfg);
+        let exceeds = |value| if growth {crate::lot_growth::plan_risk_exceeds(value,cap)} else {value>cap};
 
         let mut now = total(levels);
-        if now <= cap {
+        if if growth {!exceeds(now)} else {now<=cap} {
             return;
         }
 
         let factor = cap / now;
         for g in levels.iter_mut() {
-            g.volume = if self.cfg.order_volume_contract_v2 {
+            g.volume = if growth {
+                // Preserve G7's minimum-leg selection. The complete plan is
+                // pruned/rechecked below; the final broker cap never promotes.
+                (g.volume * factor).max(self.cfg.lot_min)
+            } else if self.cfg.order_volume_contract_v2 {
                 g.volume * factor
             } else {
                 round_lot((g.volume * factor).max(self.cfg.lot_min))
@@ -4170,7 +4258,7 @@ impl Engine {
         }
         now = total(levels);
 
-        while now > cap && levels.len() > 1 {
+        while exceeds(now) && levels.len() > 1 {
             let idx = levels
                 .iter()
                 .position(|g| g.is_toucher)
@@ -4179,7 +4267,7 @@ impl Engine {
             now = total(levels);
         }
 
-        if now > cap {
+        if exceeds(now) {
             levels.clear();
         }
     }
@@ -4849,7 +4937,11 @@ impl Engine {
                         1.0
                     };
                     let vol_rynek = if jako_rynek {
-                        if self.cfg.order_volume_contract_v2 {
+                        if crate::lot_growth::enabled(&self.cfg) {
+                            // The sequential sum-risk check below decides
+                            // whether this minimum leg can still be afforded.
+                            (vol * hybrid_mult * skala_rynek).max(self.cfg.lot_min)
+                        } else if self.cfg.order_volume_contract_v2 {
                             vol * hybrid_mult * skala_rynek
                         } else {
                             round_lot((vol * hybrid_mult * skala_rynek).max(self.cfg.lot_min))
@@ -4906,18 +4998,24 @@ impl Engine {
                         } else {
                             gl.tp
                         };
-                        self.open_market_order(
+                        let stop=self.broker_sl(gl.sl,side);
+                        let (volume,allocated)=match self.growth_sync_volume(b,id,gl.level,side,
+                            px_rynek,stop,vol_rynek,want,want-have-unit_idx) {
+                            Ok(v)=>v,Err(_)=>continue,
+                        };
+                        self.open_market_order_allocated(
                             b,
                             OrderReq {
                                 side,
-                                volume: vol_rynek,
-                                sl: self.broker_sl(gl.sl, side),
+                                volume,
+                                sl: stop,
                                 tp: tp_rynek,
                                 basket: Some(id),
                                 level: gl.level,
                                 is_toucher: gl.is_toucher,
                                 comment: format!("B{id}"),
                             },
+                            allocated,
                         )
                         .map(|t| (t, true))
                     } else {
@@ -4954,20 +5052,27 @@ impl Engine {
                                 .or_insert(0) += 1;
                             continue;
                         }
-                        self.place_pending_order(
+                        let stop=self.broker_sl(gl.sl,side);
+                        let (volume,allocated)=match self.growth_sync_volume(b,id,gl.level,side,
+                            price,stop,vol,want,want-have-unit_idx) {
+                            Ok(v)=>v,Err(_)=>continue,
+                        };
+                        self.place_pending_order_allocated(
                             b,
                             PendingReq {
                                 kind,
-                                volume: vol,
+                                volume,
                                 price,
-                                sl: self.broker_sl(gl.sl, side),
+                                sl: stop,
                                 tp: gl.tp,
                                 basket: Some(id),
                                 level: gl.level,
                                 is_toucher: gl.is_toucher,
                                 is_topup: false,
+                                no_market_fallback: false,
                                 comment: format!("B{id}"),
                             },
+                            allocated,
                         )
                         .map(|t| (t, false))
                     };
@@ -5435,6 +5540,7 @@ impl Engine {
                                 level: -3,
                                 is_toucher: false,
                                 is_topup: false,
+                                no_market_fallback: false,
                                 comment: format!("B{id}"),
                             },
                         );
@@ -8815,7 +8921,7 @@ impl Engine {
             self.relot_pendings_reconciled(b, ts);
             return;
         }
-        let v2 = self.cfg.order_volume_contract_v2;
+        let v2 = self.strict_open_volume();
         let delta_epsilon = if v2 {
             b.volume_step().abs() * 0.5
         } else {
@@ -8901,7 +9007,7 @@ impl Engine {
                     .unwrap_or(0.0);
                 amount(sztuki * v)
             });
-            let cel_szczebla = if self.cfg.pending_relot_wg_planu {
+            let mut cel_szczebla = if self.cfg.pending_relot_wg_planu {
                 match cel_planu {
                     Some(v) => v,
                     None => continue,
@@ -8909,6 +9015,14 @@ impl Engine {
             } else {
                 cel_plaski
             };
+            if crate::lot_growth::enabled(&self.cfg) {
+                let proto=&na_szczeblu[0];
+                cel_szczebla=match self.growth_allocated_volume(b,Some(id),poziom,
+                    proto.kind.side(),proto.price,proto.sl,cel_szczebla/sztuki,false)
+                    .and_then(|v|self.final_open_volume(b,v)) {
+                    Ok(v)=>v*sztuki,Err(_)=>continue,
+                };
+            }
             let suma = amount(na_szczeblu.iter().map(|x| x.vol).sum::<f64>());
             if let Some(p) = cel_planu {
                 self.stats.relot_rozjazd_lotow += (cel_plaski - p).abs();
@@ -8996,7 +9110,7 @@ impl Engine {
                             if let Some(bk) = self.basket_mut(id) {
                                 bk.pendings.retain(|x| *x != tt);
                             }
-                            match self.place_pending_order(
+                            match self.place_pending_order_allocated(
                                 b,
                                 PendingReq {
                                     kind: s.kind,
@@ -9008,8 +9122,10 @@ impl Engine {
                                     level: poziom,
                                     is_toucher: s.touch,
                                     is_topup: false,
+                                    no_market_fallback: false,
                                     comment: s.com.clone(),
                                 },
+                                true,
                             ) {
                                 Ok(n) => {
                                     if let Some(bk) = self.basket_mut(id) {
@@ -9042,7 +9158,7 @@ impl Engine {
                 }
                 let s = &na_szczeblu[0];
                 cien::z(cakt::A_KSZTALT_ZLEC, s.t, czr::Z_RELOT_DOSTAW, 0);
-                match self.place_pending_order(
+                match self.place_pending_order_allocated(
                     b,
                     PendingReq {
                         kind: s.kind,
@@ -9054,8 +9170,10 @@ impl Engine {
                         level: poziom,
                         is_toucher: s.touch,
                         is_topup: true,
+                        no_market_fallback: false,
                         comment: s.com.clone(),
                     },
+                    true,
                 ) {
                     Ok(n) => {
                         if let Some(bk) = self.basket_mut(id) {
@@ -9067,7 +9185,9 @@ impl Engine {
                 }
             } else {
                 if let Some(s) = na_szczeblu.iter().find(|x| !x.topup) {
-                    let jednostka = if self.cfg.pending_relot_wg_planu {
+                    let jednostka = if crate::lot_growth::enabled(&self.cfg) {
+                        cel_szczebla / sztuki.max(1.0)
+                    } else if self.cfg.pending_relot_wg_planu {
                         if v2 {
                             cel_szczebla / sztuki.max(1.0)
                         } else {
@@ -9100,7 +9220,7 @@ impl Engine {
                     if let Some(bk) = self.basket_mut(id) {
                         bk.pendings.retain(|x| *x != tt);
                     }
-                    match self.place_pending_order(
+                    match self.place_pending_order_allocated(
                         b,
                         PendingReq {
                             kind: s.kind,
@@ -9112,8 +9232,10 @@ impl Engine {
                             level: poziom,
                             is_toucher: s.touch,
                             is_topup: false,
+                            no_market_fallback: false,
                             comment: s.com.clone(),
                         },
+                        true,
                     ) {
                         Ok(n) => {
                             if let Some(bk) = self.basket_mut(id) {
@@ -11063,7 +11185,10 @@ impl Engine {
                 None
             };
             let skala = self.market_risk_scale(lot, px, sl, cap);
-            let vol = if self.cfg.order_volume_contract_v2 {
+            let vol = if crate::lot_growth::enabled(&self.cfg) {
+                // The remaining-cap check below can still reject this leg.
+                (lot * skala).max(self.cfg.lot_min)
+            } else if self.cfg.order_volume_contract_v2 {
                 lot * skala
             } else {
                 round_lot((lot * skala).max(self.cfg.lot_min))
@@ -16478,6 +16603,7 @@ mod testy_margines_lancuch {
             level: 1,
             is_toucher: false,
             is_topup: false,
+            no_market_fallback: false,
             comment: String::new(),
         })
         .expect("atrapa nie odmawia");
@@ -16572,7 +16698,7 @@ mod profit_budget_send_tests {
         basket:Some(1),level,is_toucher:false,comment:"synthetic-profit-budget".into()}}
     fn pending_req(level:i32)->PendingReq {PendingReq {kind:PendingKind::BuyLimit,price:3990.0,
         volume:1.0,sl:Some(3980.0),tp:Some(4100.0),basket:Some(1),level,
-        is_toucher:false,is_topup:false,comment:"synthetic-profit-budget".into()}}
+        is_toucher:false,is_topup:false,no_market_fallback:false,comment:"synthetic-profit-budget".into()}}
     #[test]
     fn profit_budget_every_market_send_remeasures_budget_including_reentry_levels() {
         for level in [0,-2,-6] {

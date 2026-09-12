@@ -24,6 +24,8 @@ pub struct Tagged {
     pub basket: Option<u32>,
     pub level: i32,
     pub is_toucher: bool,
+    /// Explicit terminated `u!` marker. Legacy absence is never inferred as a topup.
+    pub is_topup: bool,
     /// Local submission order within a basket. Missing in legacy/truncated comments.
     pub order_sequence: Option<u64>,
     /// oryginalny komentarz silnika, jeśli się zmieścił
@@ -73,10 +75,18 @@ pub fn encode(tag: &str, basket: Option<u32>, level: i32, is_toucher: bool, note
 /// extreme IDs leave insufficient room; a truncated ordinal is never accepted.
 pub fn encode_ordered(tag: &str, basket: Option<u32>, level: i32, is_toucher: bool,
                       sequence: u64, note: &str) -> Option<String> {
+    encode_ordered_with_topup(tag,basket,level,is_toucher,false,sequence,note)
+}
+
+/// A topup is strategy metadata, not a free-form note: place it before the
+/// ordinal and refuse insufficient space rather than silently losing it.
+pub fn encode_ordered_with_topup(tag: &str, basket: Option<u32>, level: i32,
+    is_toucher: bool, is_topup: bool, sequence: u64, note: &str) -> Option<String> {
     if sequence == 0 { return None; }
-    let prefix = encode(tag, basket, level, is_toucher, "");
+    let mut prefix = encode(tag, basket, level, is_toucher, "");
     let decoded = decode(tag, &prefix)?;
     if decoded.basket != basket || decoded.level != level || decoded.is_toucher != is_toucher { return None; }
+    if is_topup { prefix.push_str("u!"); }
     let mut n = sequence;
     let mut digits = Vec::new();
     while n > 0 { digits.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize] as char); n /= 36; }
@@ -145,6 +155,11 @@ pub fn decode(tag: &str, comment: &str) -> Option<Tagged> {
         i += 1;
     }
 
+    // Keep the flag independently readable when the later ordinal is clipped.
+    // A bare `u` or arbitrary broker suffix is not a complete machine marker.
+    let is_topup = b.get(i) == Some(&b'u') && b.get(i + 1) == Some(&b'!');
+    if is_topup { i += 2; }
+
     // The closing ! is mandatory: an ordinal clipped by a broker must not
     // turn into a different valid (shorter) ordinal.
     let mut order_sequence = None;
@@ -169,6 +184,7 @@ pub fn decode(tag: &str, comment: &str) -> Option<Tagged> {
         basket,
         level,
         is_toucher,
+        is_topup,
         order_sequence,
         note,
     })
@@ -296,6 +312,20 @@ mod tests {
 #[cfg(test)]
 mod local_order_comment_tests {
     use super::*;
+    #[test]
+    fn topup_marker_is_explicit_preserved_before_ordinal_and_never_guessed() {
+        let text=encode_ordered_with_topup("CD",Some(12),3,false,true,36,"B12").unwrap();
+        assert_eq!(text,"CD12.3u!~10!-B12");
+        let d=decode("CD",&text).unwrap();assert!(d.is_topup);assert_eq!(d.order_sequence,Some(36));
+        for clipped in ["CD12.3u!","CD12.3u!~","CD12.3u!~1"] {
+            let d=decode("CD",clipped).unwrap();assert!(d.is_topup);assert_eq!(d.order_sequence,None);
+        }
+        for legacy in ["CD12.3","CD12.3u","CD12.3-B12topup","CD12.3~1!-u!"] {
+            assert!(!decode("CD",legacy).unwrap().is_topup);
+        }
+        assert_eq!(encode_ordered("CD",Some(12),3,false,36,"B12").unwrap(),"CD12.3~10!-B12");
+        assert!(encode_ordered_with_topup("CD",Some(u32::MAX),i32::MIN,true,true,u64::MAX,"").is_none());
+    }
     #[test]
     fn complete_ordinal_roundtrip_keeps_existing_machine_fields() {
         for seq in [1,35,36,100_000,u64::MAX] {

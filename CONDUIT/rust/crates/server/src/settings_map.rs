@@ -107,14 +107,72 @@ fn decode_t100(value: &Value) -> Result<conduit_core::t100::Config, String> {
     Ok(config)
 }
 
+const LOT_GROWTH_KEYS: &[&str] = &[
+    "lot_growth_mode", "lot_growth_allocation", "lot_growth_reference_lot",
+    "lot_growth_reference_balance", "lot_growth_power", "lot_growth_rate_pct",
+    "lot_growth_capital_multiple", "lot_growth_lot_multiple", "lot_growth_basket_risk_pct",
+    "lot_growth_equity_stress_strength", "lot_growth_portfolio_load_strength",
+    "lot_growth_direction_load_strength", "lot_growth_basket_count_strength",
+    "lot_growth_spread_stress_strength", "lot_growth_tp1_deficit_strength",
+    "lot_growth_stop_width_strength", "lot_growth_age_decay_strength",
+    "lot_growth_rearm_decay_strength", "lot_growth_day_dd_strength",
+];
+
+/// Deserialize this family using the actual core enum/default contract. Other
+/// UI aliases stay with the existing mapper. Never reinterpret a misspelled
+/// opt-in as Off or replace a supplied wrong type with its default.
+fn decode_lot_growth(doc: &Value) -> Result<Settings, String> {
+    let mut family = serde_json::Map::new();
+    if let Some(object) = doc.as_object() {
+        for (key, value) in object {
+            if key.starts_with("lot_growth_") {
+                if !LOT_GROWTH_KEYS.contains(&key.as_str()) {
+                    return Err(format!("Lot growth settings: unknown field {key}"));
+                }
+                family.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let decoded: Settings = serde_json::from_value(Value::Object(family))
+        .map_err(|_| "Lot growth settings: invalid field types or enum".to_string())?;
+    conduit_core::lot_growth::validate(&decoded)
+        .map_err(|_| "Lot growth settings: values outside the allowed range".to_string())?;
+    if conduit_core::lot_growth::enabled(&decoded) {
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        for key in conduit_core::lot_context::FIELD_NAMES {
+            let strength = encoded.get(key).and_then(Value::as_f64)
+                .filter(|v| v.is_finite() && (0.0..=2.0).contains(v));
+            if strength.is_none() {
+                return Err("Lot growth settings: attenuation strength outside [0, 2]".into());
+            }
+        }
+    }
+    Ok(decoded)
+}
+
+fn apply_lot_growth_fields(target: &mut Settings, source: &Settings) {
+    macro_rules! copy { ($($key:ident),+ $(,)?) => { $(target.$key = source.$key;)+ }; }
+    copy!(lot_growth_mode, lot_growth_allocation, lot_growth_reference_lot,
+        lot_growth_reference_balance, lot_growth_power, lot_growth_rate_pct,
+        lot_growth_capital_multiple, lot_growth_lot_multiple, lot_growth_basket_risk_pct,
+        lot_growth_equity_stress_strength, lot_growth_portfolio_load_strength,
+        lot_growth_direction_load_strength, lot_growth_basket_count_strength,
+        lot_growth_spread_stress_strength, lot_growth_tp1_deficit_strength,
+        lot_growth_stop_width_strength, lot_growth_age_decay_strength,
+        lot_growth_rearm_decay_strength, lot_growth_day_dd_strength);
+}
+
+/// Historical entry point used by both REST and command mutation guards.
+/// Includes the flat lot-growth family without changing the existing callers.
 pub fn validate_t100_document(doc: &Value) -> Result<(), String> {
     if let Some(value) = doc.get("t100") { decode_t100(value)?; }
+    decode_lot_growth(doc)?;
     Ok(())
 }
 
 /// Validate a patch before ANY settings or preset mutation.
 pub fn validate_t100_patch(doc: &Value, patch: &Value) -> Result<(), String> {
-    if patch.get("t100").is_some() {
+    if patch.get("t100").is_some() || patch.as_object().is_some_and(|o| o.keys().any(|k| k.starts_with("lot_growth_"))) {
         let mut merged = doc.clone();
         merge_patch(&mut merged, patch);
         validate_t100_document(&merged)?;
@@ -161,6 +219,17 @@ pub fn core_from_ui(doc: &Value) -> Settings {
             // fall back to legacy trading. The source document is untouched.
             enabled: true, experts: 0, ..Default::default()
         });
+    }
+
+    match decode_lot_growth(doc) {
+        Ok(growth) => apply_lot_growth_fields(&mut c, &growth),
+        Err(_) => {
+            // Keep an already-corrupt document inert even outside the guarded
+            // edit path. A finite invalid sentinel survives serialization;
+            // the source UI document stays untouched for diagnosis/repair.
+            c.lot_growth_mode = conduit_core::lot_growth::LotGrowthMode::Power;
+            c.lot_growth_reference_lot = -1.0;
+        }
     }
 
     // ---------- wielkość pozycji ----------
@@ -2961,7 +3030,7 @@ pub fn unmapped_keys(doc: &Value) -> Vec<String> {
         None => return Vec::new(),
     };
     obj.keys()
-        .filter(|k| !MAPPED.contains(&k.as_str()) && !UI_ONLY_KEYS.contains(&k.as_str()))
+        .filter(|k| !MAPPED.contains(&k.as_str()) && !LOT_GROWTH_KEYS.contains(&k.as_str()) && !UI_ONLY_KEYS.contains(&k.as_str()))
         .cloned()
         .collect()
 }
@@ -3432,6 +3501,98 @@ pub fn merge_patch(doc: &mut Value, patch: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lot_growth_mapping_all_nineteen_fields_survive_raw_ui_edit_and_serialization() {
+        let configured = serde_json::json!({
+            "lot_growth_mode":"Power", "lot_growth_allocation":"ExposureAwareRisk",
+            "lot_growth_reference_lot":0.03, "lot_growth_reference_balance":1500.0,
+            "lot_growth_power":0.55, "lot_growth_rate_pct":0.75,
+            "lot_growth_capital_multiple":2.5, "lot_growth_lot_multiple":1.75,
+            "lot_growth_basket_risk_pct":8.0,
+            "lot_growth_equity_stress_strength":0.25, "lot_growth_portfolio_load_strength":0.5,
+            "lot_growth_direction_load_strength":0.75, "lot_growth_basket_count_strength":1.0,
+            "lot_growth_spread_stress_strength":1.25, "lot_growth_tp1_deficit_strength":1.5,
+            "lot_growth_stop_width_strength":1.75, "lot_growth_age_decay_strength":2.0,
+            "lot_growth_rearm_decay_strength":0.25, "lot_growth_day_dd_strength":0.5
+        });
+        assert_eq!(configured.as_object().unwrap().len(), 19);
+        for mode in ["Off", "Power", "ThresholdLinear", "GeometricSteps"] {
+            for allocation in ["Uniform", "EqualSLRisk", "Depth", "EqualSLRiskDepth", "ExposureAwareRisk"] {
+                let mut raw = configured.clone();
+                raw["lot_growth_mode"] = Value::from(mode);
+                raw["lot_growth_allocation"] = Value::from(allocation);
+                assert!(validate_t100_document(&raw).is_ok());
+                let core = core_from_ui(&raw);
+                let preset = serde_json::to_value(&core).unwrap();
+                let mut ui = preset_to_ui(&preset);
+                assert!(unmapped_keys(&ui).iter().all(|k| !k.starts_with("lot_growth_")));
+                ui["max_dd_pct"] = Value::from(27.0);
+                let edited = serde_json::to_value(core_from_ui(&ui)).unwrap();
+                assert_eq!(edited["max_dd_pct"], Value::from(27.0));
+                for key in LOT_GROWTH_KEYS {
+                    assert_eq!(preset[*key], raw[*key], "raw {mode}/{allocation}/{key}");
+                    assert_eq!(ui[*key], raw[*key], "ui {key}");
+                    assert_eq!(edited[*key], raw[*key], "edited {key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lot_growth_mapping_absent_fields_keep_legacy_defaults_and_other_strategy_fields() {
+        let source = serde_json::json!({"risk_per_basket_pct":12.0,"max_dd_pct":30.0,"rearm_max_times":7});
+        let base = core_from_ui(&source);
+        let mut enabled = source;
+        enabled["lot_growth_mode"] = Value::from("Power");
+        let before = serde_json::to_value(base).unwrap();
+        let after = serde_json::to_value(core_from_ui(&enabled)).unwrap();
+        for (key, value) in before.as_object().unwrap() {
+            if key == "lot_growth_mode" { assert_eq!(value, "Off"); }
+            else { assert_eq!(&after[key], value, "unrelated field {key}"); }
+        }
+        assert_eq!(core_from_ui(&serde_json::json!({})), Settings::default());
+    }
+
+    #[test]
+    fn lot_growth_mapping_rejects_unknown_enums_types_and_active_ranges_without_mutation() {
+        let source = serde_json::json!({"lot_growth_mode":"Power","lot_growth_power":0.7});
+        for patch in [
+            serde_json::json!({"lot_growth_mode":"power"}),
+            serde_json::json!({"lot_growth_allocation":"Unknown"}),
+            serde_json::json!({"lot_growth_reference_lot":null}),
+            serde_json::json!({"lot_growth_power":"0.7"}),
+            serde_json::json!({"lot_growth_reference_balance":0}),
+            serde_json::json!({"lot_growth_basket_risk_pct":101}),
+            serde_json::json!({"lot_growth_day_dd_strength":2.01}),
+            serde_json::json!({"lot_growth_equity_stress_strength":-0.1}),
+            serde_json::json!({"lot_growth_unknown_axis":0.5}),
+        ] {
+            let before = source.clone();
+            assert!(validate_t100_patch(&source, &patch).is_err(), "accepted {patch}");
+            assert_eq!(source, before);
+            let mut damaged = source.clone(); merge_patch(&mut damaged, &patch);
+            for document in [damaged.clone(), preset_to_ui(&damaged)] {
+                let document_before = document.clone();
+                let held = core_from_ui(&document);
+                assert!(conduit_core::lot_growth::enabled(&held), "must not fall back to Off");
+                assert!(conduit_core::lot_growth::validate(&held).is_err());
+                assert_eq!(document, document_before);
+            }
+        }
+    }
+
+    #[test]
+    fn lot_growth_mapping_off_retains_numeric_configuration_and_enable_checks_merged_patch() {
+        let source = serde_json::json!({"lot_growth_mode":"Off","lot_growth_power":0.0,"lot_growth_day_dd_strength":2.1});
+        assert!(validate_t100_document(&source).is_ok());
+        let off = core_from_ui(&source);
+        assert_eq!(off.lot_growth_mode, conduit_core::lot_growth::LotGrowthMode::Off);
+        assert_eq!(off.lot_growth_power, 0.0);
+        assert_eq!(off.lot_growth_day_dd_strength, 2.1);
+        assert!(validate_t100_patch(&source, &serde_json::json!({"lot_growth_mode":"Power"})).is_err());
+        assert!(validate_t100_patch(&source, &serde_json::json!({"lot_growth_mode":"Power","lot_growth_power":0.55,"lot_growth_day_dd_strength":1.0})).is_ok());
+    }
 
     #[test]
     fn t100_nested_roundtrip_preserves_every_field_and_old_defaults() {

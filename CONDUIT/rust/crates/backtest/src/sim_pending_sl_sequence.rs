@@ -7,7 +7,7 @@ fn order(side:Side,sl:Option<f64>)->OrderReq{OrderReq{side,volume:0.01,sl,tp:Non
     basket:Some(1),level:0,is_toucher:false,comment:"B15-old".into()}}
 fn pending(kind:PendingKind,sl:Option<f64>,tp:Option<f64>)->PendingReq{PendingReq{
     kind,volume:0.01,price:4000.0,sl,tp,basket:Some(1),level:1,
-    is_toucher:false,is_topup:false,comment:"B15-pending".into()}}
+    is_toucher:false,is_topup:false,no_market_fallback:false,comment:"B15-pending".into()}}
 
 #[test]
 fn new_pending_sl_waits_one_invocation_old_sl_does_not_and_equal_ms_is_a_new_quote(){

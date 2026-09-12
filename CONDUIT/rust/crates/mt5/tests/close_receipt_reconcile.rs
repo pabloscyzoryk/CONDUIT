@@ -396,14 +396,14 @@ fn cost_runtime_hold_preserves_legacy_ledger_and_protection_without_reconnect() 
         let generation=f.bridge.transport().execution_generation();
         let pending=f.bridge.place_pending(conduit_core::broker::PendingReq {kind:PendingKind::BuyLimit,
             price:3980.,volume:0.01,sl:None,tp:None,basket:Some(1),level:0,is_toucher:false,
-            comment:"before hold".into(),is_topup:false}).unwrap();
+            comment:"before hold".into(),is_topup:false,no_market_fallback:false}).unwrap();
         f.bridge.hold_new_entries("cost mode transition needs migration");
         assert!(f.bridge.close_receipts_pending());
         assert_eq!(f.bridge.receipt_barrier(),conduit_core::broker::ReceiptBarrier::RequiresReview);
         assert!(f.bridge.open_market(req()).is_err());
         assert!(f.bridge.place_pending(conduit_core::broker::PendingReq {kind:PendingKind::BuyLimit,
             price:3980.,volume:0.01,sl:None,tp:None,basket:Some(1),level:0,is_toucher:false,
-            comment:"blocked".into(),is_topup:false}).is_err());
+            comment:"blocked".into(),is_topup:false,no_market_fallback:false}).is_err());
         f.bridge.modify_position(ID,Some(3990.),None).unwrap();
         f.bridge.cancel_pending(pending).unwrap();assert!(f.bridge.pendings().is_empty());
         f.bridge.close_position(ID,CloseReason::Manual).unwrap();f.emit();
@@ -573,7 +573,7 @@ fn receipt_wait_does_not_disable_protective_modify_cancel_or_further_close() {
     let mut f=Fixture::new(true,0.08);
     let pending=f.bridge.place_pending(PendingReq{kind:PendingKind::BuyLimit,volume:0.01,
         price:3999.,sl:Some(3990.),tp:Some(4100.),basket:Some(1),level:1,
-        is_toucher:false,is_topup:false,comment:"fixture".into()}).unwrap();
+        is_toucher:false,is_topup:false,no_market_fallback:false,comment:"fixture".into()}).unwrap();
     f.bridge.close_partial(ID,0.02,CloseReason::Partial).unwrap();
     assert!(f.bridge.close_receipts_pending());
     f.bridge.modify_position(ID,Some(3998.),Some(4100.)).unwrap();
@@ -1199,7 +1199,7 @@ fn broker_generated_snapshot_gap_is_not_a_synthetic_close_and_rollback_cannot_re
     use conduit_core::broker::{PendingReq,ReceiptBarrier};
     let mut f=Fixture::new(true,0.08);
     let pending=f.bridge.place_pending(PendingReq{kind:PendingKind::BuyLimit,volume:0.01,price:3999.0,
-        sl:Some(3990.),tp:None,basket:Some(1),level:3,is_toucher:false,is_topup:false,comment:"fixture".into()}).unwrap();
+        sl:Some(3990.),tp:None,basket:Some(1),level:3,is_toucher:false,is_topup:false,no_market_fallback:false,comment:"fixture".into()}).unwrap();
     f.call("probe_tp",json!({"volume":0.02}));f.bridge.refresh_state().unwrap();
     let evidence=f.bridge.pending_volume_receipts();assert_eq!(evidence.len(),1);
     near(evidence[0]["observed_reduction"].as_f64().unwrap(),0.02);
@@ -1231,7 +1231,7 @@ fn unobserved_pending_fill_and_close_remains_explicitly_outside_position_evidenc
     use conduit_core::broker::{PendingReq,ReceiptBarrier};
     let mut f=Fixture::new(true,0.0);
     f.bridge.place_pending(PendingReq{kind:PendingKind::BuyLimit,volume:0.01,price:3999.0,
-        sl:Some(3990.),tp:None,basket:Some(1),level:3,is_toucher:false,is_topup:false,comment:"fixture".into()}).unwrap();
+        sl:Some(3990.),tp:None,basket:Some(1),level:3,is_toucher:false,is_topup:false,no_market_fallback:false,comment:"fixture".into()}).unwrap();
     f.call("probe_pending_roundtrip_unobserved",json!({}));f.bridge.refresh_state().unwrap();
     // Missing pending could be cancellation/expiry/fill: no fabricated position.
     assert_eq!(f.bridge.receipt_barrier(),ReceiptBarrier::Clear);assert!(f.bridge.pending_volume_receipts().is_empty());
@@ -1540,7 +1540,7 @@ fn local_order_fresh_bridge_reconcile_restores_time_order_and_next_submission_or
         let last=f.bridge.positions().last().unwrap();
         assert_eq!(conduit_mt5::comment::decode("CD",&last.comment).unwrap().order_sequence,Some(11));
         f.bridge.place_pending(conduit_core::broker::PendingReq{kind:PendingKind::BuyLimit,volume:0.01,price:3999.,
-            sl:Some(3990.),tp:Some(4010.),basket:Some(1),level:2,is_toucher:false,is_topup:false,comment:"B1".into()}).unwrap();
+            sl:Some(3990.),tp:Some(4010.),basket:Some(1),level:2,is_toucher:false,is_topup:false,no_market_fallback:false,comment:"B1".into()}).unwrap();
         assert_eq!(conduit_mt5::comment::decode("CD",&f.bridge.pendings().last().unwrap().comment).unwrap().order_sequence,Some(12));
     }
 }
@@ -1548,7 +1548,7 @@ fn local_order_fresh_bridge_reconcile_restores_time_order_and_next_submission_or
 fn local_order_warm_cache_retains_proven_ordinal_when_broker_clips_comment() {
     let mut f=Fixture::new(false,0.);
     let ticket=f.bridge.place_pending(conduit_core::broker::PendingReq{kind:PendingKind::BuyLimit,volume:0.01,price:3999.,
-        sl:Some(3990.),tp:Some(4010.),basket:Some(1),level:2,is_toucher:false,is_topup:false,comment:"B1".into()}).unwrap();
+        sl:Some(3990.),tp:Some(4010.),basket:Some(1),level:2,is_toucher:false,is_topup:false,no_market_fallback:false,comment:"B1".into()}).unwrap();
     f.call("cancel_pending",json!({"ticket":ticket})); // server snapshot now reports a fill instead of its old order
     let mut row=sequenced_position(ticket,2,TS,Some(1));row["comment"]=json!("CD1.2~");
     f.call("probe_replace_owned_snapshot",json!({"rows":[row,sequenced_position(9902,7,TS,Some(2))]}));

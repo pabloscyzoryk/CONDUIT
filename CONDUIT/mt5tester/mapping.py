@@ -24,6 +24,19 @@ MAP += [('entry_idempotencja', 'In_EntryIdempotency', bool)]
 MAP += [('profit_budget_arm_pct', 'In_ProfitBudgetArmPct', float),
         ('profit_budget_keep_pct', 'In_ProfitBudgetKeepPct', float),
         ('profit_budget_deploy_pct', 'In_ProfitBudgetDeployPct', float)]
+ENUMY['lot_growth_allocation'] = ('In_LotGrowthAllocation', {
+    'Uniform': 0, 'EqualSLRisk': 1, 'Depth': 2, 'EqualSLRiskDepth': 3, 'ExposureAwareRisk': 4})
+ENUMY['lot_growth_mode'] = ('In_LotGrowthMode', {
+    'Off': 0, 'Power': 1, 'ThresholdLinear': 2, 'GeometricSteps': 3})
+MAP += [
+    ('lot_growth_reference_lot', 'In_LotGrowthReferenceLot', float),
+    ('lot_growth_reference_balance', 'In_LotGrowthReferenceBalance', float),
+    ('lot_growth_power', 'In_LotGrowthPower', float),
+    ('lot_growth_rate_pct', 'In_LotGrowthRatePct', float),
+    ('lot_growth_capital_multiple', 'In_LotGrowthCapitalMultiple', float),
+    ('lot_growth_lot_multiple', 'In_LotGrowthLotMultiple', float),
+    ('lot_growth_basket_risk_pct', 'In_LotGrowthBasketRiskPct', float),
+]
 ENUMY['day_trail_basis'] = ('In_DayTrailBasis', {'EquityPeak': 0, 'ProfitPeak': 1})
 MAP += [
     ('trail_adaptive_enabled', 'In_TrailAdaptiveEnabled', bool),
@@ -43,4 +56,18 @@ MAP += [
     ('trail_adaptive_min_peak', 'In_TrailAdaptiveMinPeak', float),
     ('trail_adaptive_min_gap', 'In_TrailAdaptiveMinGap', float),
     ('trail_adaptive_max_gap', 'In_TrailAdaptiveMaxGap', float),
+]
+
+# Causal attenuation axes; strength zero is OFF.
+MAP += [
+    ('lot_growth_equity_stress_strength', 'In_LotGrowthEquityStressStrength', float),
+    ('lot_growth_portfolio_load_strength', 'In_LotGrowthPortfolioLoadStrength', float),
+    ('lot_growth_direction_load_strength', 'In_LotGrowthDirectionLoadStrength', float),
+    ('lot_growth_basket_count_strength', 'In_LotGrowthBasketCountStrength', float),
+    ('lot_growth_spread_stress_strength', 'In_LotGrowthSpreadStressStrength', float),
+    ('lot_growth_tp1_deficit_strength', 'In_LotGrowthTp1DeficitStrength', float),
+    ('lot_growth_stop_width_strength', 'In_LotGrowthStopWidthStrength', float),
+    ('lot_growth_age_decay_strength', 'In_LotGrowthAgeDecayStrength', float),
+    ('lot_growth_rearm_decay_strength', 'In_LotGrowthRearmDecayStrength', float),
+    ('lot_growth_day_dd_strength', 'In_LotGrowthDayDdStrength', float),
 ]

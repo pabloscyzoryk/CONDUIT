@@ -488,6 +488,18 @@
     "the operation has no execution confirmation"
   ],
   [
+    "nieznany wynik {cmd}: retcode={code}; wymagane potwierdzenie wykonania przed nowymi wejściami",
+    "unknown outcome of {cmd}: retcode={code}; execution confirmation required before new entries"
+  ],
+  [
+    "nieznany wynik {cmd}: timeout po wysłaniu; odczyt stanu nie zastępuje potwierdzenia wykonania",
+    "unknown outcome of {cmd}: timeout after dispatch; a state read does not replace execution confirmation"
+  ],
+  [
+    "nieznany wynik {cmd}: {e}; wymagane potwierdzenie wykonania przed nowymi wejściami",
+    "unknown outcome of {cmd}: {e}; execution confirmation required before new entries"
+  ],
+  [
     "Kontrolna odbudowa połączenia po ciszy kwotowań",
     "Connection recovery check after quote silence"
   ],
@@ -3610,6 +3622,34 @@
   [
     "BUDŻET RYZYKA: {reason:?}; nowe zlecenie wstrzymane",
     "RISK BUDGET: {reason:?}; new order withheld"
+  ],
+  [
+    "KRZYWA LOTA — BLOKADA: {reason:?}; nowe zlecenie wstrzymane",
+    "LOT GROWTH HOLD: {reason:?}; new order withheld"
+  ],
+  [
+    "KONTEKST LOTA — BLOKADA: {reason:?}; nowe zlecenie wstrzymane",
+    "LOT CONTEXT HOLD: {reason:?}; new order withheld"
+  ],
+  [
+    "KONTEKST LOTA: obserwacja wielkości pozycji przed wysłaniem zlecenia",
+    "LOT CONTEXT: causal pre-send sizing observation"
+  ],
+  [
+    "Ustawienia krzywej lota: nieznane pole {key}",
+    "Lot growth settings: unknown field {key}"
+  ],
+  [
+    "Ustawienia krzywej lota: nieprawidłowe typy pól lub wariant",
+    "Lot growth settings: invalid field types or enum"
+  ],
+  [
+    "Ustawienia krzywej lota: wartości poza dozwolonym zakresem",
+    "Lot growth settings: values outside the allowed range"
+  ],
+  [
+    "Ustawienia krzywej lota: siła tłumienia poza zakresem [0, 2]",
+    "Lot growth settings: attenuation strength outside [0, 2]"
   ],
   [
     "BUDŻET RYZYKA: {reason:?}; żadna legalna siatka nie mieści się w bieżącej rezerwie",
