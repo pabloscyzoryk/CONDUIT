@@ -247,8 +247,10 @@ pub struct Wejscie<'a> {
     pub prog_be: f64,
     /// ticki do wyceny odrzutów; `None` = wycena pominięta
     pub ticks: Option<&'a TickData>,
-    /// przesunięcie czasu serwera (`Settings::server_tz_offset_ms`) — godziny
-    /// i dni tygodnia liczymy w TYM czasie, bo w nim mówi cały reszta raportu
+    /// Dodatkowe przesunięcie względem zegara znaczników koszyków. Replay
+    /// przekazuje `Settings::session_offset()` (0), bo `created_ts` jest już
+    /// czasem brokera. `server_tz_offset_ms` służy do wejściowego czasu UTC
+    /// wiadomości; dodanie go tutaj ponownie zmieniałoby godzinę i dzień.
     pub tz_offset_ms: i64,
     /// licznik W PRZÓD z pętli przebiegu ([`Lejek::sygnaly_wejsciowe`]);
     /// 0 = wołający licznika nie prowadzi (wtedy lejek liczy jak dotąd)

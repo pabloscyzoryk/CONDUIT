@@ -2220,7 +2220,8 @@ pub fn run_with_progress(
         spread_usd: broker.spread_paid_usd,
         prog_be: cfg.settings.stat_be_prog_usd,
         ticks: Some(ticks),
-        tz_offset_ms: cfg.settings.server_tz_offset_ms,
+        // Basket timestamps already use the broker clock, like daily metrics.
+        tz_offset_ms: cfg.settings.session_offset(),
         sygnaly_wejsciowe: 0, // the versioned source funnel below is authoritative
     });
 
@@ -3042,6 +3043,62 @@ fn fmt_day(day: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reporting_hours_and_weekdays_keep_broker_clock_after_utc_ingress() {
+        // Synthetic Tuesday 22:13:20 broker clock. Adding the UTC+3 offset
+        // again would move the reported basket to Wednesday 01:13:20.
+        let broker_ts = 1_700_000_000_000i64;
+        let path = std::env::temp_dir().join(format!(
+            "conduit_reporting_broker_clock_{}.bin", std::process::id()
+        ));
+        zapisz_ticki(&path, &[
+            (broker_ts - 1_000, 4000.0, 4000.2),
+            (broker_ts, 4000.0, 4000.2),
+            (broker_ts + 1_000, 4000.0, 4000.2),
+            (broker_ts + 60_000, 3988.0, 3988.2),
+        ]);
+        let ticks = TickData::open(&path).unwrap();
+        let mut trades = None;
+        for server_offset in [0, 3 * 3_600_000] {
+            let mut cfg = RunConfig {
+                from: broker_ts - 1_000,
+                to: broker_ts + 60_001,
+                start_balance: 600.0,
+                ..Default::default()
+            };
+            cfg.settings.server_tz_offset_ms = server_offset;
+            cfg.settings.exec_latency_ms = 0;
+            cfg.settings.lot_fixed = 0.01;
+            cfg.settings.lot_max = 0.01;
+            let message = ReplayMessage {
+                ts: broker_ts - server_offset,
+                telegram_published_ts: None,
+                msg_id: 1,
+                reply_to: None,
+                edit_of: None,
+                kanal: String::new(),
+                text: "BUY GOLD @ 4001/3998\nTP 4010\nSL 3990".into(),
+            };
+            let result = run(&ticks, &[message], &cfg);
+            assert!(!result.trades.is_empty(), "the actual runner must close trades");
+            assert!(result.baskets_dump.iter().all(|b| b.created_ts == broker_ts));
+            let stats = &result.metrics.stat_sygnalow.koszyki;
+            assert!(stats.z_pozycjami > 0);
+            assert_eq!(stats.godziny[22].n, stats.z_pozycjami);
+            assert_eq!(stats.dni[1].n, stats.z_pozycjami, "Tuesday, not Wednesday");
+            assert_eq!(stats.godziny[1].n, 0, "do not apply UTC+3 twice");
+            assert_eq!(stats.dni[2].n, 0);
+            let actual = serde_json::to_value(&result.trades).unwrap();
+            if let Some(expected) = &trades {
+                assert_eq!(&actual, expected, "offset changes UTC ingress, not execution");
+            } else {
+                trades = Some(actual);
+            }
+        }
+        drop(ticks);
+        std::fs::remove_file(path).unwrap();
+    }
 
     /// Zapisuje minimalny plik ticków w formacie `CDTK` (nagłówek 64 B,
     /// rekordy 16 B: `i64` znacznik, `f32` bid, `f32` ask).
