@@ -213,17 +213,20 @@ class ExportTests(unittest.TestCase):
 
     def test_worker_attaches_explicit_path_without_login_or_mutations(self):
         calls = []
-        self.api.initialize = lambda **kwargs: calls.append(("initialize", kwargs)) or True
+        def initialize(path, /, *, timeout):
+            calls.append(("initialize", path, timeout))
+            return True
+        self.api.initialize = initialize
         self.api.shutdown = lambda: calls.append(("shutdown", {}))
         history.atomic_json(self.directory / "request.json", self.request)
         with patch.dict(sys.modules, {"MetaTrader5": self.api}), patch.object(history, "running_path") as presence, patch.object(history.threading, "Thread"):
             history.worker_main(self.directory)
         presence.assert_called_once_with(self.request["source"]["terminal_path"])
-        self.assertEqual(calls, [("initialize", {"path": self.request["source"]["terminal_path"], "timeout": 5000}), ("shutdown", {})])
+        self.assertEqual(calls, [("initialize", self.request["source"]["terminal_path"], 5000), ("shutdown", {})])
         self.assertTrue(json.loads((self.directory / "status.json").read_text("utf-8"))["complete"])
 
     def test_absent_terminal_does_not_initialize_and_failure_does_not_leak_exception(self):
-        self.api.initialize = lambda **kwargs: self.fail("must not initialize absent terminal")
+        self.api.initialize = lambda *args, **kwargs: self.fail("must not initialize absent terminal")
         self.api.shutdown = lambda: None
         history.atomic_json(self.directory / "request.json", self.request)
         with patch.dict(sys.modules, {"MetaTrader5": self.api}), patch.object(history, "running_path", side_effect=history.HistoryFailure("explicit_terminal_not_running")), patch.object(history.threading, "Thread"):
@@ -231,6 +234,18 @@ class ExportTests(unittest.TestCase):
         status = json.loads((self.directory / "status.json").read_text("utf-8"))
         self.assertTrue(status["partial"])
         self.assertEqual(status["errors"][0]["code"], "explicit_terminal_not_running")
+
+    def test_history_presence_uses_same_session_discovery_as_live_bridge(self):
+        import terminal_discovery
+        path = self.request["source"]["terminal_path"]
+        with patch.object(terminal_discovery, "running_terminal_path", return_value=path) as discover:
+            history.running_path(path)
+        discover.assert_called_once_with(path)
+        with patch.object(terminal_discovery, "running_terminal_path", side_effect=terminal_discovery.TerminalDiscoveryError("private local diagnostic")):
+            with self.assertRaises(history.HistoryFailure) as caught:
+                history.running_path(path)
+        self.assertEqual(caught.exception.code, "explicit_terminal_not_running")
+        self.assertNotIn("private", str(caught.exception))
 
     def test_lost_start_response_can_be_reaped_after_idle_ttl_but_not_during_read(self):
         jobs = history.HistoryJobs()

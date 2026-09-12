@@ -44,7 +44,7 @@ impl Fixture {
                 }
             };
             stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-            write(&mut stream, &json!({"ev":"hello","proto":1,"sidecar":"OFFLINE-CLOSE-RECEIPT-FIXTURE"}));
+            write(&mut stream, &json!({"ev":"hello","proto":1,"ready":true,"sidecar":"OFFLINE-CLOSE-RECEIPT-FIXTURE"}));
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             let mut volume = initial_volume;

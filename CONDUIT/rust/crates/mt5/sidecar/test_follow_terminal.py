@@ -26,8 +26,9 @@ class FakeMT5:
     def account_info(self):
         return self.account
 
-    def initialize(self, **kwargs):
-        self.initializations.append(kwargs)
+    def initialize(self, path=None, /, **kwargs):
+        assert "path" not in kwargs, "SDK path is positional"
+        self.initializations.append(dict(kwargs, **({"path": path} if path else {})))
         return True
 
     def symbol_info(self, symbol):
@@ -105,14 +106,18 @@ class FollowAccountTests(unittest.TestCase):
                 mod.select_running_terminal(paths, requested)
         self.assertTrue(mod.select_running_terminal(["C:/a/terminal64.exe"]).endswith("terminal64.exe"))
 
-    def test_process_discovery_uses_readonly_get_process_not_cim(self):
-        with patch("subprocess.check_output",return_value='[{"Id":7,"Path":"C:/a/terminal64.exe"}]') as query:
+    def test_process_discovery_delegates_native_errors_without_initializing(self):
+        import terminal_discovery
+        with patch.object(terminal_discovery, "running_terminal_path", return_value="C:/a/terminal64.exe") as query:
             self.assertTrue(mod.running_terminal_path().endswith("terminal64.exe"))
-            argv=query.call_args.args[0]
-            self.assertIn("Get-Process",argv[-1])
-            self.assertNotIn("CimInstance",argv[-1])
-        with patch("subprocess.check_output",return_value='[{"Id":7,"Path":null}]'):
-            with self.assertRaises(mod.BrokerError): mod.running_terminal_path()
+            query.assert_called_once_with(None)
+        with patch.object(terminal_discovery, "running_terminal_path",
+                          side_effect=terminal_discovery.TerminalDiscoveryError("fixture discovery refused")):
+            with self.assertRaises(mod.BrokerError) as failure:
+                mod.running_terminal_path()
+            self.assertEqual(failure.exception.code, mod.ERR_NOT_INITIALIZED)
+            self.assertEqual(str(failure.exception), "fixture discovery refused")
+        self.assertEqual(fake.initializations, [])
 
     def test_known_broker_disambiguates_two_full_contracts(self):
         fake.symbols["XAUUSD.s"] = fake.si()

@@ -41,7 +41,7 @@ impl Fixture{
                 Ok(s)=>break s,Err(_)if Instant::now()<deadline=>thread::sleep(Duration::from_millis(5)),
                 Err(e)=>panic!("synthetic fixture connect: {e}")}};
             stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-            write(&mut stream,&json!({"ev":"hello","proto":1,"sidecar":"SYNTHETIC-RF-B9"}));
+            write(&mut stream,&json!({"ev":"hello","proto":1,"ready":true,"sidecar":"SYNTHETIC-RF-B9"}));
             let mut reader=BufReader::new(stream.try_clone().unwrap());let mut line=String::new();
             let mut positions:Vec<Value>=if one_partial_position{vec![position(TICKETS[5],1,OPENS[5],0.30)]}
                 else{(0..6).map(|i|position(TICKETS[i],6-i as i32,OPENS[i],0.05)).collect()};

@@ -54,7 +54,9 @@ class FakeMt5(types.ModuleType):
 
 
 FAKE = FakeMt5()
-with patch.dict(sys.modules, {"MetaTrader5": FAKE}):
+# importlib does not add the loaded script directory to sys.path. Mirror the
+# packaged sibling-module layout without relying on a global PYTHONPATH.
+with patch.dict(sys.modules, {"MetaTrader5": FAKE}), patch.object(sys, "path", [str(SOURCE.parent), *sys.path]):
     SPEC = importlib.util.spec_from_file_location("rf_pending_sidecar_id_probe", SOURCE)
     SIDECAR = importlib.util.module_from_spec(SPEC)
     SPEC.loader.exec_module(SIDECAR)

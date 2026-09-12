@@ -223,25 +223,12 @@ class BrokerError(Exception):
 
 
 def running_terminal_path(configured=None):
-    """Attach to an existing process only. Never discover/start a saved registry terminal."""
-    import subprocess
-    if os.name != "nt":
-        raise BrokerError(ERR_NOT_INITIALIZED, "follow-terminal wymaga Windows")
-    # Get-Process works without WMI/CIM permissions (CIM was denied in the
-    # deployment user's sandbox). Keep PID records so unreadable paths are not
-    # silently mistaken for 'only one terminal'. This is read-only discovery.
-    command = ("[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); "
-               "@(Get-Process -Name terminal64 -ErrorAction SilentlyContinue | "
-               "Select-Object Id,Path) | ConvertTo-Json -Compress")
-    raw = subprocess.check_output(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-        creationflags=subprocess.CREATE_NO_WINDOW, timeout=10, encoding="utf-8")
-    records = json.loads(raw.strip() or "[]")
-    if isinstance(records, dict):
-        records = [records]
-    if not isinstance(records, list) or any(not isinstance(r, dict) or not r.get("Path") for r in records):
-        raise BrokerError(ERR_NOT_INITIALIZED, "nie można odczytać ścieżki wszystkich terminali; wybór niepotwierdzony")
-    return select_running_terminal([r["Path"] for r in records], configured)
+    """Read-only native discovery, scoped to this Windows/RDP session."""
+    from terminal_discovery import TerminalDiscoveryError, running_terminal_path as discover
+    try:
+        return discover(configured)
+    except TerminalDiscoveryError as error:
+        raise BrokerError(ERR_NOT_INITIALIZED, str(error)) from error
 
 
 def select_running_terminal(paths, configured=None):
@@ -334,6 +321,7 @@ class Sidecar(object):
         self.account_changed = False
         self.request_account = None
         self.history_jobs = HistoryJobs()
+        self._startup_stage = "process"
         # Próbki poślizgu zleceń RYNKOWYCH: (cena wypełnienia − cena żądana),
         # ze znakiem „na niekorzyść klienta". Zbierane na żywo, bo historia
         # terminala tej liczby nie zna — `price_open` zleceń rynkowych jest
@@ -345,10 +333,12 @@ class Sidecar(object):
     def init_terminal(self):
         self._reset_quote_clock()
         kwargs = {}
+        terminal_path = None
         if self.follow_account:
-            kwargs["path"] = running_terminal_path(self.args.terminal)
+            self._startup_stage = "terminal_discovery"
+            terminal_path = running_terminal_path(self.args.terminal)
         elif self.args.terminal:
-            kwargs["path"] = self.args.terminal
+            terminal_path = self.args.terminal
         if self.args.login and not self.follow_account:
             kwargs["login"] = int(self.args.login)
             pw = os.environ.get("CONDUIT_MT5_PASSWORD")
@@ -356,10 +346,14 @@ class Sidecar(object):
                 kwargs["password"] = pw
             if self.args.server:
                 kwargs["server"] = self.args.server
-        if not mt5.initialize(**kwargs):
+        self._startup_stage = "initialize"
+        # MetaQuotes documents the optional executable path as positional.
+        path_args = (terminal_path,) if terminal_path else ()
+        if not mt5.initialize(*path_args, **kwargs):
             code, desc = mt5.last_error()
             raise BrokerError(ERR_NOT_INITIALIZED,
                               "initialize() nieudane: %s %s" % (code, desc))
+        self._startup_stage = "account"
         if self.follow_account:
             account = mt5.account_info()
             key = account_key(account)
@@ -367,6 +361,7 @@ class Sidecar(object):
                 self.account_changed = True
                 raise BrokerError(ERR_ACCOUNT_CHANGED, "konto terminala zmienione; wymagana nowa sesja bota")
             self.bound_account = key
+            self._startup_stage = "symbol"
             self.symbol = resolve_gold_symbol(account, {
                 name: mt5.symbol_info(name) for name in ("XAUUSD", "XAUUSD.s")})
             self._ensure_account()
@@ -378,6 +373,7 @@ class Sidecar(object):
                 self.account_changed = True
                 raise BrokerError(ERR_ACCOUNT_CHANGED, "konto zmienione; rejestr potwierdzeń wymaga nowej sesji")
             self.bound_account = key
+        self._startup_stage = "symbol"
         if not mt5.symbol_select(self.symbol, True):
             raise BrokerError(ERR_NOT_INITIALIZED,
                               "symbol %s niedostępny w Podglądzie rynku" % self.symbol)
@@ -485,20 +481,27 @@ class Sidecar(object):
         self.connect()
         try:
             self.init_terminal()
-        except BrokerError as e:
-            # powitanie i tak wysyłamy — Rust ma wiedzieć, że proces żyje,
-            # ale nie może handlować
-            self.send({"ev": "hello", "proto": PROTO_VERSION,
-                       "sidecar": SIDECAR_VERSION, "mt5_version": ""})
-            self.send({"ev": "log", "msg": "BŁĄD STARTU: %s" % e.msg})
-            log("BŁĄD STARTU: %s" % e.msg)
-            time.sleep(2)
+            self._startup_stage = "history_seed"
+            self._seed_seen_deals()
+            ver = mt5.version()
+        except BrokerError as error:
+            self.send({"ev": "startup_error", "stage": self._startup_stage,
+                       "code": error.code, "msg": error.msg[:400]})
+            log("BŁĄD STARTU [%s]: %s" % (self._startup_stage, error.msg))
+            return
+        except Exception as error:
+            # A subprocess/module/native exception is a startup failure too.
+            # Do not leak argument reprs or credentials through generic errors.
+            self.send({"ev": "startup_error", "stage": self._startup_stage,
+                       "code": ERR_EXCEPTION,
+                       "msg": "błąd inicjalizacji sidecara: %s" % type(error).__name__})
+            log(traceback.format_exc())
             return
 
-        ver = mt5.version()
+        self._startup_stage = "ready"
         self.send({"ev": "hello", "proto": PROTO_VERSION, "sidecar": SIDECAR_VERSION,
+                   "ready": True,
                    "mt5_version": ".".join(str(x) for x in ver) if ver else ""})
-        self._seed_seen_deals()
 
         buf = b""
         while self.running:

@@ -36,6 +36,111 @@ const { ENGINE_TEMPLATES } = load('@/i18n/engineTemplates');
 const { presentEngineText } = load('@/i18n/enginePresentation');
 const { tSilnik } = load('@/i18n/silnik');
 
+test('native terminal discovery diagnostics all have reversible presentation translations', () => {
+  // Read production literals without importing Python or inspecting any terminal.
+  const source = readFileSync(resolve(root, '../rust/crates/mt5/sidecar/terminal_discovery.py'), 'utf8');
+  const diagnostics = [...new Set([...source.matchAll(/raise TerminalDiscoveryError\('([^']+)'\)/g)].map(match => match[1]))];
+  assert.equal(diagnostics.length, 11, 'review added or removed native discovery failure modes');
+  for (const raw of diagnostics) {
+    const english = presentEngineText(raw, 'en');
+    assert.notEqual(english, raw, raw);
+    assert.ok(!/[ąćęłńóśźż]/i.test(english), english);
+    assert.equal(presentEngineText(english, 'pl'), raw);
+    i18n.setLanguage('en');
+    assert.equal(tSilnik(raw), english);
+    i18n.setLanguage('pl');
+    assert.equal(tSilnik(english), raw);
+  }
+  assert.equal(presentEngineText('MT5 nie jest uruchomiony w tej sesji Windows; połączenie zostanie ponowione', 'en'),
+    'MT5 is not running in this Windows session; the connection will be retried');
+  assert.equal(presentEngineText('działa więcej niż jeden terminal MT5; wskaż jednoznaczną ścieżkę albo zamknij dodatkową instancję', 'en'),
+    'more than one MT5 terminal is running; specify an unambiguous path or close the extra instance');
+});
+
+test('MT5 retry notification translates the actual nested startup cause while retaining stage and code', () => {
+  const pl = 'Próba 7 nieudana: MT5: start nieudany [terminal_discovery], kod -10001: '
+    + 'nie można odczytać ścieżki terminala w tej sesji Windows; sprawdź uprawnienia MT5 i bota'
+    + '\n\nNajczęstsze przyczyny:\n'
+    + '• terminal MetaTrader 5 nie jest uruchomiony albo nie jest zalogowany,\n'
+    + '• w Pythonie brakuje pakietu MetaTrader5 (pip install MetaTrader5),\n'
+    + '• pole „interpreter Pythona” wskazuje inny Python niż ten z pakietem,\n'
+    + '• w terminalu wyłączony jest handel algorytmiczny.';
+  const en = 'Attempt 7 failed: MT5: startup failed [terminal_discovery], code -10001: '
+    + 'cannot read the terminal path in this Windows session; check MT5 and bot permissions'
+    + '\n\nCommon causes:\n'
+    + '• the MetaTrader 5 terminal is not running or is not logged in,\n'
+    + '• Python is missing the MetaTrader5 package (pip install MetaTrader5),\n'
+    + '• the Python interpreter setting points to a different Python installation than the one containing the package,\n'
+    + '• algorithmic trading is disabled in the terminal.';
+  assert.equal(presentEngineText(pl, 'en'), en);
+  assert.equal(presentEngineText(en, 'pl'), pl);
+  i18n.setLanguage('en'); assert.equal(tSilnik(pl), en);
+  i18n.setLanguage('pl'); assert.equal(tSilnik(en), pl);
+});
+
+test('startup presentation preserves vendor details, paths, symbols, exception types and protection requirements', () => {
+  const vendor = String.raw`IPC initialize failed (os error 5); C:\Synthetic Terminal\terminal64.exe`;
+  for (const [pl, en] of [
+    [`MT5: start nieudany [initialize], kod -10001: initialize() nieudane: -10005 ${vendor}`,
+      `MT5: startup failed [initialize], code -10001: initialize() failed: -10005 ${vendor}`],
+    [`Próba 2 nieudana: MT5: start nieudany [python_spawn], kod -10001: nie udało się uruchomić procesu Pythona: ${vendor}`,
+      `Attempt 2 failed: MT5: startup failed [python_spawn], code -10001: could not start the Python process: ${vendor}`],
+    ['MT5: start nieudany [protocol], kod -10001: wersja protokołu sidecara 3 zamiast 4',
+      'MT5: startup failed [protocol], code -10001: sidecar protocol version 3 instead of 4'],
+    ['MT5: start nieudany [symbol], kod -10001: symbol XAUUSD.s niedostępny w Podglądzie rynku',
+      'MT5: startup failed [symbol], code -10001: symbol XAUUSD.s is unavailable in Market Watch'],
+    ['BŁĄD STARTU [history_seed]: błąd inicjalizacji sidecara: OSError',
+      'STARTUP ERROR [history_seed]: sidecar initialization error: OSError'],
+    ['follow: terminal jest na rachunku REAL/CONTEST; handel zablokowany. DEMO jest domyślne; REAL wymaga jawnego mt5_allow_real_account=true',
+      'follow: the terminal is on a REAL/CONTEST account; trading is blocked. DEMO is the default; REAL requires explicit mt5_allow_real_account=true'],
+    ['nie udało się pobrać parametrów XAUUSD.s: terminal nie ma potwierdzonego zalogowanego konta',
+      'could not retrieve parameters for XAUUSD.s: the terminal has no confirmed logged-in account'],
+  ]) {
+    assert.equal(presentEngineText(pl, 'en'), en);
+    assert.equal(presentEngineText(en, 'pl'), pl);
+  }
+  const unknown = 'MT5_VENDOR_FACT "XAUUSD.s" ticket=9007199254740993 code=-10005';
+  assert.equal(presentEngineText(`MT5: start nieudany [vendor_stage], kod -10005: ${unknown}`, 'en'),
+    `MT5: startup failed [vendor_stage], code -10005: ${unknown}`);
+  const body = 'MT5 nie jest uruchomiony w tej sesji Windows; połączenie zostanie ponowione';
+  assert.equal(presentEngineText(`Sygnał odrzucony\nTREŚĆ:\n${body}`, 'en'),
+    `Signal rejected\nSOURCE MESSAGE:\n${body}`, 'source messages must not be translated as system diagnostics');
+});
+
+test('early Python exit keeps the bounded stderr traceback while translating the known package warning', () => {
+  const traceback = String.raw` | Traceback (most recent call last): | File "C:\Synthetic Runtime\mt5_sidecar.py", line 69 | ModuleNotFoundError: No module named 'MetaTrader5'`;
+  const pl = 'Próba 3 nieudana: MT5: start nieudany [python_exit], kod 1: '
+    + 'proces Pythona zakończył się przed połączeniem z botem; diagnostyka: '
+    + 'BRAK PAKIETU MetaTrader5. Zainstaluj: pip install MetaTrader5 | '
+    + 'Uwaga: pakiet jest 64-bitowy i TYLKO pod Windows.' + traceback;
+  const en = 'Attempt 3 failed: MT5: startup failed [python_exit], code 1: '
+    + 'the Python process exited before connecting to the bot; diagnostics: '
+    + 'MetaTrader5 PACKAGE MISSING. Install: pip install MetaTrader5 | '
+    + 'Note: the package is 64-bit and Windows-only.' + traceback;
+  assert.equal(presentEngineText(pl, 'en'), en);
+  assert.equal(presentEngineText(en, 'pl'), pl);
+  for (const language of ['en', 'pl']) {
+    i18n.setLanguage(language);
+    assert.equal(tSilnik(pl), language === 'en' ? en : pl);
+  }
+  const missingStderr = 'MT5: start nieudany [python_exit], kod 1: proces Pythona zakończył się przed połączeniem z botem; diagnostyka: ';
+  assert.equal(presentEngineText(missingStderr, 'en'),
+    'MT5: startup failed [python_exit], code 1: the Python process exited before connecting to the bot; diagnostics: ',
+    'an empty stderr does not invent an import failure');
+});
+
+test('startup transport failure literals are covered in the shared presentation catalog', () => {
+  const source = readFileSync(resolve(root, '../rust/crates/mt5/src/transport.rs'), 'utf8').split('#[cfg(test)]')[0];
+  const messages = [...source.matchAll(/msg:\s*(?:format!\()?"([^"\n]+)"/g)].map(match => match[1]);
+  assert.ok(messages.length >= 8, 'exercise production startup failure details');
+  for (const message of messages) {
+    const raw = message.replace(/\{[^{}]*\}/g, '7301');
+    const english = presentEngineText(raw, 'en');
+    assert.notEqual(english, raw, raw);
+    assert.equal(presentEngineText(english, 'pl'), raw);
+  }
+});
+
 test('terminal history category and progress change PL/EN without raw keys', () => {
   i18n.setLanguage('en');
   assert.equal(i18n.t('logs.group.broker'), 'Broker account');

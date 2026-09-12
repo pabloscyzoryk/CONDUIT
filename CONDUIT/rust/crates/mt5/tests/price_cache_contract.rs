@@ -27,7 +27,7 @@ impl Fixture {
                     Err(error) => panic!("offline fixture connection: {error}"),
                 }
             };
-            writeln!(stream, "{}", json!({"ev":"hello","proto":1,"sidecar":"FAKE-PRICE-CACHE"})).unwrap();
+            writeln!(stream, "{}", json!({"ev":"hello","proto":1,"ready":true,"sidecar":"FAKE-PRICE-CACHE"})).unwrap();
             stream.flush().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             loop {

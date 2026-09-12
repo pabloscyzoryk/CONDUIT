@@ -35,7 +35,7 @@ impl Fixture{
             let mut stream=loop{match TcpStream::connect(("127.0.0.1",port)){
                 Ok(s)=>break s,Err(_)if Instant::now()<deadline=>thread::sleep(Duration::from_millis(5)),
                 Err(e)=>panic!("fake connector: {e}"),}};
-            write(&mut stream,&json!({"ev":"hello","proto":1,"sidecar":"FAKE-PYTHON-EXACT-ACK"}));
+            write(&mut stream,&json!({"ev":"hello","proto":1,"ready":true,"sidecar":"FAKE-PYTHON-EXACT-ACK"}));
             let mut reader=BufReader::new(stream.try_clone().unwrap());let mut line=String::new();
             let mut live=false;let mut closed=false;let mut comment=String::new();
             loop{

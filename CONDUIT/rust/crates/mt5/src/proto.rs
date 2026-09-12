@@ -141,6 +141,18 @@ pub struct Hello {
     pub sidecar: String,
     #[serde(default)]
     pub mt5_version: String,
+    /// New sidecars certify successful initialization explicitly. Legacy v1
+    /// is accepted only with a nonempty terminal version, never a failed hello.
+    #[serde(default)]
+    pub ready: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, thiserror::Error)]
+#[error("MT5: start nieudany [{stage}], kod {code}: {msg}")]
+pub struct StartupFailure {
+    pub stage: String,
+    pub code: i64,
+    pub msg: String,
 }
 
 /// Parametry instrumentu — WSZYSTKIE z serwera, żadnej wartości zaszytej w kodzie.

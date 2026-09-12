@@ -221,15 +221,12 @@ class Exporter:
 
 def running_path(path):
     """A read-only presence check, not a guarantee against close/initialize races."""
-    if os.name != "nt":
-        raise HistoryFailure("running_terminal_check_requires_windows")
-    env = safe_environment()
-    env["CONDUIT_HISTORY_TERMINAL"] = path
-    script = "@(Get-Process -Name terminal64 -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $env:CONDUIT_HISTORY_TERMINAL }).Count -gt 0"
-    result = subprocess.check_output(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                                     env=env, creationflags=subprocess.CREATE_NO_WINDOW, timeout=5)
-    if result.strip().lower() != b"true":
-        raise HistoryFailure("explicit_terminal_not_running")
+    from terminal_discovery import TerminalDiscoveryError, running_terminal_path
+    try:
+        running_terminal_path(path)
+    except TerminalDiscoveryError:
+        # Worker status intentionally excludes local paths and account data.
+        raise HistoryFailure("explicit_terminal_not_running") from None
 
 
 def safe_environment():
@@ -254,7 +251,7 @@ def worker_main(directory):
         running_path(request["source"]["terminal_path"])
         # Explicit attach only; no login/password/server or saved profile lookup.
         # MT5 itself can race a terminal closing after the presence check.
-        if not api.initialize(path=request["source"]["terminal_path"], timeout=5000):
+        if not api.initialize(request["source"]["terminal_path"], timeout=5000):
             raise HistoryFailure("readonly_attach_failed")
         exporter.run()
     except Exception as error:

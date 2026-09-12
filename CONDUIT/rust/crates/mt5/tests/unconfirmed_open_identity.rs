@@ -14,6 +14,7 @@ static PORT_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Default)]
 struct State {
     positions: Vec<Value>, reject: bool, valid_ack: bool, disconnect: bool,
+    post_send_not_initialized: bool,
     fail_positions: bool, fail_orders: bool, partial: Option<f64>, opens: usize,
 }
 struct Fixture {
@@ -41,7 +42,7 @@ impl Fixture {
             }};
             stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
             stream.set_nodelay(true).unwrap();
-            send(&mut stream, json!({"ev":"hello","proto":1,"sidecar":"SYNTHETIC-OPEN-IDENTITY"}));
+            send(&mut stream, json!({"ev":"hello","proto":1,"ready":true,"sidecar":"SYNTHETIC-OPEN-IDENTITY"}));
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             loop {
                 let mut line = String::new();
@@ -84,6 +85,11 @@ impl Fixture {
                             "tp":args["tp"].as_f64().unwrap_or(0.0),"symbol":"XAUUSD",
                             "magic":777,"comment":args["comment"]}));
                         if s.disconnect { break; }
+                        if s.post_send_not_initialized {
+                            send(&mut stream, json!({"id":req["id"],"ok":false,
+                                "error":{"code":-1,"msg":"synthetic account missing after send"}}));
+                            continue;
+                        }
                         json!({"retcode":if volume < args["volume"].as_f64().unwrap() {10010} else {10009},
                             "order":ticket,"deal":ticket+2000,"position":if s.valid_ack {ticket} else {0},
                             "position_identifier":if s.valid_ack {ticket+1000} else {0},
@@ -130,6 +136,22 @@ fn incomplete_ack_then_unique_snapshot_confirms_without_rpc_or_resend() {
     f.bridge.refresh_state().unwrap(); let count = f.requests.load(Ordering::SeqCst);
     for _ in 0..3 { assert_eq!(f.bridge.confirmed_open(&intent), Some(TICKET)); }
     assert_eq!(f.requests.load(Ordering::SeqCst), count);
+    assert_eq!(f.state.lock().unwrap().opens, 1);
+}
+
+#[test]
+fn not_initialized_after_send_retains_unknown_outcome_and_exact_adoption() {
+    let mut f = Fixture::new();
+    f.state.lock().unwrap().post_send_not_initialized = true;
+    let intent = f.unknown();
+    let evidence = f.bridge.operation_evidence().unwrap();
+    assert_eq!(evidence.outcome, conduit_mt5::operation_evidence::Outcome::ConfirmationPending);
+    assert_eq!(evidence.attempts[0].status, "transport_error");
+    assert_eq!(evidence.attempts[0].retcode, Some(-1));
+    assert!(f.bridge.open_market(request()).is_err());
+    assert_eq!(f.state.lock().unwrap().opens, 1);
+    f.bridge.refresh_state().unwrap();
+    assert_eq!(f.bridge.confirmed_open(&intent), Some(TICKET));
     assert_eq!(f.state.lock().unwrap().opens, 1);
 }
 

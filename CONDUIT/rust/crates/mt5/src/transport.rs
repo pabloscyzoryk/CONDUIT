@@ -26,7 +26,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
-use crate::proto::{self, Frame, Hello, ProtoError, RawClosed, RawTick, Request, WireError};
+use crate::proto::{self, Frame, Hello, ProtoError, RawClosed, RawTick, Request, StartupFailure, WireError};
 
 /// Ile kwotowań trzymamy, zanim zaczniemy gubić najstarsze.
 const TICK_BUFFER: usize = 4096;
@@ -113,6 +113,8 @@ impl Default for SidecarConfig {
 pub enum CallError {
     #[error("sidecar niepodłączony")]
     Disconnected,
+    #[error(transparent)]
+    Startup(#[from] StartupFailure),
     #[error("przekroczony czas odpowiedzi ({0:?})")]
     Timeout(Duration),
     #[error("błąd protokołu: {0}")]
@@ -134,7 +136,7 @@ impl CallError {
 }
 
 struct Pending {
-    tx: mpsc::Sender<Result<Value, WireError>>,
+    tx: mpsc::Sender<Result<Value, CallError>>,
     /// pokolenie połączenia — odpowiedź ze starego połączenia jest bez wartości
     gen: u64,
 }
@@ -152,6 +154,10 @@ struct Shared {
     /// Panel czyta obie i pokazuje je z etykietą źródła.
     foreign_closed: Mutex<Vec<RawClosed>>,
     hello: Mutex<Option<Hello>>,
+    startup_failure: Mutex<Option<StartupFailure>>,
+    startup_attempt_failed: AtomicBool,
+    startup_stderr: Mutex<VecDeque<String>>,
+    startup_stderr_done: AtomicBool,
     next_id: AtomicU64,
     generation: AtomicU64,
     execution_generation: AtomicU64,
@@ -169,15 +175,21 @@ struct Shared {
 }
 
 impl Shared {
+    fn fail_startup(&self, failure: StartupFailure) {
+        *self.startup_failure.lock() = Some(failure);
+        self.startup_attempt_failed.store(true, Ordering::Release);
+    }
+
+    fn startup_stderr_summary(&self) -> String {
+        self.startup_stderr.lock().iter().cloned().collect::<Vec<_>>().join(" | ")
+    }
+
     /// Zrywa wszystkie żądania w locie. Wołane przy padzie połączenia.
     fn fail_all_pending(&self) {
         let mut p = self.pending.lock();
         for (_, pend) in p.drain() {
             // odbiorcy mogło już nie być (timeout) — to nie jest błąd
-            let _ = pend.tx.send(Err(WireError {
-                code: proto::local_code::NOT_INITIALIZED,
-                msg: "połączenie z sidecarem zerwane".into(),
-            }));
+            let _ = pend.tx.send(Err(CallError::Disconnected));
         }
     }
 
@@ -212,6 +224,10 @@ impl Transport {
             closed: Mutex::new(Vec::new()),
             foreign_closed: Mutex::new(Vec::new()),
             hello: Mutex::new(None),
+            startup_failure: Mutex::new(None),
+            startup_attempt_failed: AtomicBool::new(false),
+            startup_stderr: Mutex::new(VecDeque::new()),
+            startup_stderr_done: AtomicBool::new(true),
             next_id: AtomicU64::new(1),
             generation: AtomicU64::new(0),
             execution_generation: AtomicU64::new(0),
@@ -236,6 +252,12 @@ impl Transport {
         while Instant::now() < deadline {
             if sh.connected.load(Ordering::Acquire) {
                 return Ok(Transport { sh, sup: Some(sup) });
+            }
+            let failure = sh.startup_failure.lock().clone();
+            if let Some(failure) = failure {
+                let mut transport = Transport { sh, sup: Some(sup) };
+                transport.shutdown();
+                return Err(failure.into());
             }
             thread::sleep(Duration::from_millis(25));
         }
@@ -304,14 +326,26 @@ impl Transport {
 
     /// Czeka (do `timeout`) aż sidecar się podłączy.
     pub fn wait_connected(&self, timeout: Duration) -> bool {
+        self.wait_ready(timeout).unwrap_or(false)
+    }
+
+    /// Initialization failures retain their cause instead of becoming a generic
+    /// socket disconnect. Ordinary transport loss remains a separate condition.
+    pub fn wait_ready(&self, timeout: Duration) -> Result<bool, CallError> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if self.is_connected() {
-                return true;
+                return Ok(true);
+            }
+            if let Some(failure) = self.sh.startup_failure.lock().clone() {
+                return Err(CallError::Startup(failure));
             }
             thread::sleep(Duration::from_millis(20));
         }
-        self.is_connected()
+        if let Some(failure) = self.sh.startup_failure.lock().clone() {
+            return Err(CallError::Startup(failure));
+        }
+        Ok(self.is_connected())
     }
 
     /// Synchroniczne żądanie/odpowiedź.
@@ -368,7 +402,11 @@ impl Transport {
     /// Prosi sidecar o zamknięcie i zatrzymuje nadzór.
     pub fn shutdown(&mut self) {
         self.sh.stopping.store(true, Ordering::Release);
-        let _ = self.call("shutdown", Value::Null);
+        // An initializing sidecar cannot read RPCs yet. Interrupt its socket
+        // directly rather than waiting a request timeout during cancellation.
+        if self.is_connected() {
+            let _ = self.call("shutdown", Value::Null);
+        }
         if let Some(s) = self.sh.writer.lock().as_ref() {
             let _ = s.shutdown(Shutdown::Both);
         }
@@ -415,6 +453,12 @@ fn wywolaj(sh: &Arc<Shared>, cmd: &'static str, mut args: Value) -> Result<Value
     if cmd != "shutdown" && sh.account_changed.load(Ordering::Acquire) {
         return Err(CallError::Disconnected);
     }
+    if !sh.connected.load(Ordering::Acquire) {
+        if let Some(failure) = sh.startup_failure.lock().clone() {
+            return Err(CallError::Startup(failure));
+        }
+        return Err(CallError::Disconnected);
+    }
     if let Some(account) = sh.bound_account.lock().clone() {
         if !args.is_object() {
             args = serde_json::json!({});
@@ -447,15 +491,14 @@ fn wywolaj(sh: &Arc<Shared>, cmd: &'static str, mut args: Value) -> Result<Value
 
     match rx.recv_timeout(sh.cfg.request_timeout) {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) if e.code == -6 => {
+        Ok(Err(CallError::Broker(e))) if e.code == -6 => {
             sh.account_changed.store(true, Ordering::Release);
             sh.ticks.lock().clear();
             sh.closed.lock().clear();
             sh.foreign_closed.lock().clear();
             Err(CallError::Broker(e))
         }
-        Ok(Err(e)) if e.code == proto::local_code::NOT_INITIALIZED => Err(CallError::Disconnected),
-        Ok(Err(e)) => Err(CallError::Broker(e)),
+        Ok(Err(e)) => Err(e),
         Err(RecvTimeoutError::Timeout) => {
             sh.pending.lock().remove(&id);
             Err(CallError::Timeout(sh.cfg.request_timeout))
@@ -487,10 +530,13 @@ fn supervise(sh: Arc<Shared>, listener: TcpListener, port: u16) {
 
     while !sh.stopping.load(Ordering::Acquire) {
         let mut child = if sh.cfg.autostart {
-            match spawn_sidecar(&sh.cfg, port) {
+            match spawn_sidecar(&sh, port) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     error!(%e, "MT5: nie udało się uruchomić sidecara");
+                    sh.fail_startup(StartupFailure { stage: "python_spawn".into(),
+                        code: proto::local_code::NOT_INITIALIZED,
+                        msg: format!("nie udało się uruchomić procesu Pythona: {e}") });
                     thread::sleep(sh.cfg.restart_backoff);
                     continue;
                 }
@@ -503,7 +549,7 @@ fn supervise(sh: Arc<Shared>, listener: TcpListener, port: u16) {
             None
         };
 
-        match accept_with_timeout(&listener, sh.cfg.connect_timeout, &sh.stopping) {
+        match accept_with_timeout(&listener, sh.cfg.connect_timeout, &sh.stopping, child.as_mut(), &sh) {
             Some(stream) => {
                 run_session(&sh, stream);
             }
@@ -533,16 +579,32 @@ fn supervise(sh: Arc<Shared>, listener: TcpListener, port: u16) {
     debug!("MT5: nadzór zakończony");
 }
 
-fn spawn_sidecar(cfg: &SidecarConfig, port: u16) -> std::io::Result<Child> {
-    let mut c = sidecar_command(cfg, port);
+fn spawn_sidecar(sh: &Arc<Shared>, port: u16) -> std::io::Result<Child> {
+    sh.startup_stderr.lock().clear();
+    let mut c = sidecar_command(&sh.cfg, port);
     let mut child = c.spawn()?;
     if let Some(err) = child.stderr.take() {
+        sh.startup_stderr_done.store(false, Ordering::Release);
+        let state = Arc::clone(sh);
         thread::Builder::new()
             .name("mt5-sidecar-log".into())
             .spawn(move || {
                 for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    warn!(target: "mt5_sidecar", "{line}");
+                    let mut safe = line;
+                    for secret in [state.cfg.password.as_deref(), state.cfg.server.as_deref()] {
+                        if let Some(secret) = secret.filter(|s| !s.is_empty()) {
+                            safe = safe.replace(secret, "[redacted]");
+                        }
+                    }
+                    if let Some(login) = state.cfg.login { safe = safe.replace(&login.to_string(), "[redacted]"); }
+                    warn!(target: "mt5_sidecar", "{safe}");
+                    if !state.connected.load(Ordering::Acquire) {
+                        let mut tail = state.startup_stderr.lock();
+                        if tail.len() == 8 { tail.pop_front(); }
+                        tail.push_back(safe.chars().take(400).collect());
+                    }
                 }
+                state.startup_stderr_done.store(true, Ordering::Release);
             })
             .ok();
     }
@@ -606,11 +668,36 @@ fn accept_with_timeout(
     listener: &TcpListener,
     timeout: Duration,
     stopping: &AtomicBool,
+    mut child: Option<&mut Child>,
+    sh: &Arc<Shared>,
 ) -> Option<TcpStream> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if stopping.load(Ordering::Acquire) {
             return None;
+        }
+        if let Some(child) = child.as_mut() {
+            if let Ok(Some(status)) = child.try_wait() {
+                // The pipe reader may finish just after process exit. Bound
+                // this drain wait; diagnostics must not delay recovery forever.
+                let drain_deadline = Instant::now() + Duration::from_millis(200);
+                while !sh.startup_stderr_done.load(Ordering::Acquire) && Instant::now() < drain_deadline {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                // A fast startup failure can send its exact error and exit
+                // before the supervisor accepts TCP. Drain that queued socket
+                // first; exit status must not overwrite the structured cause.
+                if let Ok((stream, address)) = listener.accept() {
+                    if address.ip().is_loopback() {
+                        return Some(stream);
+                    }
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+                sh.fail_startup(StartupFailure { stage: "python_exit".into(),
+                    code: status.code().map(i64::from).unwrap_or(-1),
+                    msg: format!("proces Pythona zakończył się przed połączeniem z botem; diagnostyka: {}", sh.startup_stderr_summary()) });
+                return None;
+            }
         }
         match listener.accept() {
             Ok((s, addr)) => {
@@ -643,8 +730,10 @@ fn run_session(sh: &Arc<Shared>, stream: TcpStream) {
         return;
     }
     let _ = stream.set_nodelay(true);
-    // sidecar wysyła keepalive co sekundę; dłuższa cisza = zawieszony terminal
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    // Native initialize may take up to 60 s and the Python loop cannot send
+    // keepalives while it runs. Apply the ready keepalive deadline only AFTER
+    // initialization; pre-ready progress cannot extend this absolute deadline.
+    let startup_deadline = Instant::now() + sh.cfg.connect_timeout;
 
     let wr = match stream.try_clone() {
         Ok(w) => w,
@@ -660,20 +749,44 @@ fn run_session(sh: &Arc<Shared>, stream: TcpStream) {
     static NEXT_EXECUTION_GENERATION: AtomicU64 = AtomicU64::new(1);
     sh.execution_generation.store(NEXT_EXECUTION_GENERATION.fetch_add(1, Ordering::AcqRel), Ordering::Release);
     *sh.writer.lock() = Some(wr);
-    sh.connected.store(true, Ordering::Release);
-    info!("MT5: sidecar podłączony");
+    *sh.hello.lock() = None;
+    sh.startup_attempt_failed.store(false, Ordering::Release);
+    sh.connected.store(false, Ordering::Release);
+    info!("MT5: socket sidecara podłączony, oczekiwanie na gotowość terminala");
 
     let mut rdr = BufReader::new(stream);
     let mut line = String::new();
     loop {
         line.clear();
+        let timeout = if sh.connected.load(Ordering::Acquire) {
+            Duration::from_secs(15)
+        } else {
+            startup_deadline.saturating_duration_since(Instant::now())
+        };
+        if timeout.is_zero() {
+            sh.fail_startup(StartupFailure { stage: "ready_timeout".into(),
+                code: proto::local_code::NOT_INITIALIZED,
+                msg: "brak potwierdzenia gotowości terminala w czasie inicjalizacji".into() });
+            break;
+        }
+        let _ = rdr.get_ref().set_read_timeout(Some(timeout));
         match rdr.read_line(&mut line) {
             Ok(0) => {
+                if !sh.connected.load(Ordering::Acquire) && sh.startup_failure.lock().is_none() {
+                    sh.fail_startup(StartupFailure { stage: "before_ready".into(),
+                        code: proto::local_code::NOT_INITIALIZED,
+                        msg: "sidecar zakończył połączenie przed potwierdzeniem gotowości terminala".into() });
+                }
                 warn!("MT5: sidecar zamknął połączenie");
                 break;
             }
             Ok(_) => {}
             Err(e) => {
+                if !sh.connected.load(Ordering::Acquire) && sh.startup_failure.lock().is_none() {
+                    sh.fail_startup(StartupFailure { stage: "ready_wait".into(),
+                        code: proto::local_code::NOT_INITIALIZED,
+                        msg: format!("oczekiwanie na gotowość terminala przerwane: {e}") });
+                }
                 warn!(%e, "MT5: odczyt z sidecara przerwany");
                 break;
             }
@@ -684,7 +797,7 @@ fn run_session(sh: &Arc<Shared>, stream: TcpStream) {
                 let gen = sh.generation.load(Ordering::Acquire);
                 if let Some(p) = sh.pending.lock().remove(&id) {
                     if p.gen == gen {
-                        let _ = p.tx.send(result);
+                        let _ = p.tx.send(result.map_err(CallError::Broker));
                     } else {
                         debug!(id, "MT5: odpowiedź ze starego połączenia — pominięta");
                     }
@@ -698,13 +811,19 @@ fn run_session(sh: &Arc<Shared>, stream: TcpStream) {
                 error!(%e, "MT5: ramka nie do sparsowania");
             }
         }
-        if sh.stopping.load(Ordering::Acquire) {
+        if sh.stopping.load(Ordering::Acquire)
+            || sh.startup_attempt_failed.load(Ordering::Acquire) {
             break;
         }
     }
 }
 
 fn handle_event(sh: &Arc<Shared>, kind: &str, body: Value) {
+    // No data or execution acknowledgements qualify a connection before ready.
+    if !sh.connected.load(Ordering::Acquire)
+        && matches!(kind, "tick" | "closed" | "closed_foreign") {
+        return;
+    }
     if (sh.cfg.follow_terminal_account || sh.cfg.close_receipt_reconcile)
         && matches!(kind, "tick" | "closed" | "closed_foreign") {
         let bound = sh.bound_account.lock().clone();
@@ -754,11 +873,34 @@ fn handle_event(sh: &Arc<Shared>, kind: &str, body: Value) {
                         want = proto::PROTO_VERSION,
                         "MT5: ROZJAZD WERSJI PROTOKOŁU — sidecar i bot nie pasują do siebie"
                     );
+                    sh.fail_startup(StartupFailure { stage: "protocol".into(),
+                        code: proto::local_code::NOT_INITIALIZED,
+                        msg: format!("wersja protokołu sidecara {} zamiast {}", h.proto, proto::PROTO_VERSION) });
+                    return;
+                }
+                if !h.ready.unwrap_or(!h.mt5_version.is_empty()) {
+                    sh.fail_startup(StartupFailure { stage: "legacy_hello".into(),
+                        code: proto::local_code::NOT_INITIALIZED,
+                        msg: "sidecar nie potwierdził gotowości MT5; starszy protokół nie podał szczegółów startu".into() });
+                    return;
                 }
                 info!(sidecar = %h.sidecar, mt5 = %h.mt5_version, "MT5: powitanie sidecara");
                 *sh.hello.lock() = Some(h);
+                *sh.startup_failure.lock() = None;
+                sh.connected.store(true, Ordering::Release);
             }
             Err(e) => warn!(%e, "MT5: złe powitanie"),
+        },
+        "startup_error" => match serde_json::from_value::<StartupFailure>(body) {
+            Ok(failure) => {
+                sh.connected.store(false, Ordering::Release);
+                sh.fail_startup(failure);
+            }
+            Err(_) => {
+                sh.fail_startup(StartupFailure { stage: "startup_error_decode".into(),
+                    code: proto::local_code::NOT_INITIALIZED,
+                    msg: "nieczytelny opis błędu inicjalizacji sidecara".into() });
+            }
         },
         "log" => {
             let msg = body.get("msg").and_then(|x| x.as_str()).unwrap_or("");
@@ -796,6 +938,7 @@ mod tests {
         let cfg = SidecarConfig { follow_terminal_account: true, autostart: false,
             connect_timeout: Duration::from_millis(1), restart_backoff: Duration::from_millis(1), ..Default::default() };
         let tr = Transport::start(cfg).unwrap();
+        tr.sh.connected.store(true, Ordering::Release); // fixture starts after ready handshake
         tr.bind_account(42, "demo-server", 0);
         let identity = serde_json::json!({"login":42,"server":"demo-server","trade_mode":0});
         let mut tick = serde_json::json!({"ts":1000,"bid":2000.0,"ask":2000.2,"account":identity});

@@ -325,7 +325,7 @@ impl Mt5Bridge {
         // wyjmujemy PRZED `start`, bo konfiguracja jest tam przenoszona
         let expected_stops = cfg.expected_stops_level_price;
         let tr = Transport::start(cfg)?;
-        if !tr.wait_connected(Duration::from_secs(120)) {
+        if !tr.wait_ready(Duration::from_secs(120))? {
             anyhow::bail!("sidecar MT5 nie podłączył się w ciągu 120 s");
         }
 
@@ -1673,7 +1673,10 @@ impl Mt5Bridge {
                     self.operation_response("response_received", Some(&v), v.get("retcode").and_then(Value::as_i64), Outcome::Acknowledged);
                     return Ok(v);
                 }
-                Err(CallError::Broker(e)) => {
+                // NOT_INITIALIZED can be raised by the sidecar's account
+                // recheck AFTER order_send. Preserve the old unknown-outcome
+                // barrier; retaining its diagnostic is not proof of refusal.
+                Err(CallError::Broker(e)) if e.code != crate::proto::local_code::NOT_INITIALIZED => {
                     self.operation_response("remote_error", None, Some(e.code as i64), Outcome::RemoteRefusal);
                     if errors::is_no_op(e.code) {
                         return Ok(Value::Null);
@@ -1719,7 +1722,7 @@ impl Mt5Bridge {
                     return Err(BrokerError::Rejected);
                 }
                 Err(e) => {
-                    self.operation_response("transport_error", None, None, Outcome::TransportUnknown);
+                    self.operation_response("transport_error", None, e.retcode(), Outcome::TransportUnknown);
                     self.last_trade_outcome_unknown = true;
                     self.send_failures += 1;
                     if self.tr.config().close_receipt_reconcile

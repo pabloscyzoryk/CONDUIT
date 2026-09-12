@@ -49,7 +49,7 @@ impl Fixture {
             }};
             stream.set_nodelay(true).unwrap();
             stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-            send(&mut stream, &json!({"ev":"hello","proto":1,"sidecar":"SYNTHETIC-G4-CANCEL-UNKNOWN"}));
+            send(&mut stream, &json!({"ev":"hello","proto":1,"ready":true,"sidecar":"SYNTHETIC-G4-CANCEL-UNKNOWN"}));
             let mut reader = BufReader::new(stream.try_clone().unwrap()); let mut line=String::new();
             let mut ts=T0; let mut bid=if side==Side::Buy {4012.0}else{3988.0};
             let mut orders=Vec::<Value>::new(); let mut history=Vec::<Value>::new();
